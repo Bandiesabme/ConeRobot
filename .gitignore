@@ -1,0 +1,20 @@
+# ROS 2 Build Artifacts
+build/
+install/
+log/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+
+# Environment / IDEs
+.venv/
+env/
+venv/
+.vscode/
+.idea/
+.DS_Store
+*.swp
