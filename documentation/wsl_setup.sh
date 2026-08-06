@@ -1,34 +1,35 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # ROS 2 WSL 2 Ubuntu Setup Script (For Windows Laptop)
-# Supports Ubuntu 24.04 (Jazzy) and Ubuntu 22.04 (Humble)
+# Supports Ubuntu 26.04 (Resolute), 24.04 (Noble), and 22.04 (Jammy)
 # ==============================================================================
 
 set -e
 
 echo "=== Detecting Ubuntu Version in WSL ==="
-UBUNTU_CODENAME=$(lsb_release -cs)
-echo "Detected Ubuntu Codename: $UBUNTU_CODENAME"
+DETECTED_CODENAME=$(lsb_release -cs 2>/dev/null || echo "unknown")
+echo "Detected Ubuntu Codename: $DETECTED_CODENAME"
 
-if [ "$UBUNTU_CODENAME" = "noble" ]; then
-    ROS_DISTRO="jazzy"
-elif [ "$UBUNTU_CODENAME" = "jammy" ]; then
+if [ "$DETECTED_CODENAME" = "jammy" ]; then
     ROS_DISTRO="humble"
+    APT_CODENAME="jammy"
 else
-    echo "Unsupported Ubuntu version ($UBUNTU_CODENAME). Recommended: Ubuntu 24.04 (noble) or 22.04 (jammy)."
-    exit 1
+    # Default for Ubuntu 24.04 (noble), 26.04 (resolute), or rolling builds
+    ROS_DISTRO="jazzy"
+    APT_CODENAME="noble"
+    echo "Mapping Ubuntu '$DETECTED_CODENAME' to ROS 2 '$ROS_DISTRO' (APT suite: $APT_CODENAME)"
 fi
 
 echo "=== Installing ROS 2 $ROS_DISTRO ==="
 
 sudo apt update && sudo apt install -y software-properties-common curl gnupg lsb-release ca-certificates
-sudo add-apt-repository universe -y
+sudo add-apt-repository universe -y || true
 
 # Add ROS 2 GPG Key
 sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 
-# Add ROS 2 Repository
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $UBUNTU_CODENAME main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+# Add ROS 2 Repository using compatible APT suite (noble/jammy)
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $APT_CODENAME main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
 
 sudo apt update
 sudo apt install -y ros-${ROS_DISTRO}-ros-base python3-colcon-common-extensions python3-rosdep
