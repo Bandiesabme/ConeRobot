@@ -1,0 +1,41 @@
+# ==============================================================================
+# CONE ROBOT MASTER CONFIGURATION FILE
+# All hardware pins, robot dimensions, node parameters, and limits live here.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Raspberry Pi 5 Cytron MDD10 Rev 2.0 Motor Driver Settings
+# ------------------------------------------------------------------------------
+mdd10_motor_controller:
+  ros__parameters:
+    # --- GPIO Pin Mapping (Raspberry Pi 5) ---
+    pwm1_pin: 12   # Left Motor Speed PWM (GPIO 12 / Pin 32)
+    dir1_pin: 24   # Left Motor Direction (GPIO 24 / Pin 18)
+    pwm2_pin: 13   # Right Motor Speed PWM (GPIO 13 / Pin 33)
+    dir2_pin: 25   # Right Motor Direction (GPIO 25 / Pin 22)
+
+    # --- Physical Dimensions & Hardware Limits ---
+    wheel_track: 0.20          # Distance between left & right wheels (meters)
+    max_linear_speed: 1.0      # Maximum forward/reverse speed (m/s)
+    max_angular_speed: 3.0     # Maximum turning speed (rad/s)
+    cmd_timeout: 0.5           # Safety timeout (seconds)
+    mock_hardware: false       # Set true for simulation / laptop dry-run
+
+# ------------------------------------------------------------------------------
+# 2. Teleop Keyboard Settings (Laptop)
+# ------------------------------------------------------------------------------
+teleop_keyboard:
+  ros__parameters:
+    default_linear_speed: 0.2   # Initial linear speed (m/s)
+    default_angular_speed: 0.5  # Initial turning speed (rad/s)
+    linear_step: 0.05           # Speed adjustment step size
+    angular_step: 0.1           # Turn adjustment step size
+
+# ------------------------------------------------------------------------------
+# 3. Vision & Autonomous Control Settings (Future Expansion)
+# ------------------------------------------------------------------------------
+cone_detector:
+  ros__parameters:
+    camera_topic: "/camera/image_raw"
+    target_cone_color: "orange"
+    confidence_threshold: 0.6
