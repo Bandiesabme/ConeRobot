@@ -14,11 +14,8 @@ sudo apt update && sudo apt upgrade -y
 # Install essential helper utilities for keys, certificates, and software management
 sudo apt install -y software-properties-common curl gnupg lsb-release ca-certificates
 
-# Enable the Ubuntu Universe repository (contains community dependencies for ROS 2)
-sudo add-apt-repository universe
-
-# Fix dependency indices by enabling noble-updates repository
-sudo sed -i 's/Suites: noble/Suites: noble noble-updates noble-security/' /etc/apt/sources.list.d/ubuntu.sources
+# Enable universe repository
+sudo add-apt-repository universe -y
 
 # Run a full distribution upgrade to update system libraries
 sudo apt update
