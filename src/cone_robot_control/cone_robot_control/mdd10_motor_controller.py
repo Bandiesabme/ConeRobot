@@ -57,6 +57,7 @@ class MDD10MotorController(Node):
         self.mock_hardware = self.get_parameter('mock_hardware').value or not HAS_GPIO
 
         self.last_cmd_time = self.get_clock().now()
+        self._last_mock_log = None
 
         # --- Hardware Initialization ---
         if self.mock_hardware:
@@ -98,6 +99,8 @@ class MDD10MotorController(Node):
         linear_x = msg.linear.x
         angular_z = msg.angular.z
 
+        self.get_logger().info(f"Received /cmd_vel -> Linear: {linear_x:.2f} m/s, Angular: {angular_z:.2f} rad/s")
+
         # Differential Drive Kinematics (Tank Steering)
         # Left speed = v - (w * L / 2)
         # Right speed = v + (w * L / 2)
@@ -125,10 +128,14 @@ class MDD10MotorController(Node):
         speed_right_val = abs(right_duty)
 
         if self.mock_hardware:
-            self.get_logger().debug(
-                f"[MOCK MOTOR] Left: DIR={'FWD' if dir_left_val else 'REV'}, Speed={speed_left_val:.2f} | "
-                f"Right: DIR={'FWD' if dir_right_val else 'REV'}, Speed={speed_right_val:.2f}"
-            )
+            # Only print log if motor speeds change (prevents watchdog timer terminal spam)
+            current_state = (dir_left_val, round(speed_left_val, 2), dir_right_val, round(speed_right_val, 2))
+            if self._last_mock_log != current_state:
+                self._last_mock_log = current_state
+                self.get_logger().info(
+                    f"[MOCK MOTOR] Left: DIR={'FWD' if dir_left_val else 'REV'}, Speed={speed_left_val:.2f} | "
+                    f"Right: DIR={'FWD' if dir_right_val else 'REV'}, Speed={speed_right_val:.2f}"
+                )
             return
 
         # Drive Physical GPIO Pins

@@ -1,0 +1,31 @@
+# ==============================================================================
+# CONE ROBOT MASTER CONFIGURATION FILE
+# ==============================================================================
+
+# 1. Raspberry Pi 5 Motor Driver Settings
+mdd10_motor_controller:
+  ros__parameters:
+    # --- GPIO Pin Mapping (Raspberry Pi 5) ---
+    pwm1_pin: 12   # Left Motor Speed PWM (GPIO 12)
+    dir1_pin: 24   # Left Motor Direction (GPIO 24)
+    pwm2_pin: 13   # Right Motor Speed PWM (GPIO 13)
+    dir2_pin: 25   # Right Motor Direction (GPIO 25)
+
+    # --- Physical Dimensions & Hardware Limits ---
+    wheel_track: 0.20          # Distance between left & right wheels (meters)
+    max_linear_speed: 1.0      # Maximum forward/reverse speed (m/s)
+    max_angular_speed: 3.0     # Maximum turning speed (rad/s)
+    cmd_timeout: 0.5           # Safety timeout (seconds)
+    mock_hardware: false       # Set true for simulation / laptop dry-run
+
+# 2. Teleop Keyboard Settings (Laptop)
+teleop_keyboard:
+  ros__parameters:
+    default_linear_speed: 0.2
+    default_angular_speed: 0.5
+
+# 3. Vision & Camera Settings (Future Modules)
+cone_detector:
+  ros__parameters:
+    camera_topic: "/camera/image_raw"
+    target_cone_color: "orange"
