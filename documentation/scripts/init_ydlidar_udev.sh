@@ -16,7 +16,7 @@ EOF
 
 echo "=== Reloading udev rules ==="
 sudo udevadm control --reload-rules
-sudo udevadm trigger
+sudo udevadm trigger --subsystem-match=tty
 
 echo ""
 echo "SUCCESS: udev rule created at /etc/udev/rules.d/ydlidar.rules"

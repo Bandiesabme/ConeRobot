@@ -25,12 +25,12 @@ Run the automated installation script:
 cd ~/github/ConeRobot  # or your workspace path
 bash documentation/ros2setup.sh
 
-# Install Raspberry Pi 5 RP1 chip GPIO drivers & YDLIDAR driver
+# Install Raspberry Pi 5 RP1 chip GPIO drivers
 sudo apt update
-sudo apt install -y python3-gpiozero python3-lgpio ros-jazzy-ydlidar-ros2-driver
+sudo apt install -y python3-gpiozero python3-lgpio
 
-# Setup YDLIDAR udev rule (/dev/ydlidar)
-bash documentation/scripts/init_ydlidar_udev.sh
+# Run automated YDLIDAR C++ SDK & ROS 2 driver installation script
+bash documentation/scripts/install_ydlidar.sh
 ```
 
 ### Step C: Configure Permanent Permissions & ROS 2 Environment
