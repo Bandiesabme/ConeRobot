@@ -53,6 +53,12 @@ else
     echo "ydlidar_ros2_driver repository already exists at $DRIVER_DEST."
 fi
 
+echo "=== Patching ydlidar_ros2_driver_node.cpp for ROS 2 Jazzy compatibility ==="
+PATCH_SCRIPT="$SCRIPT_DIR/patch_ydlidar_jazzy.py"
+if [ -f "$PATCH_SCRIPT" ]; then
+    python3 "$PATCH_SCRIPT" "$DRIVER_DEST/src/ydlidar_ros2_driver_node.cpp"
+fi
+
 echo "=== 4. Setting up USB udev Rules ==="
 UDEV_SCRIPT="$WORKSPACE_ROOT/documentation/scripts/init_ydlidar_udev.sh"
 if [ -f "$UDEV_SCRIPT" ]; then
