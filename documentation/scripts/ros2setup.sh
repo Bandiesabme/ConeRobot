@@ -8,8 +8,12 @@
 # 1. SYSTEM PREPARATION & UPDATES
 # ==============================================================================
 
+# Non-interactive mode to prevent SSH hangs during package restarts
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 # Update local package lists and upgrade existing packages
-sudo apt update && sudo apt upgrade -y
+sudo -E apt update && sudo -E apt upgrade -y
 
 # Install essential helper utilities for keys, certificates, and software management
 sudo apt install -y software-properties-common curl gnupg lsb-release ca-certificates
