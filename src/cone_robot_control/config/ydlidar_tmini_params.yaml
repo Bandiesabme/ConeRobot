@@ -16,6 +16,7 @@ ydlidar_ros2_driver_node:
     inverted: true
     isSingleChannel: false
     intensity: true              # T-mini Plus supports 8-bit intensity readings
+    intensity_bit: 10            # Intensity bit count (int)
     support_motor_dtr: false
     angle_min: -180.0            # Minimum scanning angle (degrees)
     angle_max: 180.0             # Maximum scanning angle (degrees)
