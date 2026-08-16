@@ -47,11 +47,14 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-a
 # Refresh package lists to index the newly added ROS 2 repository
 sudo apt update
 
-# Install ROS 2 Base, Colcon build tool, and Rosdep dependency manager
-sudo apt install -y ros-jazzy-ros-base python3-colcon-common-extensions python3-rosdep
+# Install ROS 2 Base, CLI tools, desktop messages, build tools, and Rosdep dependency manager
+sudo apt install -y ros-jazzy-ros-base ros-jazzy-ros2cli ros-jazzy-ros2launch ros-jazzy-sensor-msgs ros-jazzy-std-srvs ros-jazzy-geometry-msgs ros-jazzy-visualization-msgs ros-jazzy-tf2-ros ros-jazzy-ament-lint-auto ros-jazzy-ament-lint-common python3-colcon-common-extensions python3-rosdep
 
 # Initialize and update rosdep database
-sudo rosdep init
+# Initialize rosdep database if not already initialized
+if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+    sudo rosdep init
+fi
 rosdep update
 
 
@@ -60,10 +63,14 @@ rosdep update
 # ==============================================================================
 
 # Automatically load ROS 2 commands on every new terminal session
-echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
+if ! grep -q "source /opt/ros/jazzy/setup.bash" ~/.bashrc; then
+    echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
+fi
 
 # Set matching Domain ID for laptop/Pi Wi-Fi communication
-echo "export ROS_DOMAIN_ID=42" >> ~/.bashrc
+if ! grep -q "ROS_DOMAIN_ID" ~/.bashrc; then
+    echo "export ROS_DOMAIN_ID=42" >> ~/.bashrc
+fi
 
 # Load the updated ~/.bashrc environment into the current terminal session
 source ~/.bashrc
@@ -81,7 +88,9 @@ cd ~/ros2_ws
 colcon build
 
 # Add the workspace overlay to your ~/.bashrc
-echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
+if ! grep -q "source ~/ros2_ws/install/setup.bash" ~/.bashrc; then
+    echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
+fi
 source ~/.bashrc
 
 # Verify ROS 2 installation

@@ -19,7 +19,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ### B. Install ROS 2 Jazzy & RPi 5 GPIO Libraries
 ```bash
 # Run ROS 2 setup script
-bash documentation/rso2setup.sh
+bash documentation/scripts/ros2setup.sh
 
 # Install Raspberry Pi 5 RP1 chip GPIO driver
 sudo apt update
