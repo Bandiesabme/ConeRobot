@@ -2,7 +2,8 @@
 """
 BNO08x (BNO080 / BNO085) IMU ROS 2 Driver Node
 Supports MikroE Click / Adafruit / SparkFun breakout boards over I2C.
-Includes upside-down / flipped mounting correction and fault-tolerant reading.
+Includes upside-down / flipped mounting correction, dynamic TF broadcasting,
+and fault-tolerant reading.
 """
 
 import math
@@ -11,6 +12,8 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import TransformBroadcaster
 
 # Try importing hardware libraries
 try:
@@ -53,17 +56,20 @@ def quaternion_to_yaw_deg(x, y, z, w):
 
 
 class BNO08xNode(Node):
-    """ROS 2 Node interfacing BNO08x IMU via I2C with flip-correction."""
+    """ROS 2 Node interfacing BNO08x IMU via I2C with flip-correction and TF."""
 
     def __init__(self):
         super().__init__('bno08x_node')
 
         # --- Declare ROS 2 Parameters ---
-        self.declare_parameter('i2c_address', 0x4A)
+        self.declare_parameter('i2c_address', 74)
         self.declare_parameter('frame_id', 'imu_link')
         self.declare_parameter('publish_rate_hz', 50.0)
         self.declare_parameter('mount_flipped', True)
         self.declare_parameter('use_game_rotation', True)
+        self.declare_parameter('publish_tf', True)
+        self.declare_parameter('parent_frame_id', 'odom')
+        self.declare_parameter('child_frame_id', 'base_link')
         self.declare_parameter('mock_hardware', False)
 
         # --- Read Parameters ---
@@ -72,14 +78,17 @@ class BNO08xNode(Node):
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
         self.mount_flipped = self.get_parameter('mount_flipped').value
         self.use_game_rotation = self.get_parameter('use_game_rotation').value
+        self.publish_tf = self.get_parameter('publish_tf').value
+        self.parent_frame_id = self.get_parameter('parent_frame_id').value
+        self.child_frame_id = self.get_parameter('child_frame_id').value
         self.mock_hardware = self.get_parameter('mock_hardware').value
 
-        # --- Publishers ---
+        # --- Publishers & Broadcasters ---
         self.imu_pub = self.create_publisher(Imu, '/imu/data', 10)
         self.heading_pub = self.create_publisher(Float32, '/imu/heading', 10)
+        self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
 
         # 180-deg roll rotation quaternion [x, y, z, w] for flipped mounting
-        # q_flip represents 180 deg around X-axis: [1, 0, 0, 0]
         self.q_flip = [1.0, 0.0, 0.0, 0.0]
 
         # Standard Covariances
@@ -111,7 +120,8 @@ class BNO08xNode(Node):
         self.timer = self.create_timer(timer_period, self._publish_imu_data)
         self.get_logger().info(
             f'BNO08x IMU Node initialized (Rate: {self.publish_rate_hz} Hz, '
-            f'Flipped: {self.mount_flipped}, Game Rotation: {self.use_game_rotation})'
+            f'Flipped: {self.mount_flipped}, Game Rotation: {self.use_game_rotation}, '
+            f'Publish TF: {self.publish_tf} [{self.parent_frame_id} -> {self.child_frame_id}])'
         )
 
     def _init_sensor(self):
@@ -132,7 +142,7 @@ class BNO08xNode(Node):
             self.sensor = BNO08X_I2C(i2c, address=self.i2c_address)
             time.sleep(0.5)
 
-            # Enable desired SHTP reports with small delays
+            # Enable desired SHTP reports
             if self.use_game_rotation:
                 self.sensor.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR)
             else:
@@ -153,16 +163,18 @@ class BNO08xNode(Node):
             self.mock_hardware = True
 
     def _publish_imu_data(self):
-        """Timer callback reading sensor and publishing ROS 2 IMU messages."""
+        """Timer callback reading sensor, publishing ROS 2 IMU messages and TF."""
+        now = self.get_clock().now()
+        stamp = now.to_msg()
+
         msg = Imu()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = stamp
         msg.header.frame_id = self.frame_id
         msg.orientation_covariance = self.orientation_covariance
         msg.angular_velocity_covariance = self.angular_velocity_covariance
         msg.linear_acceleration_covariance = self.linear_acceleration_covariance
 
         if self.mock_hardware:
-            # Mock stationary IMU data
             msg.orientation.x = 0.0
             msg.orientation.y = 0.0
             msg.orientation.z = 0.0
@@ -181,17 +193,16 @@ class BNO08xNode(Node):
             return
 
         try:
-            # Read Quaternion from BNO08x (returns i, j, k, real) -> (x, y, z, w)
             if self.use_game_rotation:
                 quat_raw = self.sensor.game_quaternion
             else:
                 quat_raw = self.sensor.quaternion
 
-            gyro_raw = self.sensor.gyro  # rad/s (x, y, z)
-            accel_raw = self.sensor.acceleration  # m/s^2 (x, y, z)
+            gyro_raw = self.sensor.gyro
+            accel_raw = self.sensor.acceleration
 
             if quat_raw is None or gyro_raw is None or accel_raw is None:
-                return  # Skip frame if packet not ready
+                return
 
             qx, qy, qz, qw = quat_raw[0], quat_raw[1], quat_raw[2], quat_raw[3]
             gx, gy, gz = gyro_raw[0], gyro_raw[1], gyro_raw[2]
@@ -199,19 +210,16 @@ class BNO08xNode(Node):
 
             # Apply Flip Correction if mounted upside down
             if self.mount_flipped:
-                # Rotate quaternion by 180 deg around X-axis
                 q_corrected = quaternion_multiply(self.q_flip, [qx, qy, qz, qw])
                 msg.orientation.x = float(q_corrected[0])
                 msg.orientation.y = float(q_corrected[1])
                 msg.orientation.z = float(q_corrected[2])
                 msg.orientation.w = float(q_corrected[3])
 
-                # Gyro: X remains, Y and Z invert
                 msg.angular_velocity.x = float(gx)
                 msg.angular_velocity.y = float(-gy)
                 msg.angular_velocity.z = float(-gz)
 
-                # Accel: X remains, Y and Z invert
                 msg.linear_acceleration.x = float(ax)
                 msg.linear_acceleration.y = float(-ay)
                 msg.linear_acceleration.z = float(-az)
@@ -243,11 +251,24 @@ class BNO08xNode(Node):
             heading_msg.data = float(yaw_deg)
             self.heading_pub.publish(heading_msg)
 
-            # Reset error counter on successful read
+            # Broadcast Dynamic TF (odom -> base_link) for 3D Visualizer
+            if self.tf_broadcaster:
+                t = TransformStamped()
+                t.header.stamp = stamp
+                t.header.frame_id = self.parent_frame_id
+                t.child_frame_id = self.child_frame_id
+                t.transform.translation.x = 0.0
+                t.transform.translation.y = 0.0
+                t.transform.translation.z = 0.0
+                t.transform.rotation.x = msg.orientation.x
+                t.transform.rotation.y = msg.orientation.y
+                t.transform.rotation.z = msg.orientation.z
+                t.transform.rotation.w = msg.orientation.w
+                self.tf_broadcaster.sendTransform(t)
+
             self.consecutive_errors = 0
 
         except (RuntimeError, OSError, ValueError, KeyError) as e:
-            # Catch transient SHTP/I2C parsing errors without crashing node
             self.consecutive_errors += 1
             if self.consecutive_errors % 50 == 1:
                 self.get_logger().warn(
