@@ -269,58 +269,65 @@ class LC29HGPSNode(Node):
             sock = None
             try:
                 self.get_logger().info(
-                    f"Connecting to NTRIP Caster: {self.ntrip_caster}:{self.ntrip_port}/{self.ntrip_mountpoint}..."
+                    f"[NTRIP] Resolving & connecting to {self.ntrip_caster}:{self.ntrip_port} for mountpoint [{self.ntrip_mountpoint}]..."
                 )
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(10.0)
+                sock.settimeout(6.0)
                 sock.connect((self.ntrip_caster, self.ntrip_port))
 
-                # Build standard NTRIP 1.0 Request Header
+                # Build standard NTRIP Request Header
                 auth_str = f"{self.ntrip_user}:{self.ntrip_password}"
                 auth_b64 = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
+                
                 http_req = (
                     f"GET /{self.ntrip_mountpoint} HTTP/1.0\r\n"
-                    f"User-Agent: NTRIP ConeRobotRTK/1.0\r\n"
+                    f"User-Agent: NTRIP ConeRobot/1.0\r\n"
                     f"Accept: */*\r\n"
-                    f"Connection: close\r\n"
                     f"Authorization: Basic {auth_b64}\r\n"
-                    f"\r\n"
+                    f"Connection: close\r\n\r\n"
                 )
                 sock.sendall(http_req.encode('ascii'))
 
                 # Read HTTP response headers
                 header_data = b""
+                sock.settimeout(6.0)
                 while b"\r\n\r\n" not in header_data:
                     chunk = sock.recv(1024)
                     if not chunk:
-                        raise ConnectionError("Caster closed socket during HTTP handshake.")
+                        raise ConnectionError("NTRIP Caster closed socket during HTTP header handshake.")
                     header_data += chunk
 
                 header_text = header_data.decode('latin1', errors='ignore')
+                first_line = header_text.splitlines()[0] if header_text else "EMPTY"
+                self.get_logger().info(f"[NTRIP] Caster Response: {first_line}")
+
                 if "ICY 200 OK" not in header_text and "200 OK" not in header_text:
-                    raise ConnectionError(f"NTRIP Caster rejected connection: {header_text.splitlines()[0]}")
+                    raise ConnectionError(f"Caster rejected mountpoint [{self.ntrip_mountpoint}]: {first_line}")
 
                 self.get_logger().info(
-                    f"NTRIP Stream Connected! Receiving RTCM3 corrections from [{self.ntrip_mountpoint}]"
+                    f"[NTRIP] Stream Connected! Receiving live RTCM3 corrections from [{self.ntrip_mountpoint}]"
                 )
                 self.ntrip_connected = True
                 sock.settimeout(5.0)
 
+                # Send immediate GGA position if available
+                if self.latest_gga_raw:
+                    sock.sendall((self.latest_gga_raw.strip() + "\r\n").encode('ascii'))
+                
                 last_gga_send_time = time.time()
 
                 # Stream RTCM3 binary correction data to LC29H serial port
                 while rclpy.ok() and self.is_running:
-                    # Periodically send GGA feedback position back to caster (keepalive / VRS)
+                    # Periodically send GGA feedback position back to caster (every 10s for VRS / keepalive)
                     if self.ntrip_send_gga and (time.time() - last_gga_send_time > 10.0):
                         if self.latest_gga_raw:
-                            gga_payload = (self.latest_gga_raw.strip() + "\r\n").encode('ascii')
-                            sock.sendall(gga_payload)
+                            sock.sendall((self.latest_gga_raw.strip() + "\r\n").encode('ascii'))
                         last_gga_send_time = time.time()
 
                     # Receive binary RTCM3 correction packet
                     rtcm_data = sock.recv(2048)
                     if not rtcm_data:
-                        raise ConnectionError("NTRIP socket returned 0 bytes (connection dropped).")
+                        raise ConnectionError("NTRIP socket returned 0 bytes (connection closed by server).")
 
                     self.rtcm_bytes_received += len(rtcm_data)
 
@@ -331,8 +338,8 @@ class LC29HGPSNode(Node):
 
             except Exception as e:
                 self.ntrip_connected = False
-                self.get_logger().warn(f"NTRIP connection lost: {e}. Reconnecting in 2.0 seconds...")
-                time.sleep(2.0)
+                self.get_logger().error(f"[NTRIP Error] {e}. Retrying in 3 seconds...")
+                time.sleep(3.0)
 
             finally:
                 if sock:
