@@ -1,6 +1,6 @@
-# =======================================================================
+﻿# ==============================================================================
 # CONE ROBOT MASTER CONFIGURATION FILE
-# =======================================================================
+# ==============================================================================
 
 # 1. Raspberry Pi 5 Motor Driver Settings
 mdd10_motor_controller:
@@ -9,7 +9,7 @@ mdd10_motor_controller:
     pwm1_pin: 12   # Left Motor Speed PWM (GPIO 12)
     dir1_pin: 24   # Left Motor Direction (GPIO 24)
     pwm2_pin: 13   # Right Motor Speed PWM (GPIO 13)
-    dir2_pin: 25   # Right Motor Direction (GPIO_25)
+    dir2_pin: 25   # Right Motor Direction (GPIO 25)
 
     # --- Physical Dimensions & Hardware Limits ---
     wheel_track: 0.20          # Distance between left & right wheels (meters)
@@ -18,11 +18,10 @@ mdd10_motor_controller:
     cmd_timeout: 0.5           # Safety timeout (seconds)
     mock_hardware: false       # Set true for simulation / laptop dry-run
 
-
-  2. BNO08x IMU Sensor Settings (MikroE Click / I2C)
+# 2. BNO08x IMU Sensor Settings (MikroE Click / I2C)
 bno08x_node:
   ros__parameters:
-    i2c_address: 0x4A          # Standard default address (74 in decimal)
+    i2c_address: 74            # 0x4A in decimal
     frame_id: "imu_link"       # IMU TF frame
     publish_rate_hz: 50.0      # Output publication frequency (Hz)
     mount_flipped: true        # Sensor mounted upside down (applies 180-deg roll rotation)
