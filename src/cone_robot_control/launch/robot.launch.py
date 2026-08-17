@@ -1,4 +1,4 @@
-﻿import os
+import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -24,6 +24,12 @@ def generate_launch_description():
         'launch_imu',
         default_value='true',
         description='Whether to launch BNO08x IMU driver node'
+    )
+
+    declare_launch_gps_cmd = DeclareLaunchArgument(
+        'launch_gps',
+        default_value='true',
+        description='Whether to launch Waveshare LC29H GPS/RTK driver node'
     )
 
     # 1. Cytron MDD10 Motor Controller Node
@@ -54,7 +60,26 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('launch_imu'))
     )
 
-    # 4. Conditionally Include YDLIDAR Launch File
+    # 4. Waveshare LC29H(DA) GPS/RTK Driver & NTRIP Rover Node
+    lc29h_gps_node = Node(
+        package='cone_robot_control',
+        executable='lc29h_gps_node',
+        name='lc29h_gps_node',
+        output='screen',
+        parameters=[config_file],
+        condition=IfCondition(LaunchConfiguration('launch_gps'))
+    )
+
+    # 5. Static Transform Publisher (base_link -> gps_link)
+    base_to_gps_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_gps_broadcaster',
+        arguments=['--x', '0', '--y', '0', '--z', '0.10', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'base_link', '--child-frame-id', 'gps_link'],
+        condition=IfCondition(LaunchConfiguration('launch_gps'))
+    )
+
+    # 6. Conditionally Include YDLIDAR Launch File
     ydlidar_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(ydlidar_launch_file),
         condition=IfCondition(LaunchConfiguration('launch_lidar'))
@@ -63,8 +88,11 @@ def generate_launch_description():
     return LaunchDescription([
         declare_launch_lidar_cmd,
         declare_launch_imu_cmd,
+        declare_launch_gps_cmd,
         mdd10_node,
         bno08x_node,
         base_to_imu_tf,
+        lc29h_gps_node,
+        base_to_gps_tf,
         ydlidar_launch
     ])

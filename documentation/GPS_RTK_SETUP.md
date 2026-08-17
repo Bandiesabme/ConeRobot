@@ -1,6 +1,8 @@
-# 📡 Waveshare LC29H(DA) Dual-Band GPS/RTK Setup & Verification Guide
+# 📡 Waveshare LC29H(DA) Dual-Band GPS/RTK Setup & Native ROS 2 Guide
 
-This guide details the complete hardware configuration, Raspberry Pi 5 serial port setup (`/dev/ttyAMA0`), NTRIP RTK rover client execution, automated reconnect patches, verified benchmark results, and ROS 2 integration for the **Waveshare LC29H(DA) Dual-Band GPS/RTK HAT (25279)** on a **Raspberry Pi 5** running **Ubuntu 24.04 LTS (ROS 2 Jazzy)**.
+This guide details the complete hardware configuration, Raspberry Pi 5 serial port setup (`/dev/ttyAMA0`), and the native **ROS 2 LC29H GPS/RTK Driver & NTRIP Rover Node** (`lc29h_gps_node`) for the **Waveshare LC29H(DA) Dual-Band GPS/RTK HAT (25279)** on a **Raspberry Pi 5** running **Ubuntu 24.04 LTS (ROS 2 Jazzy)**.
+
+The native driver replaces external demo scripts and supports connecting to both **public NTRIP correction casters** (e.g., RTK2Go) and **your own local/private base stations**.
 
 ---
 
@@ -21,13 +23,13 @@ The Waveshare LC29H(DA) HAT mounts directly onto the Raspberry Pi 5 40-pin GPIO 
 
 > [!IMPORTANT]
 > **Jumper Cap Selection**: Set the yellow jumper cap on the LC29H HAT to **Position B** (connects HAT UART TX/RX directly to Raspberry Pi GPIO 14 / GPIO 15).
-> **Antenna**: Connect the external active multi-band GNSS antenna to the SMA connector and position it outdoors with a clear line-of-sight to the sky.
+> **Antenna**: Connect the external active multi-band GNSS antenna to the SMA connector and position it outdoors with an unobstructed line-of-sight to the open sky.
 
 ---
 
 ## 2. Raspberry Pi 5 Serial Port Setup (`/dev/ttyAMA0`)
 
-On the Raspberry Pi 5, the primary hardware UART on the 40-pin GPIO header is routed through the RP1 I/O controller and is named **`/dev/ttyAMA0`** (baud rate: **115200**).
+On the Raspberry Pi 5, the primary hardware UART on the 40-pin GPIO header is named **`/dev/ttyAMA0`** (baud rate: **115200**).
 
 ### Step 1: Enable Hardware UART in Boot Config
 
@@ -40,162 +42,144 @@ dtparam=uart0=on
 EOF'
 ```
 
-Reboot to apply the firmware configuration:
+### Step 2: Configure Permissions & Mask Conflicting Services
+
+```bash
+# 1. Add user to dialout group for serial port access (/dev/ttyAMA0)
+sudo usermod -aG dialout $USER
+
+# 2. Disable and permanently MASK the Linux serial login console on ttyAMA0
+sudo systemctl stop serial-getty@ttyAMA0.service
+sudo systemctl disable serial-getty@ttyAMA0.service
+sudo systemctl mask serial-getty@ttyAMA0.service
+
+# 3. Disable gpsd daemon if previously installed (gpsd locks the port)
+sudo systemctl stop gpsd gpsd.socket 2>/dev/null || true
+sudo systemctl disable gpsd gpsd.socket 2>/dev/null || true
+```
+
+Reboot to apply:
 ```bash
 sudo reboot
 ```
 
-### Step 2: Configure Permissions & Disable Competing Services
+### Step 3: Quick Hardware UART Verification
 
-```bash
-# Add user to dialout group for serial port access (/dev/ttyAMA0)
-sudo usermod -aG dialout $USER
-
-# Disable the Linux login console on ttyAMA0
-sudo systemctl stop serial-getty@ttyAMA0.service
-sudo systemctl disable serial-getty@ttyAMA0.service
-
-# CRITICAL: Stop & disable gpsd daemon (gpsd locks the port and blocks NTRIP / ROS scripts)
-sudo systemctl stop gpsd gpsd.socket
-sudo systemctl disable gpsd gpsd.socket
-```
-
----
-
-## 3. Quick Verification: Direct Raw NMEA Stream
-
-To verify that the GPS module is outputting raw NMEA satellite data over the hardware UART:
+To verify that the GPS module is actively outputting raw NMEA satellite sentences over hardware UART:
 
 ```bash
 sudo stty -F /dev/ttyAMA0 115200 raw -echo
 sudo cat /dev/ttyAMA0
 ```
-
-*Expected output: scrolling NMEA sentences (`$GNGGA...`, `$GNRMC...`, `$GNVTG...`). Press `Ctrl+C` to stop.*
+*(You should see live `$GNGGA...` and `$GNRMC...` sentences scrolling. Press `Ctrl+C` to stop).*
 
 ---
 
-## 4. Waveshare NTRIP RTK Rover Setup & Auto-Reconnect Patch
+## 3. Base Station & NTRIP Configuration
 
-RTK (Real-Time Kinematic) uses differential RTCM3 correction streams from an NTRIP base station to achieve **centimeter-level positioning accuracy**.
+The native node `lc29h_gps_node` runs an integrated, auto-reconnecting NTRIP Rover client that receives RTCM3 differential correction packets and writes them directly into the LC29H serial stream.
 
-### Step 1: Download Waveshare Demo Code
+You can configure your base station settings in `src/cone_robot_control/config/robot_config.yaml`:
 
-```bash
-cd ~
-wget 'https://files.waveshare.com/wiki/LC29H(XX)-GPS-RTK-HAT/Lc29h_gps_rtk_hat_code.zip' -O Lc29h_gps_rtk_hat_code.zip
-unzip -o Lc29h_gps_rtk_hat_code.zip -d ~/lc29h_demo/
+```yaml
+lc29h_gps_node:
+  ros__parameters:
+    serial_port: "/dev/ttyAMA0"
+    baud_rate: 115200
+    frame_id: "gps_link"
+    publish_rate_hz: 10.0
+    mock_hardware: false
+
+    # --- NTRIP RTK Correction Stream Configuration ---
+    ntrip_enable: true
+    ntrip_caster: "rtk2go.com"          # Public caster OR your local base station IP (e.g. "192.168.1.50" or "10.42.0.1")
+    ntrip_port: 2101                   # Standard NTRIP port
+    ntrip_mountpoint: "PFORZEM"         # Caster mountpoint name (e.g. "PFORZEM" or your own custom mountpoint)
+    ntrip_user: "conerobot@rover.local" # Account / email
+    ntrip_password: "none"             # Password (or "none" for public casters)
+    ntrip_send_gga: true               # Send NMEA position feedback to caster for VRS / keepalive
 ```
 
-### Step 2: Apply Raspberry Pi 5 & Auto-Reconnect Patches
+### Option A: Using Public Casters (e.g., RTK2Go, CORS, SAPOS)
+- Set `ntrip_caster: "rtk2go.com"`
+- Set `ntrip_mountpoint: "<NEARBY_MOUNTPOINT>"` (find nearest mountpoint at [rtk2go.com](http://rtk2go.com))
+- Set `ntrip_user: "your_email@example.com"`
 
-The stock Waveshare demo assumes `/dev/ttyS0`, crashes on binary RTCM3 data (`0xD3` bytes) with UTF-8 decoding errors, and terminates when RTK2go drops idle connections.
+### Option B: Using Your Own Base Station (e.g., Local ESP32, Pi Base, or Local Caster)
+- Set `ntrip_caster: "192.168.1.50"` (or your base station's local IP on the network)
+- Set `ntrip_port: 2101`
+- Set `ntrip_mountpoint: "MY_BASE"`
+- Set `ntrip_user` and `ntrip_password` as configured on your base station.
 
-Run this Python script on your Pi 5 to automatically apply all verified fixes:
+### Option C: Standalone GNSS Mode (No RTK)
+- Set `ntrip_enable: false`. The node will operate as a standard multi-constellation 3D GPS receiver.
+
+---
+
+## 4. How to Launch & Verify with ROS 2
+
+### Step 1: Build Workspace
 
 ```bash
-python3 -c "
-path = '/home/conerobot/lc29h_demo/lc29h_gps_rtk_hat_code/python/rtk_rover/main.py'
-with open(path, 'r') as f:
-    content = f.read()
-
-# 1. Update serial port for Pi 5 & binary RTCM3 decoding
-content = content.replace('/dev/ttyS0', '/dev/ttyAMA0')
-content = content.replace(\"casterResponse.decode('utf-8')\", \"casterResponse.decode('latin1')\")
-
-# 2. Add continuous auto-reconnect loop
-old_tail = '''    n = NtripClient(**ntripArgs)
-    try:
-        n.readData()
-    finally:
-        if fileOutput:
-            f.close()
-        if options.headerFile:
-            h.close()'''
-
-new_tail = '''    while True:
-        try:
-            n = NtripClient(**ntripArgs)
-            n.readData()
-        except Exception as e:
-            import time
-            print(f\"Reconnecting to RTK caster... ({e})\")
-            time.sleep(1)'''
-
-if old_tail in content:
-    content = content.replace(old_tail, new_tail)
-
-content = content.replace('sys.exit(1)', 'pass').replace('sys.exit(0)', 'pass').replace('sys.exit()', 'pass')
-
-with open(path, 'w') as f:
-    f.write(content)
-print('All LC29H patches applied successfully!')
-"
+cd ~/github/ConeRobot  # or your workspace directory
+colcon build --symlink-install
+source install/setup.bash
 ```
 
-### Step 3: Run the NTRIP RTK Rover Client
-
-Connect to your NTRIP caster (e.g., RTK2Go, local base station, or CORS network):
+### Step 2: Launch Robot Stack with GPS
 
 ```bash
-cd ~/lc29h_demo/lc29h_gps_rtk_hat_code/python/rtk_rover
+# Launch Motors + IMU + GPS/RTK
+ros2 launch cone_robot_control robot.launch.py launch_gps:=true
+```
 
-# Syntax: sudo python3 main.py -u <email> -p <password/none> <caster_host> <port> <mountpoint>
-sudo python3 main.py -u your_email@gmail.com -p none rtk2go.com 2101 PFORZEM
+Or run the GPS node individually:
+```bash
+ros2 run cone_robot_control lc29h_gps_node --ros-args --params-file src/cone_robot_control/config/robot_config.yaml
 ```
 
 ---
 
-## 5. Verified Live RTK Benchmark Results
+## 5. Live Topics & Verification
 
-Below is a verified live NMEA log achieved during hardware testing:
-
+### A. Monitor Human-Readable RTK Status & Diagnostics
+```bash
+ros2 topic echo /gps/status
+```
+*Sample Output:*
 ```text
-b'$GNGGA,125545.000,4900.549118,N,00824.577053,E,5,35,0.43,134.792,M,47.942,M,1.0,0000*5C\r\n'
+data: "Fix: RTK FLOAT | Sats: 35 | HDOP: 0.43 | NTRIP: Connected (142.3 KB RTCM)"
 ```
 
-- **Fix Quality**: **`5`** (**RTK FLOAT** — high-precision centimeter/sub-decimeter positioning).
-- **Satellites Tracked**: **35 satellites** locked simultaneously (GPS + GLONASS + Galileo + BeiDou + QZSS).
-- **HDOP**: **`0.43`** (excellent satellite geometry).
-- **Differential Age**: **`1.0s`** fresh RTCM3 differential corrections from mountpoint station `0000`.
-
----
-
-## 6. ROS 2 Integration (`/fix` Topic)
-
-To publish live GPS data into the ROS 2 ecosystem as standard `sensor_msgs/msg/NavSatFix` messages:
-
-### Step 1: Install ROS 2 NMEA Driver
-
-```bash
-sudo apt install -y ros-jazzy-nmea-navsat-driver
-```
-
-### Step 2: Run the ROS 2 Serial Driver Node
-
-```bash
-ros2 run nmea_navsat_driver nmea_serial_driver --ros-args \
-  -p port:=/dev/ttyAMA0 \
-  -p baud:=115200 \
-  -p frame_id:=gps_link
-```
-
-### Step 3: Verify ROS 2 Topic Output
-
-In another terminal:
-
+### B. Monitor Standard NavSatFix Topic
 ```bash
 ros2 topic echo /fix
 ```
+*Sample Output:*
+```yaml
+header:
+  stamp:
+    sec: 1723896500
+    nanosec: 123456789
+  frame_id: gps_link
+status:
+  status: 2    # STATUS_GBAS_FIX (Centimeter RTK Positioning)
+  service: 15  # GPS + GLONASS + GALILEO + BEIDOU
+latitude: 49.0054911
+longitude: 8.2457705
+altitude: 134.792
+position_covariance: [0.0074, 0.0, 0.0, 0.0, 0.0074, 0.0, 0.0, 0.0, 0.0296]
+position_covariance_type: 1
+```
 
 ---
 
-## 7. Troubleshooting & Solutions
+## 6. Troubleshooting & Solutions
 
-| Issue | Root Cause | Verified Solution |
+| Issue | Root Cause | Solution |
 | :--- | :--- | :--- |
-| `Permission denied: '/dev/ttyAMA0'` | Serial port owned by `root:dialout` | Run with `sudo` or execute `sudo usermod -aG dialout $USER && sudo chmod 666 /dev/ttyAMA0`. |
-| `UnicodeDecodeError: 'utf-8' byte 0xd3` | Binary RTCM3 packets starting with `0xD3` break UTF-8 decoding | Use `.decode('latin1')` on the socket response buffer in `main.py`. |
-| `device reports readiness to read but returned no data` | `gpsd` competing with script for serial port access | Run `sudo systemctl stop gpsd gpsd.socket && sudo systemctl disable gpsd gpsd.socket`. |
-| Disconnect after 15–30 seconds | RTK2go caster drops streams when socket is idle | The continuous `while True:` auto-reconnect loop seamlessly re-establishes connection in 1 second. |
-| Zero satellites or Fix Quality = `0` | Blocked sky view / antenna indoor | Move the GNSS antenna outside with an unobstructed view of the open sky. |
+| `Permission denied: '/dev/ttyAMA0'` | Serial port owned by `root:dialout` | Run `sudo usermod -aG dialout $USER` and log out/in. |
+| `serial-getty` interference / garbled bytes | Linux login console running on UART | Run `sudo systemctl mask serial-getty@ttyAMA0.service` and reboot. |
+| `NTRIP connection lost: Reconnecting in 2.0s` | Network dropout or invalid mountpoint | Verify Wi-Fi internet connection and check `ntrip_caster` / `ntrip_mountpoint` in `robot_config.yaml`. |
+| Fix stays `3D FIX (SPS)` instead of `RTK` | No RTCM3 base corrections reaching module | Check `/gps/status` to ensure NTRIP is `Connected` and RTCM KB is increasing. |
+| Zero satellites or `NO FIX` | Blocked sky view | Move antenna outside with open sky visibility. |

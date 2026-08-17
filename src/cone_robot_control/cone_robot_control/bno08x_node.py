@@ -2,7 +2,7 @@
 """
 BNO08x (BNO080 / BNO085) IMU ROS 2 Driver Node
 Supports MikroE Click / Adafruit / SparkFun breakout boards over I2C.
-Includes upside-down / flipped mounting correction, dynamic TF broadcasting,
+Includes upside-down / flipped mounting correction, optional dynamic TF broadcasting,
 and fault-tolerant reading.
 """
 
@@ -12,8 +12,14 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
-from geometry_msgs.msg import TransformStamped
-from tf2_ros import TransformBroadcaster
+
+# Try importing TF2 Broadcaster
+try:
+    from geometry_msgs.msg import TransformStamped
+    from tf2_ros import TransformBroadcaster
+    TF2_AVAILABLE = True
+except ImportError:
+    TF2_AVAILABLE = False
 
 # Try importing hardware libraries
 try:
@@ -86,7 +92,13 @@ class BNO08xNode(Node):
         # --- Publishers & Broadcasters ---
         self.imu_pub = self.create_publisher(Imu, '/imu/data', 10)
         self.heading_pub = self.create_publisher(Float32, '/imu/heading', 10)
-        self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
+
+        if self.publish_tf and TF2_AVAILABLE:
+            self.tf_broadcaster = TransformBroadcaster(self)
+        else:
+            self.tf_broadcaster = None
+            if self.publish_tf and not TF2_AVAILABLE:
+                self.get_logger().warn('tf2_ros is not installed. Skipping dynamic TF broadcast.')
 
         # 180-deg roll rotation quaternion [x, y, z, w] for flipped mounting
         self.q_flip = [1.0, 0.0, 0.0, 0.0]
@@ -121,7 +133,7 @@ class BNO08xNode(Node):
         self.get_logger().info(
             f'BNO08x IMU Node initialized (Rate: {self.publish_rate_hz} Hz, '
             f'Flipped: {self.mount_flipped}, Game Rotation: {self.use_game_rotation}, '
-            f'Publish TF: {self.publish_tf} [{self.parent_frame_id} -> {self.child_frame_id}])'
+            f'Publish TF: {self.publish_tf and TF2_AVAILABLE})'
         )
 
     def _init_sensor(self):
@@ -251,7 +263,7 @@ class BNO08xNode(Node):
             heading_msg.data = float(yaw_deg)
             self.heading_pub.publish(heading_msg)
 
-            # Broadcast Dynamic TF (odom -> base_link) for 3D Visualizer
+            # Broadcast Dynamic TF (odom -> base_link) for 3D Visualizer if available
             if self.tf_broadcaster:
                 t = TransformStamped()
                 t.header.stamp = stamp
