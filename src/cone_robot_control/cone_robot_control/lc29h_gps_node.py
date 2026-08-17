@@ -268,8 +268,17 @@ class LC29HGPSNode(Node):
         while rclpy.ok() and self.is_running:
             sock = None
             try:
+                # Wait until GPS acquires first NMEA position before connecting to NTRIP
+                if not self.latest_gga_raw:
+                    self.get_logger().info("[NTRIP] Waiting for initial GPS satellite lock before connecting to caster...")
+                    while rclpy.ok() and self.is_running and not self.latest_gga_raw:
+                        time.sleep(0.5)
+
+                if not (rclpy.ok() and self.is_running):
+                    break
+
                 self.get_logger().info(
-                    f"[NTRIP] Resolving & connecting to {self.ntrip_caster}:{self.ntrip_port} for mountpoint [{self.ntrip_mountpoint}]..."
+                    f"[NTRIP] Connecting to {self.ntrip_caster}:{self.ntrip_port}/{self.ntrip_mountpoint}..."
                 )
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(6.0)
@@ -286,7 +295,6 @@ class LC29HGPSNode(Node):
                     f"Authorization: Basic {auth_b64}",
                 ]
                 
-                # Include Ntrip-GGA header if position is already locked
                 if self.latest_gga_raw:
                     headers.append(f"Ntrip-GGA: {self.latest_gga_raw.strip()}")
                 
@@ -294,13 +302,13 @@ class LC29HGPSNode(Node):
                 http_req = "\r\n".join(headers)
                 sock.sendall(http_req.encode('ascii'))
 
-                # Also send raw GGA sentence immediately into the stream for casters that listen on socket stream
+                # Also send raw GGA sentence immediately on socket stream
                 if self.latest_gga_raw:
                     sock.sendall((self.latest_gga_raw.strip() + "\r\n").encode('ascii'))
 
                 # Read HTTP response headers
                 header_data = b""
-                sock.settimeout(10.0)
+                sock.settimeout(8.0)
                 while b"\r\n\r\n" not in header_data:
                     chunk = sock.recv(1024)
                     if not chunk:
