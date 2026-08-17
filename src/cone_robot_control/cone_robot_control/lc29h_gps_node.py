@@ -306,14 +306,16 @@ class LC29HGPSNode(Node):
                 if self.latest_gga_raw:
                     sock.sendall((self.latest_gga_raw.strip() + "\r\n").encode('ascii'))
 
-                # Read HTTP response headers
+                # Read response headers (support both standard \r\n\r\n and Shoutcast/ICY \r\n)
                 header_data = b""
-                sock.settimeout(8.0)
-                while b"\r\n\r\n" not in header_data:
+                sock.settimeout(6.0)
+                while True:
                     chunk = sock.recv(1024)
                     if not chunk:
-                        raise ConnectionError("NTRIP Caster closed socket during HTTP header handshake.")
+                        raise ConnectionError("NTRIP Caster closed socket during header handshake.")
                     header_data += chunk
+                    if b"ICY 200 OK\r\n" in header_data or b"\r\n\r\n" in header_data:
+                        break
 
                 header_text = header_data.decode('latin1', errors='ignore')
                 first_line = header_text.splitlines()[0] if header_text else "EMPTY"
@@ -322,8 +324,13 @@ class LC29HGPSNode(Node):
                 if "ICY 200 OK" not in header_text and "200 OK" not in header_text and "HTTP/1.1 200" not in header_text and "HTTP/1.0 200" not in header_text:
                     raise ConnectionError(f"Caster rejected mountpoint [{self.ntrip_mountpoint}]: {first_line}")
 
-                # Extract any binary RTCM3 data that arrived after the \r\n\r\n header delimiter
-                _, _, initial_rtcm = header_data.partition(b"\r\n\r\n")
+                # Extract any binary RTCM3 data that arrived after the header delimiter
+                initial_rtcm = b""
+                if b"\r\n\r\n" in header_data:
+                    _, _, initial_rtcm = header_data.partition(b"\r\n\r\n")
+                elif b"ICY 200 OK\r\n" in header_data:
+                    _, _, initial_rtcm = header_data.partition(b"ICY 200 OK\r\n")
+
                 if initial_rtcm:
                     self.rtcm_bytes_received += len(initial_rtcm)
                     if self.serial_conn and self.serial_conn.is_open:
