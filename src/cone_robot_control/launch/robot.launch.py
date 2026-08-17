@@ -1,4 +1,4 @@
-import os
+﻿import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -6,6 +6,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('cone_robot_control')
@@ -19,7 +20,13 @@ def generate_launch_description():
         description='Whether to launch YDLIDAR T-mini Plus driver node'
     )
 
-    # Cytron MDD10 Motor Controller Node
+    declare_launch_imu_cmd = DeclareLaunchArgument(
+        'launch_imu',
+        default_value='true',
+        description='Whether to launch BNO08x IMU driver node'
+    )
+
+    # 1. Cytron MDD10 Motor Controller Node
     mdd10_node = Node(
         package='cone_robot_control',
         executable='mdd10_motor_controller',
@@ -28,7 +35,26 @@ def generate_launch_description():
         parameters=[config_file]
     )
 
-    # Conditionally Include YDLIDAR Launch File
+    # 2. BNO08x IMU Driver Node
+    bno08x_node = Node(
+        package='cone_robot_control',
+        executable='bno08x_node',
+        name='bno08x_node',
+        output='screen',
+        parameters=[config_file],
+        condition=IfCondition(LaunchConfiguration('launch_imu'))
+    )
+
+    # 3. Static Transform Publisher (base_link -> imu_link)
+    base_to_imu_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='base_to_imu_broadcaster',
+        arguments=['--x', '0', '--y', '0', '--z', '0.05', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'base_link', '--child-frame-id', 'imu_link'],
+        condition=IfCondition(LaunchConfiguration('launch_imu'))
+    )
+
+    # 4. Conditionally Include YDLIDAR Launch File
     ydlidar_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(ydlidar_launch_file),
         condition=IfCondition(LaunchConfiguration('launch_lidar'))
@@ -36,6 +62,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         declare_launch_lidar_cmd,
+        declare_launch_imu_cmd,
         mdd10_node,
+        bno08x_node,
+        base_to_imu_tf,
         ydlidar_launch
     ])

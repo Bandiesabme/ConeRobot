@@ -75,6 +75,32 @@ The **Cytron MDD10 Rev 2.0** is a dual-channel 10A DC motor driver operating in 
 
 ---
 
+## 3. Waveshare LC29H(DA) GPS/RTK HAT (25279) Pinout & Pi 5 Serial Setup
+
+The **Waveshare LC29H(DA) Dual-band GPS/RTK HAT** uses the 40-pin GPIO header for UART communication.
+
+### A. Pin Coexistence (No Motor Conflicts!)
+
+| HAT Function | RPi 5 Pin | GPIO | Cytron MDD10 Conflict? |
+| :--- | :--- | :--- | :--- |
+| **UART TX** (HAT RX) | Pin 8 | GPIO 14 (TXD0) | ✅ **No Conflict** (Motors use GPIO 12, 13, 24, 25) |
+| **UART RX** (HAT TX) | Pin 10 | GPIO 15 (RXD0) | ✅ **No Conflict** |
+| **PPS** (Pulse Per Second) | Pin 7 | GPIO 4 | ✅ **No Conflict** |
+| **Reset** | Pin 12 | GPIO 18 | ✅ **No Conflict** |
+
+> [!NOTE]
+> Your Cytron MDD10 motor drive control pins (**GPIO 12, 13, 24, 25**) do **NOT** conflict with the Waveshare LC29H GPS/RTK HAT (**GPIO 14, 15**). No motor pin modifications are needed!
+
+### B. Raspberry Pi 5 Serial Port Path Difference (`/dev/ttyAMA0`)
+
+- **Pi 4B vs Pi 5 Difference**: On Raspberry Pi 4B, the primary UART is `/dev/ttyS0`. On **Raspberry Pi 5**, the RP1 chip assigns the 40-pin GPIO header primary UART to **`/dev/ttyAMA0`**.
+- When configuring `gpsd` (`/etc/default/gpsd`), set:
+  ```bash
+  DEVICES="/dev/ttyAMA0"
+  ```
+
+---
+
 ## 3. How to Build & Run on Raspberry Pi 5
 
 ### Step 1: Install Dependencies & Build Workspace

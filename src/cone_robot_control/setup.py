@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'mdd10_motor_controller = cone_robot_control.mdd10_motor_controller:main',
+            'bno08x_node = cone_robot_control.bno08x_node:main',
             'teleop_keyboard = cone_robot_control.teleop_keyboard:main',
             'simple_publisher = cone_robot_control.simple_publisher:main',
         ],
