@@ -26,7 +26,7 @@ bash documentation/scripts/ros2setup.sh
 
 # Install Raspberry Pi 5 GPIO, I2C & ROS 2 CLI tools
 sudo apt update
-sudo apt install -y python3-gpiozero python3-lgpio python3-smbus i2c-tools python3-pip ros-jazzy-ros2cli-common-extensions ros-jazzy-ros2topic ros-jazzy-ros2node
+sudo apt install -y python3-gpiozero python3-lgpio python3-smbus i2c-tools python3-pip ros-jazzy-ros2cli-common-extensions ros-jazzy-ros2topic ros-jazzy-ros2node ros-jazzy-tf2-ros ros-jazzy-tf2-geometry-msgs
 
 # Install Adafruit BNO08x IMU library
 pip3 install --break-system-packages adafruit-circuitpython-bno08x
@@ -144,7 +144,63 @@ Raspberry Pi 5 Pinout Allocation:
 
 ---
 
-## 4. How to Build & Run on Raspberry Pi 5
+
+---
+
+## 4. Long-Range External Wi-Fi Setup (TP-Link TL-WN722N)
+
+To extend the robot's telemetry and Foxglove video range across an open field, you can plug in a high-gain external USB Wi-Fi antenna (e.g. **TP-Link TL-WN722N v2/v3/v4** with Realtek RTL8188EUS chipset).
+
+### Step A: Create Persistent udev Rule for Hot-Swappable Antennas
+This automatically assigns **any** plugged-in TP-Link antenna to the clean interface name `wlan1`, regardless of which specific antenna or MAC address is used:
+
+```bash
+echo 'SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2357", ATTRS{idProduct}=="010c", NAME="wlan1"' | sudo tee /etc/udev/rules.d/70-tplink-wifi.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+### Step B: Configure Dual-Antenna Priority Routing in Netplan
+Configures Ubuntu to route 100% of network traffic through the external high-gain antenna (`wlan1`, Metric 100), with automatic seamless fallback to the internal antenna (`wlan0`, Metric 600) if unplugged:
+
+```bash
+sudo tee /etc/netplan/50-cloud-init.yaml << 'EOF'
+network:
+  version: 2
+  ethernets:
+    eth0:
+      optional: true
+      dhcp4: true
+      dhcp6: true
+  wifis:
+    wlan0:
+      optional: true
+      dhcp4: true
+      dhcp4-overrides:
+        route-metric: 600
+      regulatory-domain: "DE"
+      access-points:
+        "YOUR_WIFI_SSID":
+          auth:
+            key-management: "psk"
+            password: "YOUR_WIFI_PASSWORD"
+    wlan1:
+      optional: true
+      dhcp4: true
+      dhcp4-overrides:
+        route-metric: 100
+      regulatory-domain: "DE"
+      access-points:
+        "YOUR_WIFI_SSID":
+          auth:
+            key-management: "psk"
+            password: "YOUR_WIFI_PASSWORD"
+EOF
+
+sudo chmod 600 /etc/netplan/50-cloud-init.yaml
+sudo netplan apply
+```
+
+## 5. How to Build & Run on Raspberry Pi 5
 
 ### Step 1: Pull & Build Workspace
 
@@ -174,7 +230,7 @@ Expected startup logs:
 
 ---
 
-## 5. Live Diagnostics & Verification
+## 6. Live Diagnostics & Verification
 
 ### A. Monitor Sensors
 
