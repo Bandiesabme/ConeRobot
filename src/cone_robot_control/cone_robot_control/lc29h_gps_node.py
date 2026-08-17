@@ -279,18 +279,28 @@ class LC29HGPSNode(Node):
                 auth_str = f"{self.ntrip_user}:{self.ntrip_password}"
                 auth_b64 = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
                 
-                http_req = (
-                    f"GET /{self.ntrip_mountpoint} HTTP/1.0\r\n"
-                    f"User-Agent: NTRIP ConeRobot/1.0\r\n"
-                    f"Accept: */*\r\n"
-                    f"Authorization: Basic {auth_b64}\r\n"
-                    f"Connection: close\r\n\r\n"
-                )
+                headers = [
+                    f"GET /{self.ntrip_mountpoint} HTTP/1.0",
+                    "User-Agent: NTRIP ConeRobot/1.0",
+                    "Accept: */*",
+                    f"Authorization: Basic {auth_b64}",
+                ]
+                
+                # Include Ntrip-GGA header if position is already locked
+                if self.latest_gga_raw:
+                    headers.append(f"Ntrip-GGA: {self.latest_gga_raw.strip()}")
+                
+                headers.append("Connection: close\r\n\r\n")
+                http_req = "\r\n".join(headers)
                 sock.sendall(http_req.encode('ascii'))
+
+                # Also send raw GGA sentence immediately into the stream for casters that listen on socket stream
+                if self.latest_gga_raw:
+                    sock.sendall((self.latest_gga_raw.strip() + "\r\n").encode('ascii'))
 
                 # Read HTTP response headers
                 header_data = b""
-                sock.settimeout(6.0)
+                sock.settimeout(10.0)
                 while b"\r\n\r\n" not in header_data:
                     chunk = sock.recv(1024)
                     if not chunk:
@@ -301,19 +311,22 @@ class LC29HGPSNode(Node):
                 first_line = header_text.splitlines()[0] if header_text else "EMPTY"
                 self.get_logger().info(f"[NTRIP] Caster Response: {first_line}")
 
-                if "ICY 200 OK" not in header_text and "200 OK" not in header_text:
+                if "ICY 200 OK" not in header_text and "200 OK" not in header_text and "HTTP/1.1 200" not in header_text and "HTTP/1.0 200" not in header_text:
                     raise ConnectionError(f"Caster rejected mountpoint [{self.ntrip_mountpoint}]: {first_line}")
+
+                # Extract any binary RTCM3 data that arrived after the \r\n\r\n header delimiter
+                _, _, initial_rtcm = header_data.partition(b"\r\n\r\n")
+                if initial_rtcm:
+                    self.rtcm_bytes_received += len(initial_rtcm)
+                    if self.serial_conn and self.serial_conn.is_open:
+                        with self.serial_lock:
+                            self.serial_conn.write(initial_rtcm)
 
                 self.get_logger().info(
                     f"[NTRIP] Stream Connected! Receiving live RTCM3 corrections from [{self.ntrip_mountpoint}]"
                 )
                 self.ntrip_connected = True
-                sock.settimeout(5.0)
-
-                # Send immediate GGA position if available
-                if self.latest_gga_raw:
-                    sock.sendall((self.latest_gga_raw.strip() + "\r\n").encode('ascii'))
-                
+                sock.settimeout(6.0)
                 last_gga_send_time = time.time()
 
                 # Stream RTCM3 binary correction data to LC29H serial port

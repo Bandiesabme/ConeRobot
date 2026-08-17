@@ -43,7 +43,7 @@ lc29h_gps_node:
     ntrip_caster: "rtk2go.com"       # For own base station: set to local IP e.g. "192.168.1.50" or "10.42.0.1"
     ntrip_port: 2101                # Standard NTRIP port
     ntrip_mountpoint: "PFORZEM"      # Base station mountpoint identifier (e.g. "PFORZEM" or your base mountpoint)
-    ntrip_user: "conerobot@rover.local"  # User email or account
+    ntrip_user: "conerobot@gmail.com"  # User email (RTK2Go requires valid email address)
     ntrip_password: "none"          # Password (or "none" for public casters)
     ntrip_send_gga: true            # Send position feedback to caster for VRS / keepalive
 
