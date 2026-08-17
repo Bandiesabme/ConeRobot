@@ -130,15 +130,20 @@ class BNO08xNode(Node):
             )
             i2c = busio.I2C(board.SCL, board.SDA)
             self.sensor = BNO08X_I2C(i2c, address=self.i2c_address)
+            time.sleep(0.5)
 
-            # Enable desired SHTP reports
+            # Enable desired SHTP reports with small delays
             if self.use_game_rotation:
                 self.sensor.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR)
             else:
                 self.sensor.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+            time.sleep(0.1)
 
             self.sensor.enable_feature(BNO_REPORT_GYROSCOPE)
+            time.sleep(0.1)
+
             self.sensor.enable_feature(BNO_REPORT_ACCELEROMETER)
+            time.sleep(0.1)
 
             self.get_logger().info('BNO08x hardware initialized successfully.')
             self.mock_hardware = False
