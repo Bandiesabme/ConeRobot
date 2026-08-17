@@ -1,4 +1,4 @@
-<?xml version="1.0"?>
+﻿<?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>cone_robot_control</name>
@@ -20,6 +20,6 @@
   <test_depend>python3-pytest</test_depend>
 
   <export>
-    <buildtype>ament_python</buildtype>
+    <build_type>ament_python</build_type>
   </export>
 </package>

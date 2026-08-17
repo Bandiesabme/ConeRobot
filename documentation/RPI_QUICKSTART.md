@@ -1,6 +1,6 @@
-# Raspberry Pi 5 RGS 2 Quickstart Guide
+﻿# Raspberry Pi 5 ROS 2 Quickstart Guide
 
-This guide lists the exact step-by-step commands to set up, configure, wire, and launch your **Raspberry Pi 5** for driving the **Cytron MDD10 Rev 2.0** dual motor driver and the **MikroE BNO08x (BNO080/BNO085) IMU** over RGS 2 Jazzy.
+This guide lists the exact step-by-step commands to set up, configure, wire, and launch your **Raspberry Pi 5** for driving the **Cytron MDD10 Rev 2.0** dual motor driver and the **MikroE BNO08x (BNO080/BNO085) IMU** over ROS 2 Jazzy.
 
 ---
 
@@ -14,7 +14,7 @@ sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-``
+```
 
 ### B. Install ROS 2 Jazzy, GPIO & I2C Libraries
 ```bash
@@ -26,22 +26,33 @@ sudo apt update
 sudo apt install -y python3-gpiozero python3-lgpio python3-smbus i2c-tools python3-pip
 
 # Install Adafruit BNO08x SHTP sensor library
-pip3 install --break-system-packages adafruit-circuitpython-bnz08x
+pip3 install --break-system-packages adafruit-circuitpython-bno08x
 ```
 
-### C. Enable Fast I2C Bus (400 kHz)
+### C. Configure I2C Bus Speed (Optional / Recommended)
+By default, the Raspberry Pi runs I2C at **100 kHz** (Standard Mode). For short jumper wires (< 20 cm), enabling **400 kHz** (Fast Mode) reduces bus latency:
+
 1. Edit boot config:
-   ``bash
+   ```bash
    sudo nano /boot/firmware/config.txt
-   ``
-2. Ensure the following line is active:
-   ``text
-   dtparam=i2c_arm=on,i2c_arm_baudrate=400000
-   ``
-3. Save (`Ctrl+O`, `Enter`) and exit (`Ctrl+X`), then reboot if newly enabled:
-   ``bash
+   ```
+2. Set the desired speed:
+   * **Short Wires (< 20 cm / standard jumpers):**
+     ```text
+     dtparam=i2c_arm=on,i2c_arm_baudrate=400000
+     ```
+   * **Long Wires (> 30 cm / high electrical noise):**
+     ```text
+     dtparam=i2c_arm=on,i2c_arm_baudrate=100000
+     ```
+3. Save (`Ctrl+O`, `Enter`) and exit (`Ctrl+X`), then reboot if modified:
+   ```bash
    sudo reboot
-   ``J
+   ```
+
+> [!TIP]
+> **Wire Length & Bus Speed:** If you experience intermittent I2C communication drops or if your sensor cables are long (> 30 cm), switch back to **100 kHz** (`100000`) for better noise immunity and signal integrity.
+
 ### D. Configure Raspberry Pi 5 GPIO Permissions & ROS 2 Environment
 ```bash
 # Permanent GPIO permissions udev rule
@@ -74,20 +85,20 @@ source ~/.bashrc
 | **GND**  | Pin 6 (or any GND) | GND | **Common Ground** |
 | **M1A / M1B** | Left DC Motor | - | Left Motor Terminals |
 | **M2A / M2B** | Right DC Motor | - | Right Motor Terminals |
-| **POWER X+/-)** | Battery Pack (TV–30V) | - | Motor Power Input |
+| **POWER (+/-)** | Battery Pack (7V–30V) | - | Motor Power Input |
 
-### B. MikroE BNO080 / BNO085 Click IMT�(Inner IMU)
+### B. MikroE BNO080 / BNO085 Click IMU (I2C Mode)
 | MikroE Click Pin | Position on Click | Raspberry Pi 5 Pin | Function | Notes |
 | :--- | :--- | :--- | :--- | :--- |
 | **3V3** | Left (Pin 7) | **Pin 1** | **3.3V Power** | Clean 3.3V power rail |
 | **GND** | Left (Pin 8) or Right (Pin 16) | **Pin 9** | **Ground** | Common Ground |
-| **SDA** | Right (Pin 14) | **Pin 3** | **GPIO 2 (SDAY** | I2C Data line |
+| **SDA** | Right (Pin 14) | **Pin 3** | **GPIO 2 (SDA)** | I2C Data line |
 | **SCL** | Right (Pin 13) | **Pin 5** | **GPIO 3 (SCL)** | I2C Clock line |
 | **INT** | Right (Pin 10) | **Pin 7** | **GPIO 4 (INT)** | Hardware Data-Ready Interrupt |
 | **RST** | Left (Pin 2) | *(Leave Unconnected)* | *Reset* | Auto power-on reset used |
 
 > [!TIP]
-> **Verify I2C Connection:** Run `sudo i2cdetect -y 1`. You should see address `4`` in the grid.
+> **Verify I2C Connection:** Run `sudo i2cdetect -y 1`. You should see address `4a` in the grid.
 
 ---
 
@@ -107,7 +118,7 @@ ros2 launch cone_robot_control robot.launch.py
 ```
 
 *When successful, you will see:*
-g``text
+```text
 [INFO] [mdd10_motor_controller]: Cytron MDD10 Motor Controller Node started successfully.
 [INFO] [bno08x_node]: BNO08x IMU Node initialized (Rate: 50.0 Hz, Flipped: True, Game Rotation: True)
 ```
