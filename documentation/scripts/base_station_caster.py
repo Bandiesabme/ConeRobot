@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
 ==============================================================================
-Raspberry Pi 5 RTK Base Station NTRIP Caster
+Raspberry Pi 5 RTK Base Station NTRIP Caster & Live Web Dashboard
 ==============================================================================
 Description:
-    Reads raw RTCM3 differential correction packets from the Base GNSS HAT
-    (e.g., Waveshare LC29H(BS) / LC29H(EA) on /dev/ttyAMA0 @ 115200 baud)
-    and hosts a high-performance local NTRIP 1.0/2.0 Caster TCP server.
-
-    Allows any number of rovers (your Cone Robot, laptops, survey tools)
-    to connect over Wi-Fi/Ethernet and receive live centimeter-grade RTK
-    correction streams simultaneously.
+    Reads raw RTCM3 differential correction packets and Survey-In status from
+    the Base GNSS HAT (Waveshare LC29H(BS) / LC29H(EA) on /dev/ttyAMA0 @ 115200)
+    and provides:
+      1. Local NTRIP 1.0/2.0 Caster TCP server on port 2101 (for rovers).
+      2. Modern Real-Time HTTP Web Dashboard on port 8080 (for browser monitoring).
 
 Usage:
-    python3 base_station_caster.py --port 2101 --mountpoint BASE --serial /dev/ttyAMA0 --baud 115200
+    python3 base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE --serial /dev/ttyAMA0
 ==============================================================================
 """
 
 import argparse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 import socket
 import sys
 import threading
 import time
-from typing import List
+from typing import Dict, List, Optional
 
 
 class NTRIPBaseCaster:
@@ -31,41 +31,74 @@ class NTRIPBaseCaster:
         serial_port: str = "/dev/ttyAMA0",
         baud_rate: int = 115200,
         server_port: int = 2101,
+        web_port: int = 8080,
         mountpoint: str = "BASE",
         password: str = "none"
     ) -> None:
         self.serial_port = serial_port
         self.baud_rate = baud_rate
         self.server_port = server_port
+        self.web_port = web_port
         self.mountpoint = mountpoint.strip("/")
         self.password = password
 
         self.clients: List[socket.socket] = []
+        self.client_metadata: Dict[str, dict] = {}
         self.clients_lock = threading.Lock()
         self.is_running = True
+        self.start_time = time.time()
         self.total_bytes_sent = 0
         self.total_rtcm_bytes_read = 0
 
+        # Survey-In Status Tracking
+        self.survey_status = "INITIALIZING"
+        self.survey_duration = 0
+        self.survey_target_duration = 300
+        self.survey_accuracy = 99.9
+        self.survey_target_accuracy = 2.0
+        self.survey_lat = 0.0
+        self.survey_lon = 0.0
+        self.survey_alt = 0.0
+        self.survey_valid = False
+        self.satellites_tracked = 0
+        self.hdop = 99.9
+        self.local_ip = self._get_local_ip()
+
+    def _get_local_ip(self) -> str:
+        """Helper to get primary network IP address."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
     def start(self) -> None:
-        """Starts the serial reader and TCP server threads."""
-        print("=" * 65)
-        print("  📡 RASPBERRY PI 5 RTK BASE STATION NTRIP CASTER")
-        print("=" * 65)
+        """Starts NTRIP Caster, Web Dashboard, and Serial Reader threads."""
+        print("=" * 70)
+        print("  📡 RASPBERRY PI 5 RTK BASE STATION & WEB DASHBOARD")
+        print("=" * 70)
+        print(f"  • Base Station IP   : {self.local_ip}")
         print(f"  • Serial Port       : {self.serial_port} @ {self.baud_rate} baud")
-        print(f"  • NTRIP Server Port : {self.server_port}")
-        print(f"  • Mountpoint        : /{self.mountpoint}")
-        print(f"  • Connection URL    : http://<BASE_PI_IP>:{self.server_port}/{self.mountpoint}")
-        print("=" * 65 + "\n")
+        print(f"  • NTRIP Server Port : {self.server_port} (Mountpoint: /{self.mountpoint})")
+        print(f"  • 🌐 Web Dashboard  : http://{self.local_ip}:{self.web_port}")
+        print("=" * 70 + "\n")
 
-        # Start background TCP Server thread
-        server_thread = threading.Thread(target=self._tcp_server_loop, daemon=True)
-        server_thread.start()
+        # 1. Start background TCP Server thread for NTRIP Rovers
+        ntrip_thread = threading.Thread(target=self._tcp_server_loop, daemon=True)
+        ntrip_thread.start()
 
-        # Start periodic diagnostics logger
+        # 2. Start background Web Dashboard HTTP server
+        web_thread = threading.Thread(target=self._web_server_loop, daemon=True)
+        web_thread.start()
+
+        # 3. Start periodic console logger
         diag_thread = threading.Thread(target=self._diagnostic_logger_loop, daemon=True)
         diag_thread.start()
 
-        # Run serial reader loop in main thread
+        # 4. Run serial reader in main thread
         self._serial_reader_loop()
 
     def _tcp_server_loop(self) -> None:
@@ -87,13 +120,14 @@ class NTRIPBaseCaster:
                 )
                 client_thread.start()
         except Exception as e:
-            print(f"❌ [Server Error] {e}")
+            print(f"❌ [NTRIP Server Error] {e}")
         finally:
             server_sock.close()
 
     def _handle_client_handshake(self, client_sock: socket.socket, client_addr: tuple) -> None:
         """Handles standard NTRIP 1.0/2.0 HTTP header handshake with the rover."""
         client_sock.settimeout(5.0)
+        addr_str = f"{client_addr[0]}:{client_addr[1]}"
         try:
             req_data = b""
             while b"\r\n\r\n" not in req_data and b"\n\n" not in req_data:
@@ -107,7 +141,7 @@ class NTRIPBaseCaster:
 
             req_text = req_data.decode('latin1', errors='ignore')
             first_line = req_text.splitlines()[0] if req_text else ""
-            print(f"[Rover Connected] {client_addr[0]}:{client_addr[1]} -> Request: {first_line}")
+            print(f"\n[Rover Connected] {addr_str} -> Request: {first_line}")
 
             # Verify requested mountpoint
             if f"/{self.mountpoint}" not in first_line and f"/{self.mountpoint.lower()}" not in first_line:
@@ -122,35 +156,116 @@ class NTRIPBaseCaster:
 
             with self.clients_lock:
                 self.clients.append(client_sock)
+                self.client_metadata[addr_str] = {
+                    "ip": client_addr[0],
+                    "port": client_addr[1],
+                    "connected_at": time.time(),
+                    "bytes_sent": 0
+                }
             print(f"✅ [Stream Active] Streaming RTCM3 to Rover: {client_addr[0]} (Active Rovers: {len(self.clients)})")
 
         except Exception as e:
-            print(f"⚠️ [Handshake Error with {client_addr[0]}]: {e}")
+            print(f"⚠️ [Handshake Error with {addr_str}]: {e}")
             try:
                 client_sock.close()
             except Exception:
                 pass
 
+    def _parse_nmea_coordinate(self, raw_coord: str, direction: str, is_lon: bool = False) -> Optional[float]:
+        """Convert NMEA DDMM.MMMM format to decimal degrees."""
+        if not raw_coord or not direction:
+            return None
+        try:
+            deg_digits = 3 if is_lon else 2
+            degrees = float(raw_coord[:deg_digits])
+            minutes = float(raw_coord[deg_digits:])
+            decimal = degrees + (minutes / 60.0)
+            if direction in ['S', 'W']:
+                decimal = -decimal
+            return decimal
+        except ValueError:
+            return None
+
+    def _parse_survey_line(self, line: str) -> None:
+        """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
+        try:
+            if line.startswith('$PQTMSURVEY') or 'PQTMSURVEY' in line:
+                parts = line.split(',')
+                if len(parts) >= 8:
+                    status_code = parts[3]
+                    valid_code = parts[4]
+                    self.survey_duration = int(parts[5]) if parts[5].isdigit() else self.survey_duration
+                    self.survey_valid = (valid_code == '1')
+                    if len(parts) >= 10 and parts[9].replace('.', '', 1).isdigit():
+                        self.survey_accuracy = float(parts[9])
+                    
+                    if status_code == '2' or self.survey_valid:
+                        self.survey_status = "COMPLETED"
+                    elif status_code == '1':
+                        self.survey_status = "IN_PROGRESS"
+                    else:
+                        self.survey_status = "INITIALIZING"
+
+            elif line.startswith('$GNGGA') or line.startswith('$GPGGA'):
+                parts = line.split(',')
+                if len(parts) >= 10:
+                    lat = self._parse_nmea_coordinate(parts[2], parts[3], False)
+                    lon = self._parse_nmea_coordinate(parts[4], parts[5], True)
+                    if lat and lon:
+                        self.survey_lat = lat
+                        self.survey_lon = lon
+                    if parts[7].isdigit():
+                        self.satellites_tracked = int(parts[7])
+                    if parts[8].replace('.', '', 1).isdigit():
+                        self.hdop = float(parts[8])
+                    if parts[9].replace('.', '', 1).isdigit():
+                        self.survey_alt = float(parts[9])
+        except Exception:
+            pass
+
     def _serial_reader_loop(self) -> None:
-        """Reads raw RTCM3 binary packets from Base GNSS module and multicasts to all rovers."""
+        """Reads RTCM3 binary data + NMEA sentences from Base GNSS module and multicasts."""
         import serial
 
         while self.is_running:
             ser = None
             try:
                 print(f"[Serial] Opening Base GNSS UART: {self.serial_port} @ {self.baud_rate} baud...")
-                ser = serial.Serial(self.serial_port, self.baud_rate, timeout=1.0)
-                print(f"✅ [Serial] Base GNSS UART active! Streaming RTCM3 packets...")
+                ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.5)
+                print(f"✅ [Serial] Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...\n")
+
+                # Send survey status query command to Quectel module
+                query_cmd = b"$PQTMSURVEY*77\r\n"
+                ser.write(query_cmd)
+                last_query_time = time.time()
+
+                buffer = b""
 
                 while self.is_running:
-                    # Read incoming RTCM3 binary chunk from base hardware
+                    if time.time() - last_query_time > 4.0:
+                        try:
+                            ser.write(b"$PQTMSURVEY*77\r\n")
+                            last_query_time = time.time()
+                        except Exception:
+                            pass
+
                     chunk = ser.read(1024)
                     if not chunk:
                         continue
 
                     self.total_rtcm_bytes_read += len(chunk)
 
-                    # Multicast to all connected rovers
+                    # Extract ASCII NMEA lines to check survey status
+                    buffer += chunk
+                    if b"\n" in buffer:
+                        lines = buffer.split(b"\n")
+                        buffer = lines[-1]
+                        for raw_line in lines[:-1]:
+                            line_str = raw_line.decode('ascii', errors='ignore').strip()
+                            if line_str.startswith('$'):
+                                self._parse_survey_line(line_str)
+
+                    # Multicast binary RTCM3 correction chunk to all connected rovers
                     with self.clients_lock:
                         dead_clients = []
                         for client in self.clients:
@@ -166,7 +281,6 @@ class NTRIPBaseCaster:
                                 dead.close()
                             except Exception:
                                 pass
-                            print(f"ℹ️ [Rover Disconnected] Remaining Active Rovers: {len(self.clients)}")
 
             except Exception as e:
                 print(f"❌ [Serial Error] {e}. Retrying in 2 seconds...")
@@ -179,21 +293,329 @@ class NTRIPBaseCaster:
                         pass
 
     def _diagnostic_logger_loop(self) -> None:
-        """Prints live caster throughput status every 10 seconds."""
+        """Prints live caster throughput and Survey-In progress to console."""
         while self.is_running:
-            time.sleep(10.0)
+            time.sleep(6.0)
             with self.clients_lock:
                 rover_count = len(self.clients)
             rtcm_kb = self.total_rtcm_bytes_read / 1024.0
-            out_kb = self.total_bytes_sent / 1024.0
-            print(f"[Base Caster Status] Active Rovers: {rover_count} | Ingested RTCM: {rtcm_kb:.1f} KB | Broadcasted: {out_kb:.1f} KB")
+
+            if self.survey_valid or self.survey_status == "COMPLETED":
+                status_icon = "🎯 [BASE READY]"
+                details = f"LOCKED (Accuracy: < {self.survey_accuracy:.2f}m) | Pos: ({self.survey_lat:.7f}, {self.survey_lon:.7f})"
+            elif self.survey_duration > 0:
+                status_icon = "⏳ [SURVEY-IN]"
+                details = f"Observed: {self.survey_duration}s | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked}"
+            else:
+                status_icon = "🛰️ [SURVEY-IN]"
+                details = f"Tracking {self.satellites_tracked} Sats (HDOP: {self.hdop:.2f}) | Pos: ({self.survey_lat:.7f}, {self.survey_lon:.7f})"
+
+            print(f"{status_icon} Status: {details} | Active Rovers: {rover_count} | RTCM: {rtcm_kb:.1f} KB")
+
+    def get_status_json(self) -> dict:
+        """Returns JSON representation of all base station metrics."""
+        with self.clients_lock:
+            active_rovers = [
+                {
+                    "ip": meta["ip"],
+                    "port": meta["port"],
+                    "duration_sec": int(time.time() - meta["connected_at"])
+                }
+                for meta in self.client_metadata.values()
+            ]
+
+        uptime_sec = int(time.time() - self.start_time)
+        return {
+            "uptime_sec": uptime_sec,
+            "survey_status": self.survey_status,
+            "survey_valid": self.survey_valid or (self.survey_status == "COMPLETED"),
+            "survey_duration": self.survey_duration,
+            "survey_target_duration": self.survey_target_duration,
+            "survey_accuracy": round(self.survey_accuracy, 2),
+            "survey_target_accuracy": self.survey_target_accuracy,
+            "latitude": round(self.survey_lat, 8),
+            "longitude": round(self.survey_lon, 8),
+            "altitude": round(self.survey_alt, 2),
+            "satellites": self.satellites_tracked,
+            "hdop": round(self.hdop, 2),
+            "rtcm_ingested_kb": round(self.total_rtcm_bytes_read / 1024.0, 1),
+            "rtcm_broadcasted_kb": round(self.total_bytes_sent / 1024.0, 1),
+            "active_rovers_count": len(self.clients),
+            "active_rovers": active_rovers,
+            "mountpoint": self.mountpoint,
+            "ntrip_port": self.server_port,
+            "local_ip": self.local_ip
+        }
+
+    def _web_server_loop(self) -> None:
+        """Hosts lightweight HTTP Web Dashboard on port 8080."""
+        caster_instance = self
+
+        class DashboardHandler(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):
+                pass  # Suppress HTTP request logs in terminal
+
+            def do_GET(self):
+                if self.path == '/api/status':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps(caster_instance.get_status_json()).encode('utf-8'))
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.end_headers()
+                    self.wfile.write(DASHBOARD_HTML.encode('utf-8'))
+
+        server = HTTPServer(('0.0.0.0', self.web_port), DashboardHandler)
+        try:
+            server.serve_forever()
+        except Exception:
+            server.server_close()
+
+
+# HTML5 / CSS / Vanilla JS Web Dashboard
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ConeRobot RTK Base Station Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(23, 32, 54, 0.7);
+      --card-border: rgba(56, 189, 248, 0.15);
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.35);
+      --success: #10b981;
+      --success-glow: rgba(16, 185, 129, 0.3);
+      --warning: #f59e0b;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Outfit', sans-serif; }
+    body { background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; }
+    .container { width: 100%; max-width: 1000px; }
+    
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--card-border); flex-wrap: wrap; gap: 12px; }
+    .logo { display: flex; align-items: center; gap: 12px; }
+    .logo-icon { font-size: 32px; filter: drop-shadow(0 0 10px var(--accent)); }
+    h1 { font-size: 24px; font-weight: 800; background: linear-gradient(135deg, #fff, var(--accent)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .status-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 9999px; font-size: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; background: rgba(56, 189, 248, 0.1); border: 1px solid var(--accent); color: var(--accent); }
+    .status-badge.locked { background: rgba(16, 185, 129, 0.15); border-color: var(--success); color: var(--success); box-shadow: 0 0 15px var(--success-glow); }
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { transform: scale(0.95); opacity: 0.8; } 50% { transform: scale(1.4); opacity: 1; } 100% { transform: scale(0.95); opacity: 0.8; } }
+
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
+    .card { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--card-border); border-radius: 16px; padding: 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); }
+    .card-title { font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+    
+    /* Metrics */
+    .metric-value { font-size: 32px; font-weight: 800; font-family: 'JetBrains Mono', monospace; color: #fff; }
+    .metric-unit { font-size: 16px; font-weight: 500; color: var(--text-muted); margin-left: 4px; }
+    .progress-bar-bg { background: rgba(255, 255, 255, 0.08); height: 10px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; }
+    .progress-bar-fill { background: linear-gradient(90deg, var(--warning), var(--accent)); height: 100%; width: 0%; transition: width 0.5s ease; }
+    .progress-bar-fill.complete { background: var(--success); box-shadow: 0 0 12px var(--success-glow); }
+    
+    .data-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 14px; }
+    .data-row:last-child { border-bottom: none; }
+    .data-label { color: var(--text-muted); }
+    .data-val { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+    
+    /* Config Box */
+    .code-box { background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #a5f3fc; overflow-x: auto; margin-top: 8px; }
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--accent); color: #000; padding: 8px 16px; border-radius: 8px; font-weight: 700; text-decoration: none; font-size: 13px; margin-top: 12px; transition: transform 0.2s, box-shadow 0.2s; border: none; cursor: pointer; }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 16px var(--accent-glow); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <div class="logo-icon">📡</div>
+        <div>
+          <h1>RTK Base Station</h1>
+          <div style="font-size: 12px; color: var(--text-muted);">Raspberry Pi 5 Local Caster</div>
+        </div>
+      </div>
+      <div id="statusBadge" class="status-badge">
+        <div class="pulse-dot"></div>
+        <span id="statusText">Surveying...</span>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- Survey-In Progress Card -->
+      <div class="card">
+        <div class="card-title">
+          <span>🎯 Survey-In Calibration</span>
+          <span id="surveyPercent" class="data-val">0%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div id="surveyProgressBar" class="progress-bar-fill"></div>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Elapsed Time:</span>
+          <span id="surveyTime" class="data-val">0s / 300s</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Current Accuracy (StdDev):</span>
+          <span id="surveyAcc" class="data-val">-- m</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Target Accuracy Threshold:</span>
+          <span class="data-val">&lt; 2.00 m</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Anchor Status:</span>
+          <span id="anchorStatus" class="data-val" style="color: var(--warning);">Calculating...</span>
+        </div>
+      </div>
+
+      <!-- Satellite & Signal Quality -->
+      <div class="card">
+        <div class="card-title">🛰️ GNSS Satellite Lock</div>
+        <div style="display: flex; gap: 24px; margin-bottom: 12px;">
+          <div>
+            <div class="data-label">Satellites Tracked</div>
+            <div class="metric-value"><span id="satsCount">0</span><span class="metric-unit">sats</span></div>
+          </div>
+          <div>
+            <div class="data-label">HDOP Quality</div>
+            <div class="metric-value"><span id="hdopVal">--</span></div>
+          </div>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Constellations:</span>
+          <span class="data-val">GPS + GLO + GAL + BDS</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Raw RTCM3 Ingested:</span>
+          <span id="rtcmIngested" class="data-val">0.0 KB</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Broadcasted Throughput:</span>
+          <span id="rtcmBroadcast" class="data-val">0.0 KB</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <!-- Fixed Reference Coordinates -->
+      <div class="card">
+        <div class="card-title">📍 Base Station Coordinates</div>
+        <div class="data-row">
+          <span class="data-label">Latitude:</span>
+          <span id="baseLat" class="data-val">0.00000000°</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Longitude:</span>
+          <span id="baseLon" class="data-val">0.00000000°</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Elevation / Altitude:</span>
+          <span id="baseAlt" class="data-val">0.00 m</span>
+        </div>
+        <a id="mapsBtn" href="#" target="_blank" class="btn">🗺️ Open in Google Maps</a>
+      </div>
+
+      <!-- Connected Rovers & NTRIP URL -->
+      <div class="card">
+        <div class="card-title">
+          <span>📡 Connected Rovers</span>
+          <span id="roversCount" class="data-val" style="color: var(--accent);">0 Active</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">NTRIP Caster Port:</span>
+          <span id="ntripPort" class="data-val">2101</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Mountpoint:</span>
+          <span id="mountpointVal" class="data-val">/BASE</span>
+        </div>
+        <div class="data-label" style="margin-top: 10px;">Rover Configuration Snippet:</div>
+        <div id="configSnippet" class="code-box">Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function updateDashboard() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        // Update Survey Progress
+        const isComplete = data.survey_valid || data.survey_status === 'COMPLETED';
+        const badge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+        const progressBar = document.getElementById('surveyProgressBar');
+        const anchorStatus = document.getElementById('anchorStatus');
+
+        if (isComplete) {
+          badge.className = 'status-badge locked';
+          statusText.textContent = '🎯 Base Ready (Locked)';
+          progressBar.className = 'progress-bar-fill complete';
+          progressBar.style.width = '100%';
+          document.getElementById('surveyPercent').textContent = '100%';
+          anchorStatus.textContent = 'LOCKED & VALID';
+          anchorStatus.style.color = 'var(--success)';
+        } else {
+          badge.className = 'status-badge';
+          statusText.textContent = '⏳ Surveying In Progress';
+          progressBar.className = 'progress-bar-fill';
+          const pct = Math.min(100, Math.round((data.survey_duration / data.survey_target_duration) * 100));
+          progressBar.style.width = pct + '%';
+          document.getElementById('surveyPercent').textContent = pct + '%';
+          anchorStatus.textContent = 'Accumulating Samples...';
+          anchorStatus.style.color = 'var(--warning)';
+        }
+
+        document.getElementById('surveyTime').textContent = `${data.survey_duration}s / ${data.survey_target_duration}s`;
+        document.getElementById('surveyAcc').textContent = `${data.survey_accuracy.toFixed(2)} m`;
+        document.getElementById('satsCount').textContent = data.satellites;
+        document.getElementById('hdopVal').textContent = data.hdop.toFixed(2);
+        document.getElementById('rtcmIngested').textContent = `${data.rtcm_ingested_kb.toFixed(1)} KB`;
+        document.getElementById('rtcmBroadcast').textContent = `${data.rtcm_broadcasted_kb.toFixed(1)} KB`;
+
+        document.getElementById('baseLat').textContent = data.latitude.toFixed(8) + '°';
+        document.getElementById('baseLon').textContent = data.longitude.toFixed(8) + '°';
+        document.getElementById('baseAlt').textContent = data.altitude.toFixed(2) + ' m';
+        document.getElementById('mapsBtn').href = `https://www.google.com/maps?q=${data.latitude},${data.longitude}`;
+
+        document.getElementById('roversCount').textContent = `${data.active_rovers_count} Active`;
+        document.getElementById('ntripPort').textContent = data.ntrip_port;
+        document.getElementById('mountpointVal').textContent = `/${data.mountpoint}`;
+
+        document.getElementById('configSnippet').textContent = 
+`ntrip_caster: "${data.local_ip}"
+ntrip_port: ${data.ntrip_port}
+ntrip_mountpoint: "${data.mountpoint}"`;
+
+      } catch (err) {
+        console.error('Failed to fetch status:', err);
+      }
+    }
+
+    setInterval(updateDashboard, 1000);
+    updateDashboard();
+  </script>
+</body>
+</html>
+"""
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Raspberry Pi 5 RTK Base Station NTRIP Caster")
+    parser = argparse.ArgumentParser(description="Raspberry Pi 5 RTK Base Station NTRIP Caster & Web Dashboard")
     parser.add_argument('--serial', type=str, default='/dev/ttyAMA0', help="Base GNSS UART port (default: /dev/ttyAMA0)")
     parser.add_argument('--baud', type=int, default=115200, help="Baud rate (default: 115200)")
     parser.add_argument('--port', type=int, default=2101, help="NTRIP server port (default: 2101)")
+    parser.add_argument('--web-port', type=int, default=8080, help="Web Dashboard port (default: 8080)")
     parser.add_argument('--mountpoint', type=str, default='BASE', help="NTRIP mountpoint name (default: BASE)")
     parser.add_argument('--password', type=str, default='none', help="Optional authentication password")
     args = parser.parse_args()
@@ -202,6 +624,7 @@ def main() -> None:
         serial_port=args.serial,
         baud_rate=args.baud,
         server_port=args.port,
+        web_port=args.web_port,
         mountpoint=args.mountpoint,
         password=args.password
     )
