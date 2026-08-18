@@ -13,6 +13,7 @@ The system uses a **Remote-Brain Offloaded Compute Architecture**: heavy decisio
 | 🏗️ **[Remote-Brain Architecture](documentation/ARCHITECTURE.md)** | Deep dive into the Remote-Brain offloading paradigm, sequence timing loops, topic registry, and modular plugin pattern. |
 | 🍓 **[Raspberry Pi 5 Setup & Wiring Guide](documentation/RPI5_SETUP.md)** | Hardware setup for Pi 5, swap memory, udev GPIO rules, I2C speed, and Cytron MDD10 / BNO08x wiring pinouts. |
 | 📡 **[GPS/RTK Setup Guide](documentation/GPS_RTK_SETUP.md)** | Waveshare LC29H(DA) Dual-band GPS/RTK setup, Pi 5 `/dev/ttyAMA0` serial config, NTRIP rover client, and ROS 2 `/fix` topic. |
+| 🏰 **[RTK Base Station Setup Guide](documentation/BASE_STATION_SETUP.md)** | Dedicated Pi 5 Base Station setup, LC29H(BS) UART configuration, and local NTRIP caster server. |
 | 🦊 **[Foxglove Telemetry Guide](documentation/FOXGLOVE_SETUP.md)** | Cross-platform WebSocket telemetry setup (`ws://10.42.0.10:8765`), 2D/3D LiDAR point clouds, and teleop joystick controls. |
 | 📦 **[Archive / Legacy Guides](documentation/archive/)** | Historical guides including WSL 2 setup (`documentation/archive/WSL2_SETUP.md`) and Wi-Fi hotspot setup (`documentation/archive/rpi_wifi_hotspot_guide.md`). |
 

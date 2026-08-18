@@ -27,6 +27,7 @@ setup(
             'mdd10_motor_controller = cone_robot_control.mdd10_motor_controller:main',
             'bno08x_node = cone_robot_control.bno08x_node:main',
             'lc29h_gps_node = cone_robot_control.lc29h_gps_node:main',
+            'base_station_caster = cone_robot_control.base_station_caster:main',
             'teleop_keyboard = cone_robot_control.teleop_keyboard:main',
             'simple_publisher = cone_robot_control.simple_publisher:main',
         ],
