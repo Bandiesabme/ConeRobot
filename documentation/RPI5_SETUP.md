@@ -26,7 +26,8 @@ bash documentation/scripts/ros2setup.sh
 
 # Install Raspberry Pi 5 GPIO, I2C & ROS 2 CLI tools
 sudo apt update
-sudo apt install -y python3-gpiozero python3-lgpio python3-smbus i2c-tools python3-pip ros-jazzy-ros2cli-common-extensions ros-jazzy-ros2topic ros-jazzy-ros2node ros-jazzy-tf2-ros ros-jazzy-tf2-geometry-msgs
+sudo apt install -y python3-gpiozero python3-lgpio python3-smbus i2c-tools python3-pip ros-jazzy-ros2cli-common-extensions ros-jazzy-ros2topic ros-jazzy-ros2node ros-jazzy-tf2-ros ros-jazzy-tf2-geometry-msgs ros-jazzy-rf2o-laser-odometry
+
 
 # Install Adafruit BNO08x IMU library
 pip3 install --break-system-packages adafruit-circuitpython-bno08x

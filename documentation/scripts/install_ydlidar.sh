@@ -15,7 +15,7 @@ echo "=== Workspace Root detected: $WORKSPACE_ROOT ==="
 
 echo "=== 1. Installing Prerequisites ==="
 sudo apt update
-sudo apt install -y cmake build-essential git python3-colcon-common-extensions ros-jazzy-tf2-ros
+sudo apt install -y cmake build-essential git python3-colcon-common-extensions ros-jazzy-tf2-ros ros-jazzy-rf2o-laser-odometry
 
 echo "=== 2. Building and Installing YDLidar-SDK C++ Library ==="
 SDK_DIR="$HOME/YDLidar-SDK"

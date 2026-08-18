@@ -56,13 +56,36 @@ lc29h_gps_node:
     # ntrip_password: "none"
     # ntrip_send_gga: true
 
-# 4. Teleop Keyboard Settings (Laptop)
+# 4. Step Motion Controller (Turn X deg & Drive Y cm)
+step_motion_controller:
+  ros__parameters:
+    control_rate_hz: 20.0             # Control loop execution frequency
+    
+    # --- Turning Parameters (IMU Closed Loop) ---
+    turn_kp: 0.04                     # Proportional gain for turning
+    turn_tolerance_deg: 1.5           # Heading error threshold in degrees
+    min_turn_speed: 0.25              # Minimum turning speed (rad/s) to overcome motor deadband
+    max_turn_speed: 1.8               # Maximum angular speed (rad/s)
+    turn_settle_time_s: 0.25          # Required stable duration before proceeding to drive
+
+    # --- Linear Driving Parameters ---
+    default_linear_speed: 0.25        # Forward/reverse cruising speed (m/s)
+    yaw_lock_kp: 0.05                 # Active IMU straight-line yaw correction gain
+    calibrated_speed_mps: 0.25        # Measured speed for open-loop time integration fallback
+
+    # --- Multi-Sensor Distance Tracking ---
+    # Options: 'auto' (detects odom -> gps -> time), 'odom', 'gps', 'time'
+    distance_source: "auto"
+    gps_require_rtk: true             # Require RTK Fix/Float to use GPS distance
+    mock_mode: false
+
+# 5. Teleop Keyboard Settings (Laptop)
 teleop_keyboard:
   ros__parameters:
     default_linear_speed: 0.2
     default_angular_speed: 0.5
 
-# 5. Vision & Camera Settings (Future Modules)
+# 6. Vision & Camera Settings (Future Modules)
 cone_detector:
   ros__parameters:
     camera_topic: "/camera/image_raw"

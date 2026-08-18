@@ -73,17 +73,31 @@ git pull origin main
 colcon build --symlink-install
 source install/setup.bash
 
-# Launch Motors + IMU
-ros2 launch cone_robot_control robot.launch.py
+# Option A: Launch for GPS Robot (Motors + IMU + RTK GPS + Step Controller)
+ros2 launch cone_robot_control robot.launch.py robot_type:=gps
 
-# Optional: Launch with LiDAR enabled
-ros2 launch cone_robot_control robot.launch.py launch_lidar:=true
+# Option B: Launch for LiDAR Robot (Motors + IMU + YDLIDAR + Step Controller)
+ros2 launch cone_robot_control robot.launch.py robot_type:=lidar
+```
+
+### Motion Step Control Testing (`Turn X° & Drive Y cm`):
+Send discrete turn and drive commands on `/cmd_step` (`Vector3: x=distance_cm, z=turn_degrees`):
+```bash
+# 1. Turn 90° Clockwise
+ros2 topic pub --once /cmd_step geometry_msgs/msg/Vector3 "{x: 0.0, y: 0.0, z: 90.0}"
+
+# 2. Drive 50 cm Forward in a Straight Line
+ros2 topic pub --once /cmd_step geometry_msgs/msg/Vector3 "{x: 50.0, y: 0.0, z: 0.0}"
+
+# 3. Compound Move: Turn -45° (Left) then Drive 100 cm (1 meter)
+ros2 topic pub --once /cmd_step geometry_msgs/msg/Vector3 "{x: 100.0, y: 0.0, z: -45.0}"
+
+# Monitor live motion execution status
+ros2 topic echo /step_status
 ```
 
 ### Visual Telemetry (Foxglove Studio over WebSockets):
-1. On Raspberry Pi 5, run Foxglove Bridge:
-   ```bash
-   ros2 run foxglove_bridge foxglove_bridge
-   ```
+1. On Raspberry Pi 5, Foxglove bridge starts automatically with `robot.launch.py` (port `8765`).
 2. Open **[studio.foxglove.dev](https://studio.foxglove.dev)** in Chrome/Edge, click **Open Connection**, and enter `ws://<PI5_IP>:8765`.
-3. Add a 2D/3D LaserScan panel for `/scan` or a Teleop panel for `/cmd_vel` to monitor and drive the robot live!
+3. Add panels for `/step_status`, `/imu/heading`, `/scan`, and `/cmd_vel` to monitor the robot live!
+
