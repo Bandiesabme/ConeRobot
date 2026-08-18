@@ -38,14 +38,23 @@ lc29h_gps_node:
     mock_hardware: false
 
     # --- NTRIP RTK Correction Stream Configuration ---
-    # Supports public networks (RTK2Go, CORS, SAPOS) or your own local base station
     ntrip_enable: true
-    ntrip_caster: "rtk2go.com"       # For own base station: set to local IP e.g. "192.168.1.50" or "10.42.0.1"
-    ntrip_port: 2101                # Standard NTRIP port
-    ntrip_mountpoint: "PFORZEM"      # Base station mountpoint identifier (e.g. "PFORZEM" or your base mountpoint)
-    ntrip_user: "conerobot@gmail.com"  # User email (RTK2Go requires valid email address)
-    ntrip_password: "none"          # Password (or "none" for public casters)
-    ntrip_send_gga: true            # Send position feedback to caster for VRS / keepalive
+
+    # Option A: Local Base Station Pi (Default - Ultra-precise < 1 cm)
+    ntrip_caster: "192.168.0.102"      # Base Station Pi IP (or "gpsBaseStation.local")
+    ntrip_port: 2101                  # Base Station NTRIP port
+    ntrip_mountpoint: "BASE"          # Base Station mountpoint
+    ntrip_user: "conerobot"           # Local username
+    ntrip_password: "none"            # Local password
+    ntrip_send_gga: true              # Send position feedback to base
+
+    # Option B: Public RTK2Go Caster (Pforzheim Station)
+    # ntrip_caster: "rtk2go.com"
+    # ntrip_port: 2101
+    # ntrip_mountpoint: "PFORZEM"
+    # ntrip_user: "conerobot@gmail.com"
+    # ntrip_password: "none"
+    # ntrip_send_gga: true
 
 # 4. Teleop Keyboard Settings (Laptop)
 teleop_keyboard:
