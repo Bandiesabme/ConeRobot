@@ -9,6 +9,7 @@ Description:
     and provides:
       1. Local NTRIP 1.0/2.0 Caster TCP server on port 2101 (for rovers).
       2. Modern Real-Time HTTP Web Dashboard on port 8080 (for browser monitoring).
+      3. Live Terminal Log & NMEA Stream Viewer directly inside the Web UI.
 
 Usage:
     python3 base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE --serial /dev/ttyAMA0
@@ -16,8 +17,11 @@ Usage:
 """
 
 import argparse
+from collections import deque
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import re
 import socket
 import sys
 import threading
@@ -49,8 +53,13 @@ class NTRIPBaseCaster:
         self.start_time = time.time()
         self.total_bytes_sent = 0
         self.total_rtcm_bytes_read = 0
+        self.rtcm_packet_count = 0
 
-        # Survey-In Status Tracking
+        # Log history buffer for the Web Dashboard
+        self.logs = deque(maxlen=100)
+        self.logs_lock = threading.Lock()
+
+        # Survey-In & GNSS Status
         self.survey_status = "INITIALIZING"
         self.survey_duration = 0
         self.survey_target_duration = 300
@@ -62,7 +71,17 @@ class NTRIPBaseCaster:
         self.survey_valid = False
         self.satellites_tracked = 0
         self.hdop = 99.9
+        self.last_nmea_seen_time = 0.0
         self.local_ip = self._get_local_ip()
+
+        self._add_log(f"Base Station initialized. Serial: {self.serial_port}, Web: http://{self.local_ip}:{self.web_port}")
+
+    def _add_log(self, text: str, level: str = "INFO") -> None:
+        """Adds a log entry with timestamp for the web console and terminal."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        entry = {"time": ts, "level": level, "msg": text}
+        with self.logs_lock:
+            self.logs.append(entry)
 
     def _get_local_ip(self) -> str:
         """Helper to get primary network IP address."""
@@ -77,14 +96,14 @@ class NTRIPBaseCaster:
 
     def start(self) -> None:
         """Starts NTRIP Caster, Web Dashboard, and Serial Reader threads."""
-        print("=" * 70)
+        print("=" * 75)
         print("  📡 RASPBERRY PI 5 RTK BASE STATION & WEB DASHBOARD")
-        print("=" * 70)
+        print("=" * 75)
         print(f"  • Base Station IP   : {self.local_ip}")
         print(f"  • Serial Port       : {self.serial_port} @ {self.baud_rate} baud")
         print(f"  • NTRIP Server Port : {self.server_port} (Mountpoint: /{self.mountpoint})")
         print(f"  • 🌐 Web Dashboard  : http://{self.local_ip}:{self.web_port}")
-        print("=" * 70 + "\n")
+        print("=" * 75 + "\n")
 
         # 1. Start background TCP Server thread for NTRIP Rovers
         ntrip_thread = threading.Thread(target=self._tcp_server_loop, daemon=True)
@@ -109,7 +128,7 @@ class NTRIPBaseCaster:
         try:
             server_sock.bind(('0.0.0.0', self.server_port))
             server_sock.listen(10)
-            print(f"[NTRIP Server] Listening for rovers on port {self.server_port}...")
+            self._add_log(f"NTRIP Server listening on port {self.server_port}")
 
             while self.is_running:
                 client_sock, client_addr = server_sock.accept()
@@ -120,7 +139,7 @@ class NTRIPBaseCaster:
                 )
                 client_thread.start()
         except Exception as e:
-            print(f"❌ [NTRIP Server Error] {e}")
+            self._add_log(f"Server error: {e}", "ERROR")
         finally:
             server_sock.close()
 
@@ -141,16 +160,14 @@ class NTRIPBaseCaster:
 
             req_text = req_data.decode('latin1', errors='ignore')
             first_line = req_text.splitlines()[0] if req_text else ""
-            print(f"\n[Rover Connected] {addr_str} -> Request: {first_line}")
+            self._add_log(f"Rover handshake from {addr_str}: {first_line}")
 
-            # Verify requested mountpoint
             if f"/{self.mountpoint}" not in first_line and f"/{self.mountpoint.lower()}" not in first_line:
-                print(f"⚠️ [Rejected] Rover requested unknown mountpoint: {first_line}")
+                self._add_log(f"Rover requested unknown mountpoint: {first_line}", "WARN")
                 client_sock.sendall(b"HTTP/1.0 404 Not Found\r\n\r\n")
                 client_sock.close()
                 return
 
-            # Respond with standard NTRIP ICY 200 OK
             client_sock.sendall(b"ICY 200 OK\r\n\r\n")
             client_sock.setblocking(False)
 
@@ -162,10 +179,10 @@ class NTRIPBaseCaster:
                     "connected_at": time.time(),
                     "bytes_sent": 0
                 }
-            print(f"✅ [Stream Active] Streaming RTCM3 to Rover: {client_addr[0]} (Active Rovers: {len(self.clients)})")
+            self._add_log(f"Stream Active: Broadcasting RTCM3 to Rover {client_addr[0]}")
 
         except Exception as e:
-            print(f"⚠️ [Handshake Error with {addr_str}]: {e}")
+            self._add_log(f"Handshake error with {addr_str}: {e}", "WARN")
             try:
                 client_sock.close()
             except Exception:
@@ -189,7 +206,10 @@ class NTRIPBaseCaster:
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
         try:
-            if line.startswith('$PQTMSURVEY') or 'PQTMSURVEY' in line:
+            self.last_nmea_seen_time = time.time()
+
+            # Parse Quectel Survey-In Status: $PQTMSURVEY,1,OK,<status>,<valid>,<duration>,<lat>,<lon>,<alt>,<acc>*
+            if 'PQTMSURVEY' in line:
                 parts = line.split(',')
                 if len(parts) >= 8:
                     status_code = parts[3]
@@ -200,12 +220,15 @@ class NTRIPBaseCaster:
                         self.survey_accuracy = float(parts[9])
                     
                     if status_code == '2' or self.survey_valid:
+                        if self.survey_status != "COMPLETED":
+                            self._add_log(f"🎯 Survey-In COMPLETED! Base locked at accuracy: {self.survey_accuracy:.2f}m")
                         self.survey_status = "COMPLETED"
                     elif status_code == '1':
                         self.survey_status = "IN_PROGRESS"
                     else:
                         self.survey_status = "INITIALIZING"
 
+            # Parse standard GGA
             elif line.startswith('$GNGGA') or line.startswith('$GPGGA'):
                 parts = line.split(',')
                 if len(parts) >= 10:
@@ -220,28 +243,35 @@ class NTRIPBaseCaster:
                         self.hdop = float(parts[8])
                     if parts[9].replace('.', '', 1).isdigit():
                         self.survey_alt = float(parts[9])
+
+            # Parse GSA / GSV for satellite tracking details
+            elif line.startswith('$GNGSA') or line.startswith('$GPGSA'):
+                parts = line.split(',')
+                active_sats = sum(1 for p in parts[3:15] if p.strip().isdigit())
+                if active_sats > 0:
+                    self.satellites_tracked = max(self.satellites_tracked, active_sats)
+
         except Exception:
             pass
 
     def _serial_reader_loop(self) -> None:
-        """Reads RTCM3 binary data + NMEA sentences from Base GNSS module and multicasts."""
+        """Reads RTCM3 binary data + NMEA sentences cleanly without string corruption."""
         import serial
 
         while self.is_running:
             ser = None
             try:
-                print(f"[Serial] Opening Base GNSS UART: {self.serial_port} @ {self.baud_rate} baud...")
+                self._add_log(f"Opening Serial Port: {self.serial_port} @ {self.baud_rate} baud")
                 ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.5)
-                print(f"✅ [Serial] Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...\n")
+                self._add_log("Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...")
 
-                # Send survey status query command to Quectel module
-                query_cmd = b"$PQTMSURVEY*77\r\n"
-                ser.write(query_cmd)
+                # Send initial configuration commands to enable NMEA + Survey-In query
+                ser.write(b"$PQTMSURVEY*77\r\n")
                 last_query_time = time.time()
-
-                buffer = b""
+                raw_byte_stream = bytearray()
 
                 while self.is_running:
+                    # Periodically query survey status
                     if time.time() - last_query_time > 4.0:
                         try:
                             ser.write(b"$PQTMSURVEY*77\r\n")
@@ -254,18 +284,24 @@ class NTRIPBaseCaster:
                         continue
 
                     self.total_rtcm_bytes_read += len(chunk)
+                    self.rtcm_packet_count += 1
 
-                    # Extract ASCII NMEA lines to check survey status
-                    buffer += chunk
-                    if b"\n" in buffer:
-                        lines = buffer.split(b"\n")
-                        buffer = lines[-1]
-                        for raw_line in lines[:-1]:
-                            line_str = raw_line.decode('ascii', errors='ignore').strip()
-                            if line_str.startswith('$'):
-                                self._parse_survey_line(line_str)
+                    # Parse ASCII sentences cleanly from binary stream
+                    raw_byte_stream.extend(chunk)
+                    if len(raw_byte_stream) > 8192:
+                        raw_byte_stream = raw_byte_stream[-4096:]
 
-                    # Multicast binary RTCM3 correction chunk to all connected rovers
+                    # Extract all complete lines starting with '$'
+                    while b'\n' in raw_byte_stream:
+                        line_bytes, _, remaining = raw_byte_stream.partition(b'\n')
+                        raw_byte_stream = remaining
+                        if b'$' in line_bytes:
+                            dollar_idx = line_bytes.find(b'$')
+                            clean_str = line_bytes[dollar_idx:].decode('ascii', errors='ignore').strip()
+                            if clean_str:
+                                self._parse_survey_line(clean_str)
+
+                    # Multicast raw correction stream to all connected rovers
                     with self.clients_lock:
                         dead_clients = []
                         for client in self.clients:
@@ -283,7 +319,7 @@ class NTRIPBaseCaster:
                                 pass
 
             except Exception as e:
-                print(f"❌ [Serial Error] {e}. Retrying in 2 seconds...")
+                self._add_log(f"Serial Error: {e}. Retrying in 2 seconds...", "ERROR")
                 time.sleep(2.0)
             finally:
                 if ser and ser.is_open:
@@ -310,10 +346,12 @@ class NTRIPBaseCaster:
                 status_icon = "🛰️ [SURVEY-IN]"
                 details = f"Tracking {self.satellites_tracked} Sats (HDOP: {self.hdop:.2f}) | Pos: ({self.survey_lat:.7f}, {self.survey_lon:.7f})"
 
-            print(f"{status_icon} Status: {details} | Active Rovers: {rover_count} | RTCM: {rtcm_kb:.1f} KB")
+            msg = f"{status_icon} Status: {details} | Active Rovers: {rover_count} | RTCM: {rtcm_kb:.1f} KB"
+            print(msg)
+            self._add_log(msg)
 
     def get_status_json(self) -> dict:
-        """Returns JSON representation of all base station metrics."""
+        """Returns JSON representation of all base station metrics and live log history."""
         with self.clients_lock:
             active_rovers = [
                 {
@@ -323,6 +361,9 @@ class NTRIPBaseCaster:
                 }
                 for meta in self.client_metadata.values()
             ]
+
+        with self.logs_lock:
+            log_list = list(self.logs)
 
         uptime_sec = int(time.time() - self.start_time)
         return {
@@ -344,7 +385,8 @@ class NTRIPBaseCaster:
             "active_rovers": active_rovers,
             "mountpoint": self.mountpoint,
             "ntrip_port": self.server_port,
-            "local_ip": self.local_ip
+            "local_ip": self.local_ip,
+            "logs": log_list
         }
 
     def _web_server_loop(self) -> None:
@@ -427,7 +469,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .data-label { color: var(--text-muted); }
     .data-val { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
     
-    /* Config Box */
+    /* Terminal Console Box */
+    .console-card { grid-column: 1 / -1; }
+    .terminal-box { background: #050811; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #38bdf8; height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .log-line { display: flex; gap: 10px; line-height: 1.4; word-break: break-all; }
+    .log-time { color: var(--text-muted); opacity: 0.7; }
+    .log-msg { color: #f1f5f9; }
+    .log-msg.error { color: #f87171; }
+    .log-msg.warn { color: #fbbf24; }
+
     .code-box { background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #a5f3fc; overflow-x: auto; margin-top: 8px; }
     .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--accent); color: #000; padding: 8px 16px; border-radius: 8px; font-weight: 700; text-decoration: none; font-size: 13px; margin-top: 12px; transition: transform 0.2s, box-shadow 0.2s; border: none; cursor: pointer; }
     .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 16px var(--accent-glow); }
@@ -542,9 +592,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div id="configSnippet" class="code-box">Loading...</div>
       </div>
     </div>
+
+    <!-- Live Terminal Console Log Box -->
+    <div class="grid">
+      <div class="card console-card">
+        <div class="card-title">
+          <span>🖥️ Live Base Station Console & NMEA Logs</span>
+          <span class="data-val" style="font-size: 11px; opacity: 0.7;">Auto-refreshing</span>
+        </div>
+        <div id="terminalBox" class="terminal-box">
+          <div class="log-line"><span class="log-time">--:--:--</span><span class="log-msg">Connecting to live log stream...</span></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
+    let userScrolled = false;
+    const term = document.getElementById('terminalBox');
+    term.addEventListener('scroll', () => {
+      userScrolled = (term.scrollHeight - term.scrollTop - term.clientHeight) > 20;
+    });
+
     async function updateDashboard() {
       try {
         const res = await fetch('/api/status');
@@ -596,6 +665,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 `ntrip_caster: "${data.local_ip}"
 ntrip_port: ${data.ntrip_port}
 ntrip_mountpoint: "${data.mountpoint}"`;
+
+        // Render Live Logs
+        if (data.logs && data.logs.length > 0) {
+          term.innerHTML = data.logs.map(l => {
+            const cls = l.level === 'ERROR' ? 'error' : (l.level === 'WARN' ? 'warn' : '');
+            return `<div class="log-line"><span class="log-time">[${l.time}]</span><span class="log-msg ${cls}">${l.msg}</span></div>`;
+          }).join('');
+          if (!userScrolled) {
+            term.scrollTop = term.scrollHeight;
+          }
+        }
 
       } catch (err) {
         console.error('Failed to fetch status:', err);
