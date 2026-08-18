@@ -32,6 +32,12 @@ def generate_launch_description():
         description='Whether to launch Waveshare LC29H GPS/RTK driver node'
     )
 
+    declare_launch_foxglove_cmd = DeclareLaunchArgument(
+        'launch_foxglove',
+        default_value='true',
+        description='Whether to launch Foxglove WebSocket Bridge (port 8765)'
+    )
+
     # 1. Cytron MDD10 Motor Controller Node
     mdd10_node = Node(
         package='cone_robot_control',
@@ -79,7 +85,16 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('launch_gps'))
     )
 
-    # 6. Conditionally Include YDLIDAR Launch File
+    # 6. Foxglove WebSocket Bridge Node (port 8765)
+    foxglove_node = Node(
+        package='foxglove_bridge',
+        executable='foxglove_bridge',
+        name='foxglove_bridge',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('launch_foxglove'))
+    )
+
+    # 7. Conditionally Include YDLIDAR Launch File
     ydlidar_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(ydlidar_launch_file),
         condition=IfCondition(LaunchConfiguration('launch_lidar'))
@@ -89,10 +104,12 @@ def generate_launch_description():
         declare_launch_lidar_cmd,
         declare_launch_imu_cmd,
         declare_launch_gps_cmd,
+        declare_launch_foxglove_cmd,
         mdd10_node,
         bno08x_node,
         base_to_imu_tf,
         lc29h_gps_node,
         base_to_gps_tf,
+        foxglove_node,
         ydlidar_launch
     ])
