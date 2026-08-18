@@ -4,12 +4,12 @@
 Raspberry Pi 5 RTK Base Station NTRIP Caster & Live Web Dashboard
 ==============================================================================
 Description:
-    Reads raw RTCM3 differential correction packets and Survey-In status from
+    Reads raw RTCM3 differential correction packets and GNSS position from
     the Base GNSS HAT (Waveshare LC29H(BS) / LC29H(EA) on /dev/ttyAMA0 @ 115200)
     and provides:
       1. Local NTRIP 1.0/2.0 Caster TCP server on port 2101 (for rovers).
-      2. Modern Real-Time HTTP Web Dashboard on port 8080 (for browser monitoring).
-      3. Live Terminal Log & NMEA Stream Viewer directly inside the Web UI.
+      2. Modern Real-Time HTTP Web Dashboard on port 8080.
+      3. Live statistical Survey-In convergence engine with remaining time countdown.
 
 Usage:
     python3 base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE --serial /dev/ttyAMA0
@@ -21,11 +21,12 @@ from collections import deque
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import math
 import socket
 import sys
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Deque, Dict, List, Optional, Tuple
 
 
 class NTRIPBaseCaster:
@@ -54,20 +55,24 @@ class NTRIPBaseCaster:
         self.total_rtcm_bytes_read = 0
         self.rtcm_packet_count = 0
 
-        # Log history buffer for the Web Dashboard
+        # Log history buffer
         self.logs = deque(maxlen=100)
         self.logs_lock = threading.Lock()
 
-        # Survey-In & GNSS Status
-        self.survey_status = "INITIALIZING"
+        # Survey-In & Statistical Estimator
+        self.survey_target_duration = 300  # 5 minutes
+        self.survey_target_accuracy = 2.0   # < 2 meters
+        self.survey_start_time: Optional[float] = None
         self.survey_duration = 0
-        self.survey_target_duration = 300
+        self.survey_status = "INITIALIZING"
+        self.survey_valid = False
         self.survey_accuracy = 99.9
-        self.survey_target_accuracy = 2.0
+
+        # Coordinate sample history for live statistical standard deviation
+        self.coord_samples: Deque[Tuple[float, float, float]] = deque(maxlen=600)
         self.survey_lat = 0.0
         self.survey_lon = 0.0
         self.survey_alt = 0.0
-        self.survey_valid = False
         self.satellites_tracked = 0
         self.hdop = 99.9
         self.local_ip = self._get_local_ip()
@@ -111,7 +116,7 @@ class NTRIPBaseCaster:
         web_thread = threading.Thread(target=self._web_server_loop, daemon=True)
         web_thread.start()
 
-        # 3. Start periodic console logger
+        # 3. Start periodic console logger & survey estimator
         diag_thread = threading.Thread(target=self._diagnostic_logger_loop, daemon=True)
         diag_thread.start()
 
@@ -201,31 +206,46 @@ class NTRIPBaseCaster:
         except ValueError:
             return None
 
+    def _update_survey_statistics(self, lat: float, lon: float, alt: float) -> None:
+        """Calculates live Survey-In elapsed duration and position standard deviation."""
+        now = time.time()
+        if self.survey_start_time is None:
+            self.survey_start_time = now
+            self._add_log("🛰️ GPS Lock acquired! Starting Survey-In convergence timer (Target: 300s)...")
+
+        self.survey_duration = int(now - self.survey_start_time)
+        self.coord_samples.append((lat, lon, alt))
+
+        # Compute mean & standard deviation in meters
+        if len(self.coord_samples) >= 5:
+            lats = [s[0] for s in self.coord_samples]
+            lons = [s[1] for s in self.coord_samples]
+            mean_lat = sum(lats) / len(lats)
+            mean_lon = sum(lons) / len(lons)
+
+            # Degree to meter conversion factors
+            lat_m = 111132.0
+            lon_m = 111412.0 * math.cos(math.radians(mean_lat))
+
+            dx = [(ln - mean_lon) * lon_m for ln in lons]
+            dy = [(lt - mean_lat) * lat_m for lt in lats]
+            sigma_2d = math.sqrt((sum(x**2 for x in dx) + sum(y**2 for y in dy)) / len(dx))
+            self.survey_accuracy = sigma_2d
+
+            # Check if Survey-In target is achieved
+            if self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy:
+                if not self.survey_valid:
+                    self.survey_valid = True
+                    self.survey_status = "COMPLETED"
+                    self._add_log(f"🎯 Survey-In COMPLETED! Base locked at accuracy: {self.survey_accuracy:.2f}m")
+            else:
+                self.survey_status = "IN_PROGRESS"
+
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
         try:
-            # Parse Quectel Survey-In Status
-            if 'PQTMSURVEY' in line:
-                parts = line.split(',')
-                if len(parts) >= 8:
-                    status_code = parts[3]
-                    valid_code = parts[4]
-                    self.survey_duration = int(parts[5]) if parts[5].isdigit() else self.survey_duration
-                    self.survey_valid = (valid_code == '1')
-                    if len(parts) >= 10 and parts[9].replace('.', '', 1).isdigit():
-                        self.survey_accuracy = float(parts[9])
-                    
-                    if status_code == '2' or self.survey_valid:
-                        if self.survey_status != "COMPLETED":
-                            self._add_log(f"🎯 Survey-In COMPLETED! Base locked at accuracy: {self.survey_accuracy:.2f}m")
-                        self.survey_status = "COMPLETED"
-                    elif status_code == '1':
-                        self.survey_status = "IN_PROGRESS"
-                    else:
-                        self.survey_status = "INITIALIZING"
-
-            # Parse standard GGA
-            elif line.startswith('$GNGGA') or line.startswith('$GPGGA'):
+            # Standard GGA
+            if line.startswith('$GNGGA') or line.startswith('$GPGGA'):
                 parts = line.split(',')
                 if len(parts) >= 10:
                     lat = self._parse_nmea_coordinate(parts[2], parts[3], False)
@@ -240,6 +260,9 @@ class NTRIPBaseCaster:
                     if parts[9].replace('.', '', 1).isdigit():
                         self.survey_alt = float(parts[9])
 
+                    if lat and lon and self.satellites_tracked >= 4:
+                        self._update_survey_statistics(lat, lon, self.survey_alt)
+
             # Parse GSV for satellites in view
             elif 'GSV' in line:
                 parts = line.split(',')
@@ -247,13 +270,6 @@ class NTRIPBaseCaster:
                     sats_in_view = int(parts[3])
                     if sats_in_view > 0:
                         self.satellites_tracked = max(self.satellites_tracked, sats_in_view)
-
-            # Parse GSA for active satellites
-            elif 'GSA' in line:
-                parts = line.split(',')
-                active_sats = sum(1 for p in parts[3:15] if p.strip().isdigit())
-                if active_sats > 0:
-                    self.satellites_tracked = max(self.satellites_tracked, active_sats)
 
         except Exception:
             pass
@@ -288,7 +304,6 @@ class NTRIPBaseCaster:
                 raw_byte_stream = bytearray()
 
                 while self.is_running:
-                    # Periodically query survey status and re-enable NMEA
                     if time.time() - last_query_time > 4.0:
                         try:
                             ser.write(b"$PQTMSURVEY*77\r\n")
@@ -353,12 +368,16 @@ class NTRIPBaseCaster:
                 rover_count = len(self.clients)
             rtcm_kb = self.total_rtcm_bytes_read / 1024.0
 
+            remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
+            rem_min = remaining_sec // 60
+            rem_s = remaining_sec % 60
+
             if self.survey_valid or self.survey_status == "COMPLETED":
                 status_icon = "🎯 [BASE READY]"
                 details = f"LOCKED (Accuracy: < {self.survey_accuracy:.2f}m) | Pos: ({self.survey_lat:.7f}, {self.survey_lon:.7f})"
             elif self.survey_duration > 0:
                 status_icon = "⏳ [SURVEY-IN]"
-                details = f"Observed: {self.survey_duration}s | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked}"
+                details = f"{self.survey_duration}s/300s ({rem_min}m {rem_s:02d}s left) | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked}"
             else:
                 status_icon = "🛰️ [SURVEY-IN]"
                 details = f"Tracking {self.satellites_tracked} Sats (HDOP: {self.hdop:.2f}) | Pos: ({self.survey_lat:.7f}, {self.survey_lon:.7f})"
@@ -383,12 +402,19 @@ class NTRIPBaseCaster:
             log_list = list(self.logs)
 
         uptime_sec = int(time.time() - self.start_time)
+        remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
+        rem_min = remaining_sec // 60
+        rem_s = remaining_sec % 60
+        remaining_str = "0m 00s" if remaining_sec == 0 else f"{rem_min}m {rem_s:02d}s"
+
         return {
             "uptime_sec": uptime_sec,
             "survey_status": self.survey_status,
             "survey_valid": self.survey_valid or (self.survey_status == "COMPLETED"),
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
+            "remaining_sec": remaining_sec,
+            "remaining_str": remaining_str,
             "survey_accuracy": round(self.survey_accuracy, 2),
             "survey_target_accuracy": self.survey_target_accuracy,
             "latitude": round(self.survey_lat, 8),
@@ -490,6 +516,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .data-row:last-child { border-bottom: none; }
     .data-label { color: var(--text-muted); }
     .data-val { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+    .data-val.countdown { color: #38bdf8; font-weight: 700; }
     
     /* Terminal Console Box */
     .console-card { grid-column: 1 / -1; }
@@ -532,11 +559,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div id="surveyProgressBar" class="progress-bar-fill"></div>
         </div>
         <div class="data-row">
-          <span class="data-label">Elapsed Time:</span>
+          <span class="data-label">⏳ Time Remaining:</span>
+          <span id="surveyRemaining" class="data-val countdown">5m 00s</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Elapsed Duration:</span>
           <span id="surveyTime" class="data-val">0s / 300s</span>
         </div>
         <div class="data-row">
-          <span class="data-label">Current Accuracy (StdDev):</span>
+          <span class="data-label">Live Accuracy StdDev (σ):</span>
           <span id="surveyAcc" class="data-val">-- m</span>
         </div>
         <div class="data-row">
@@ -544,8 +575,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="data-val">&lt; 2.00 m</span>
         </div>
         <div class="data-row">
-          <span class="data-label">Anchor Status:</span>
-          <span id="anchorStatus" class="data-val" style="color: var(--warning);">Calculating...</span>
+          <span class="data-label">Anchor Reference Status:</span>
+          <span id="anchorStatus" class="data-val" style="color: var(--warning);">Converging...</span>
         </div>
       </div>
 
@@ -647,6 +678,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const statusText = document.getElementById('statusText');
         const progressBar = document.getElementById('surveyProgressBar');
         const anchorStatus = document.getElementById('anchorStatus');
+        const remainingEl = document.getElementById('surveyRemaining');
 
         if (isComplete) {
           badge.className = 'status-badge locked';
@@ -656,15 +688,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           document.getElementById('surveyPercent').textContent = '100%';
           anchorStatus.textContent = 'LOCKED & VALID';
           anchorStatus.style.color = 'var(--success)';
+          remainingEl.textContent = '✅ Calibration Complete';
+          remainingEl.style.color = 'var(--success)';
         } else {
           badge.className = 'status-badge';
-          statusText.textContent = '⏳ Surveying In Progress';
+          statusText.textContent = `⏳ Surveying (${data.remaining_str} left)`;
           progressBar.className = 'progress-bar-fill';
           const pct = Math.min(100, Math.round((data.survey_duration / data.survey_target_duration) * 100));
           progressBar.style.width = pct + '%';
           document.getElementById('surveyPercent').textContent = pct + '%';
-          anchorStatus.textContent = 'Accumulating Samples...';
+          anchorStatus.textContent = 'Converging Samples...';
           anchorStatus.style.color = 'var(--warning)';
+          remainingEl.textContent = `${data.remaining_str} remaining`;
+          remainingEl.style.color = '#38bdf8';
         }
 
         document.getElementById('surveyTime').textContent = `${data.survey_duration}s / ${data.survey_target_duration}s`;
