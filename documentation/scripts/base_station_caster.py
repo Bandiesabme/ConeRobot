@@ -21,7 +21,6 @@ from collections import deque
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-import re
 import socket
 import sys
 import threading
@@ -71,7 +70,6 @@ class NTRIPBaseCaster:
         self.survey_valid = False
         self.satellites_tracked = 0
         self.hdop = 99.9
-        self.last_nmea_seen_time = 0.0
         self.local_ip = self._get_local_ip()
 
         self._add_log(f"Base Station initialized. Serial: {self.serial_port}, Web: http://{self.local_ip}:{self.web_port}")
@@ -206,9 +204,7 @@ class NTRIPBaseCaster:
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
         try:
-            self.last_nmea_seen_time = time.time()
-
-            # Parse Quectel Survey-In Status: $PQTMSURVEY,1,OK,<status>,<valid>,<duration>,<lat>,<lon>,<alt>,<acc>*
+            # Parse Quectel Survey-In Status
             if 'PQTMSURVEY' in line:
                 parts = line.split(',')
                 if len(parts) >= 8:
@@ -244,8 +240,16 @@ class NTRIPBaseCaster:
                     if parts[9].replace('.', '', 1).isdigit():
                         self.survey_alt = float(parts[9])
 
-            # Parse GSA / GSV for satellite tracking details
-            elif line.startswith('$GNGSA') or line.startswith('$GPGSA'):
+            # Parse GSV for satellites in view
+            elif 'GSV' in line:
+                parts = line.split(',')
+                if len(parts) >= 4 and parts[3].isdigit():
+                    sats_in_view = int(parts[3])
+                    if sats_in_view > 0:
+                        self.satellites_tracked = max(self.satellites_tracked, sats_in_view)
+
+            # Parse GSA for active satellites
+            elif 'GSA' in line:
                 parts = line.split(',')
                 active_sats = sum(1 for p in parts[3:15] if p.strip().isdigit())
                 if active_sats > 0:
@@ -255,7 +259,7 @@ class NTRIPBaseCaster:
             pass
 
     def _serial_reader_loop(self) -> None:
-        """Reads RTCM3 binary data + NMEA sentences cleanly without string corruption."""
+        """Reads RTCM3 binary data + NMEA sentences cleanly."""
         import serial
 
         while self.is_running:
@@ -265,16 +269,30 @@ class NTRIPBaseCaster:
                 ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.5)
                 self._add_log("Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...")
 
-                # Send initial configuration commands to enable NMEA + Survey-In query
-                ser.write(b"$PQTMSURVEY*77\r\n")
+                # Send configuration commands to enable NMEA GGA, GSA, GSV, RMC + Survey query
+                nmea_enable_cmds = [
+                    b"$PAIR062,0,1*3F\r\n",  # Enable GGA @ 1 Hz
+                    b"$PAIR062,2,1*39\r\n",  # Enable GSA @ 1 Hz
+                    b"$PAIR062,3,1*38\r\n",  # Enable GSV @ 1 Hz
+                    b"$PAIR062,4,1*3B\r\n",  # Enable RMC @ 1 Hz
+                    b"$PQTMSURVEY*77\r\n",   # Query Survey status
+                ]
+                for cmd in nmea_enable_cmds:
+                    try:
+                        ser.write(cmd)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+
                 last_query_time = time.time()
                 raw_byte_stream = bytearray()
 
                 while self.is_running:
-                    # Periodically query survey status
+                    # Periodically query survey status and re-enable NMEA
                     if time.time() - last_query_time > 4.0:
                         try:
                             ser.write(b"$PQTMSURVEY*77\r\n")
+                            ser.write(b"$PAIR062,0,1*3F\r\n")
                             last_query_time = time.time()
                         except Exception:
                             pass
@@ -291,7 +309,6 @@ class NTRIPBaseCaster:
                     if len(raw_byte_stream) > 8192:
                         raw_byte_stream = raw_byte_stream[-4096:]
 
-                    # Extract all complete lines starting with '$'
                     while b'\n' in raw_byte_stream:
                         line_bytes, _, remaining = raw_byte_stream.partition(b'\n')
                         raw_byte_stream = remaining
@@ -402,11 +419,13 @@ class NTRIPBaseCaster:
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
                     self.end_headers()
                     self.wfile.write(json.dumps(caster_instance.get_status_json()).encode('utf-8'))
                 else:
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
                     self.end_headers()
                     self.wfile.write(DASHBOARD_HTML.encode('utf-8'))
 
@@ -423,6 +442,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>ConeRobot RTK Base Station Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -471,7 +493,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     
     /* Terminal Console Box */
     .console-card { grid-column: 1 / -1; }
-    .terminal-box { background: #050811; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #38bdf8; height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .terminal-box { background: #050811; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #38bdf8; height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
     .log-line { display: flex; gap: 10px; line-height: 1.4; word-break: break-all; }
     .log-time { color: var(--text-muted); opacity: 0.7; }
     .log-msg { color: #f1f5f9; }
