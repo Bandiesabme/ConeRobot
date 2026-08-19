@@ -115,7 +115,8 @@ def launch_setup(context, *args, **kwargs):
                     package='rf2o_laser_odometry',
                     executable='rf2o_laser_odometry_node',
                     name='rf2o_laser_odometry',
-                    output='log',  # Redirect verbose odom INFO spam to log file, not terminal
+                    output='screen',
+                    additional_env={'RCUTILS_LOGGING_MIN_SEVERITY': 'WARN'},
                     parameters=[{
                         'laser_scan_topic': '/scan',
                         'odom_topic': '/odom',
