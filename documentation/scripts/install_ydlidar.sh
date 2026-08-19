@@ -62,11 +62,7 @@ else
     echo "rf2o_laser_odometry repository already exists at $RF2O_DEST."
 fi
 
-echo "=== Patching rf2o_laser_odometry for ROS 2 Jazzy & SensorDataQoS ==="
-PATCH_RF2O_SCRIPT="$SCRIPT_DIR/patch_rf2o_jazzy.py"
-if [ -f "$PATCH_RF2O_SCRIPT" ]; then
-    python3 "$PATCH_RF2O_SCRIPT" "$RF2O_DEST"
-fi
+
 
 echo "=== Patching ydlidar_ros2_driver_node.cpp for ROS 2 Jazzy compatibility ==="
 PATCH_SCRIPT="$SCRIPT_DIR/patch_ydlidar_jazzy.py"
