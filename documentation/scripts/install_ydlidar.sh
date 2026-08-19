@@ -76,10 +76,11 @@ elif [ -f "$SCRIPT_DIR/init_ydlidar_udev.sh" ]; then
     bash "$SCRIPT_DIR/init_ydlidar_udev.sh"
 fi
 
-echo "=== 5. Building Workspace (Low-Memory Sequential Mode) ==="
+echo "=== 5. Building Workspace (Fast Low-Memory Mode) ==="
 cd "$WORKSPACE_ROOT"
 export MAKEFLAGS="-j1"
-colcon build --symlink-install --parallel-workers 1 --executor sequential
+colcon build --symlink-install --parallel-workers 1 --executor sequential \
+    --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O2 -DNDEBUG"
 
 echo ""
 echo "=============================================================================="
