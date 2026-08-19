@@ -181,7 +181,7 @@ class NTRIPBaseCaster:
 
             client_sock.sendall(b"ICY 200 OK\r\n\r\n")
             client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            client_sock.setblocking(False)
+            client_sock.settimeout(2.0)
 
             with self.clients_lock:
                 # Deduplicate: Clean up any older ghost sockets from the same IP
@@ -316,10 +316,9 @@ class NTRIPBaseCaster:
                 raw_byte_stream = bytearray()
 
                 while self.is_running:
-                    if time.time() - last_query_time > 4.0:
+                    if time.time() - last_query_time > 60.0:
                         try:
                             ser.write(b"$PQTMSURVEY*77\r\n")
-                            ser.write(b"$PAIR062,0,1*3F\r\n")
                             last_query_time = time.time()
                         except Exception:
                             pass
@@ -344,23 +343,20 @@ class NTRIPBaseCaster:
                             if clean_str:
                                 self._parse_survey_line(clean_str)
 
-                    # Non-blocking multicast using select to prevent any serial delay
+                    # Multicast complete RTCM chunks to all active rover sockets (without holding lock)
                     with self.clients_lock:
-                        all_socks = list(self.clients_map.keys())
-                        if all_socks:
-                            _, writable_socks, error_socks = select.select([], all_socks, all_socks, 0)
-                            dead_socks = list(error_socks)
+                        client_items = list(self.clients_map.items())
 
-                            for client in writable_socks:
-                                try:
-                                    sent = client.send(chunk)
-                                    if sent > 0:
-                                        self.total_bytes_sent += sent
-                                        self.clients_map[client]["bytes_sent"] += sent
-                                except (socket.error, BlockingIOError) as e:
-                                    if getattr(e, 'errno', None) in [errno.EPIPE, errno.ECONNRESET, errno.ENOTCONN, errno.EBADF]:
-                                        dead_socks.append(client)
+                    dead_socks = []
+                    for client, meta in client_items:
+                        try:
+                            client.sendall(chunk)
+                            meta["bytes_sent"] += len(chunk)
+                        except (socket.error, socket.timeout):
+                            dead_socks.append(client)
 
+                    if dead_socks:
+                        with self.clients_lock:
                             for dead in dead_socks:
                                 if dead in self.clients_map:
                                     del self.clients_map[dead]
@@ -458,6 +454,10 @@ class NTRIPBaseCaster:
 
         class DashboardHandler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+
+            def address_string(self) -> str:
+                """Prevent reverse DNS lookup that causes 30-60 second delays on local networks."""
+                return str(self.client_address[0])
 
             def log_message(self, format, *args):
                 pass
