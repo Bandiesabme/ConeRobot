@@ -7,9 +7,11 @@ Description:
     Subscribes to /fix (sensor_msgs/msg/NavSatFix) and measures real-time
     stationary drift in centimeters (East, North, and 2D Radial Distance).
     
-    Clearly highlights fix status (RTK FIX vs RTK FLOAT vs SPS / NOT FIX)
-    and provides separate drift calculations for both all samples and
-    true RTK-locked samples.
+    Strictly separates and benchmarks:
+      1. 🎯 RTK FIX (Survey-Grade 1–2 cm)
+      2. ⏳ RTK FLOAT (Sub-meter ~20–100 cm)
+      3. ⚠️ Standard 3D SPS (Uncorrected ~2–5 m)
+      4. 📊 Combined Overall Benchmark
 
 Usage:
     python3 documentation/scripts/measure_gps_drift.py --samples 300
@@ -31,7 +33,8 @@ class GPSDriftBenchmark(Node):
     def __init__(self, target_samples: int) -> None:
         super().__init__('gps_drift_benchmark')
         self.target_samples = target_samples
-        self.samples: List[Tuple[float, float, float, int]] = []  # (lat, lon, alt, status)
+        # Each entry: (lat, lon, alt, fix_type_str)
+        self.samples: List[Tuple[float, float, float, str]] = []
         self.start_time = time.time()
 
         self.sub = self.create_subscription(NavSatFix, '/fix', self.fix_callback, 10)
@@ -40,12 +43,32 @@ class GPSDriftBenchmark(Node):
         print("=" * 70)
         print(f"Collecting {self.target_samples} samples from /fix (Keep robot stationary)...\n")
 
-    def _get_status_name(self, status_code: int) -> str:
-        if status_code in [NavSatStatus.STATUS_GBAS_FIX, 4, 5]:
-            return "🔒 RTK FIX/FLOAT"
-        elif status_code == NavSatStatus.STATUS_SBAS_FIX:
+    def _determine_fix_type(self, msg: NavSatFix) -> str:
+        """Determines exact fix type from ROS status and position covariance."""
+        status = msg.status.status
+        cov_var = msg.position_covariance[0] if len(msg.position_covariance) > 0 else 100.0
+
+        if status == NavSatStatus.STATUS_GBAS_FIX or status in [4, 5]:
+            # Covariance variance < 0.005 indicates Mode 4 (RTK FIX < 2 cm)
+            if cov_var < 0.005:
+                return "RTK_FIX"
+            else:
+                return "RTK_FLOAT"
+        elif status == NavSatStatus.STATUS_SBAS_FIX or status == 2:
+            return "DGPS"
+        elif status == NavSatStatus.STATUS_FIX or status == 1:
+            return "3D_SPS"
+        else:
+            return "NO_FIX"
+
+    def _get_status_display(self, fix_type: str) -> str:
+        if fix_type == "RTK_FIX":
+            return "🎯 RTK FIX (1–2 cm)"
+        elif fix_type == "RTK_FLOAT":
+            return "⏳ RTK FLOAT (~20–100 cm)"
+        elif fix_type == "DGPS":
             return "📡 DGPS (SBAS)"
-        elif status_code == NavSatStatus.STATUS_FIX:
+        elif fix_type == "3D_SPS":
             return "⚠️ STANDARD 3D FIX (NOT RTK)"
         else:
             return "❌ NO FIX"
@@ -54,12 +77,13 @@ class GPSDriftBenchmark(Node):
         if math.isnan(msg.latitude) or math.isnan(msg.longitude):
             return
 
-        self.samples.append((msg.latitude, msg.longitude, msg.altitude, msg.status.status))
+        fix_type = self._determine_fix_type(msg)
+        self.samples.append((msg.latitude, msg.longitude, msg.altitude, fix_type))
         count = len(self.samples)
-        status_name = self._get_status_name(msg.status.status)
+        status_disp = self._get_status_display(fix_type)
 
-        # Real-time progress display with fix quality
-        sys.stdout.write(f"\rProgress: [{count}/{self.target_samples} samples] ({count/self.target_samples*100:.1f}%) | Current Status: {status_name}")
+        # Real-time progress display with exact fix label
+        sys.stdout.write(f"\rProgress: [{count}/{self.target_samples} samples] ({count/self.target_samples*100:.1f}%) | Current: {status_disp}   ")
         sys.stdout.flush()
 
         if count >= self.target_samples:
@@ -67,7 +91,7 @@ class GPSDriftBenchmark(Node):
             self.compute_and_display_results()
             rclpy.shutdown()
 
-    def _calculate_stats(self, sample_subset: List[Tuple[float, float, float, int]]) -> dict:
+    def _calculate_stats(self, sample_subset: List[Tuple[float, float, float, str]]) -> dict:
         if not sample_subset:
             return {}
 
@@ -110,56 +134,56 @@ class GPSDriftBenchmark(Node):
             "count": len(sample_subset)
         }
 
+    def _print_stat_table(self, title: str, stats: dict) -> None:
+        print("-" * 70)
+        print(f"  {title} ({stats['count']} samples):")
+        print("-" * 70)
+        print(f"  • East-West Drift StdDev (σX)  : {stats['std_x']:.2f} cm")
+        print(f"  • North-South Drift StdDev (σY): {stats['std_y']:.2f} cm")
+        print(f"  • Vertical Drift StdDev (σZ)   : {stats['std_z']:.2f} cm")
+        print(f"  • Average Radial Error         : {stats['avg_drift']:.2f} cm")
+        print(f"  • Maximum Peak Drift           : {stats['max_drift']:.2f} cm")
+        print(f"  • 50% CEP Radius (50% of time) : < {stats['cep_50']:.2f} cm")
+        print(f"  • 95% 2DRMS (95% confidence)   : < {stats['drms_2d']:.2f} cm")
+
     def compute_and_display_results(self) -> None:
         if not self.samples:
             print("No valid GPS samples collected.")
             return
 
         total_time = time.time() - self.start_time
-        statuses = [s[3] for s in self.samples]
+        total_count = len(self.samples)
 
-        rtk_samples = [s for s in self.samples if s[3] in [NavSatStatus.STATUS_GBAS_FIX, 4, 5]]
-        non_rtk_samples = [s for s in self.samples if s[3] not in [NavSatStatus.STATUS_GBAS_FIX, 4, 5]]
+        # Bucket samples by fix type
+        rtk_fix_samples = [s for s in self.samples if s[3] == "RTK_FIX"]
+        rtk_float_samples = [s for s in self.samples if s[3] == "RTK_FLOAT"]
+        dgps_samples = [s for s in self.samples if s[3] == "DGPS"]
+        sps_samples = [s for s in self.samples if s[3] == "3D_SPS"]
 
         all_stats = self._calculate_stats(self.samples)
-        rtk_stats = self._calculate_stats(rtk_samples)
-
-        rtk_count = len(rtk_samples)
-        sps_count = len(non_rtk_samples)
+        fix_stats = self._calculate_stats(rtk_fix_samples)
+        float_stats = self._calculate_stats(rtk_float_samples)
 
         print("-" * 70)
-        print(f"  Benchmark Duration : {total_time:.1f} seconds ({len(self.samples)} total samples)")
+        print(f"  Benchmark Duration : {total_time:.1f} seconds ({total_count} total samples)")
         print(f"  Mean Position      : {all_stats['mean_lat']:.8f}°, {all_stats['mean_lon']:.8f}° ({all_stats['mean_alt']:.2f} m)")
         print(f"  Google Maps Link   : https://www.google.com/maps?q={all_stats['mean_lat']:.8f},{all_stats['mean_lon']:.8f}")
         print("-" * 70)
-        print("  🛰️ FIX QUALITY BREAKDOWN:")
+        print("  🛰️ EXACT FIX QUALITY BREAKDOWN:")
         print("-" * 70)
-        print(f"  • 🔒 RTK FIX / FLOAT (GBAS)     : {rtk_count / len(statuses) * 100:.1f}% ({rtk_count} samples)")
-        print(f"  • ⚠️ STANDARD 3D FIX (NOT RTK) : {sps_count / len(statuses) * 100:.1f}% ({sps_count} samples)")
-        
-        if sps_count > 0:
-            print(f"\n  ⚠️ NOTE: {sps_count} samples were recorded before/without RTK Lock (Standard 3D SPS),")
-            print("     which accounts for large initial GPS wobble in 'All Samples'.")
+        print(f"  • 🎯 RTK FIX (1–2 cm)          : {len(rtk_fix_samples) / total_count * 100:.1f}% ({len(rtk_fix_samples)} samples)")
+        print(f"  • ⏳ RTK FLOAT (~20–100 cm)    : {len(rtk_float_samples) / total_count * 100:.1f}% ({len(rtk_float_samples)} samples)")
+        print(f"  • 📡 DGPS (SBAS)               : {len(dgps_samples) / total_count * 100:.1f}% ({len(dgps_samples)} samples)")
+        print(f"  • ⚠️ STANDARD 3D (NOT RTK)     : {len(sps_samples) / total_count * 100:.1f}% ({len(sps_samples)} samples)")
 
-        print("-" * 70)
-        print("  📊 OVERALL DRIFT (ALL SAMPLES INCLUDING NON-RTK):")
-        print("-" * 70)
-        print(f"  • East-West Drift StdDev (σX)  : {all_stats['std_x']:.2f} cm")
-        print(f"  • North-South Drift StdDev (σY): {all_stats['std_y']:.2f} cm")
-        print(f"  • Average Radial Error         : {all_stats['avg_drift']:.2f} cm")
-        print(f"  • Maximum Peak Drift           : {all_stats['max_drift']:.2f} cm")
-        print(f"  • 95% 2DRMS Radius             : < {all_stats['drms_2d']:.2f} cm")
+        # Print distinct tables
+        if fix_stats:
+            self._print_stat_table("🎯 TRUE RTK FIX PRECISION (SURVEY-GRADE)", fix_stats)
 
-        if rtk_stats:
-            print("-" * 70)
-            print(f"  🎯 TRUE RTK-ONLY PRECISION ({rtk_stats['count']} RTK-LOCKED SAMPLES):")
-            print("-" * 70)
-            print(f"  • East-West Drift StdDev (σX)  : {rtk_stats['std_x']:.2f} cm")
-            print(f"  • North-South Drift StdDev (σY): {rtk_stats['std_y']:.2f} cm")
-            print(f"  • Average Radial Error         : {rtk_stats['avg_drift']:.2f} cm")
-            print(f"  • Maximum Peak Drift           : {rtk_stats['max_drift']:.2f} cm")
-            print(f"  • 50% CEP Radius (50% of time) : < {rtk_stats['cep_50']:.2f} cm")
-            print(f"  • 95% 2DRMS (95% confidence)   : < {rtk_stats['drms_2d']:.2f} cm")
+        if float_stats:
+            self._print_stat_table("⏳ RTK FLOAT PRECISION (APPROXIMATED PHASE)", float_stats)
+
+        self._print_stat_table("📊 OVERALL COMBINED SAMPLES", all_stats)
 
         print("=" * 70 + "\n")
 
