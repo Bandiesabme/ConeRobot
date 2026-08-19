@@ -295,36 +295,26 @@ class NTRIPBaseCaster:
             ser = None
             try:
                 self._add_log(f"Opening Serial Port: {self.serial_port} @ {self.baud_rate} baud")
-                ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.5)
+                ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.1)
+                ser.reset_input_buffer()
                 self._add_log("Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...")
 
-                nmea_enable_cmds = [
-                    b"$PAIR062,0,1*3F\r\n",
-                    b"$PAIR062,2,1*39\r\n",
-                    b"$PAIR062,3,1*38\r\n",
-                    b"$PAIR062,4,1*3B\r\n",
-                    b"$PQTMSURVEY*77\r\n",
-                ]
-                for cmd in nmea_enable_cmds:
-                    try:
-                        ser.write(cmd)
-                        time.sleep(0.05)
-                    except Exception:
-                        pass
-
-                last_query_time = time.time()
                 raw_byte_stream = bytearray()
 
                 while self.is_running:
-                    if time.time() - last_query_time > 60.0:
-                        try:
-                            ser.write(b"$PQTMSURVEY*77\r\n")
-                            last_query_time = time.time()
-                        except Exception:
-                            pass
+                    try:
+                        count = ser.in_waiting
+                        if count > 0:
+                            chunk = ser.read(min(count, 4096))
+                        else:
+                            chunk = ser.read(1)
+                    except Exception as read_err:
+                        self._add_log(f"Serial read warning: {read_err}", "WARN")
+                        time.sleep(0.05)
+                        continue
 
-                    chunk = ser.read(1024)
                     if not chunk:
+                        time.sleep(0.01)
                         continue
 
                     self.total_rtcm_bytes_read += len(chunk)
