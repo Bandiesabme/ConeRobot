@@ -10,12 +10,14 @@ Description:
     and provides:
       1. Local NTRIP 1.0/2.0 Caster TCP server on port 2101 (for rovers).
       2. Non-blocking high-speed async TCP multicast engine (zero serial delay).
-      3. Instant client deduplication & stale connection pruning.
-      4. Multi-threaded, lightning-fast HTTP Web Dashboard on port 8080.
-      5. 100% offline-ready (zero external CDN or font dependencies).
+      3. Automatic 1-Hour Survey-In Calibration with Auto-Lock & Persistence.
+      4. Instant reload of frozen static coordinates on future boots (0 mm drift).
+      5. Multi-threaded, lightning-fast HTTP Web Dashboard on port 8080.
+      6. Web Dashboard UI with "Lock Now" and "Recalibrate" buttons.
+      7. 100% offline-ready (zero external CDN or font dependencies).
 
 Usage:
-    python3 base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE --serial /dev/ttyAMA0
+    python3 base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE --survey-time 3600
 ==============================================================================
 """
 
@@ -26,6 +28,7 @@ import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import os
 import select
 import socket
 import sys
@@ -42,7 +45,13 @@ class NTRIPBaseCaster:
         server_port: int = 2101,
         web_port: int = 8080,
         mountpoint: str = "BASE",
-        password: str = "none"
+        password: str = "none",
+        survey_duration: int = 3600,
+        survey_accuracy: float = 0.5,
+        recalibrate: bool = False,
+        fixed_lat: Optional[float] = None,
+        fixed_lon: Optional[float] = None,
+        fixed_alt: Optional[float] = None
     ) -> None:
         self.serial_port = serial_port
         self.baud_rate = baud_rate
@@ -64,23 +73,34 @@ class NTRIPBaseCaster:
         self.logs = deque(maxlen=100)
         self.logs_lock = threading.Lock()
 
-        # Survey-In & Statistical Estimator
-        self.survey_target_duration = 300  # 5 minutes
-        self.survey_target_accuracy = 2.0   # < 2 meters
+        # Calibration & Auto-Lock State
+        self.survey_target_duration = survey_duration
+        self.survey_target_accuracy = survey_accuracy
         self.survey_start_time: Optional[float] = None
         self.survey_duration = 0
         self.survey_status = "INITIALIZING"
         self.survey_valid = False
         self.survey_accuracy = 99.9
+        self.is_static_fixed = False
+        self.locked_timestamp = ""
 
-        # Coordinate sample history
-        self.coord_samples: Deque[Tuple[float, float, float]] = deque(maxlen=600)
+        # Persistence file path
+        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_station_fixed_coords.json")
+
+        # Coordinate sample history (for averaging)
+        self.coord_samples: List[Tuple[float, float, float]] = []
         self.survey_lat = 0.0
         self.survey_lon = 0.0
         self.survey_alt = 0.0
         self.satellites_tracked = 0
         self.hdop = 99.9
         self.local_ip = self._get_local_ip()
+
+        # Check manual coordinates or saved coordinates
+        if fixed_lat is not None and fixed_lon is not None:
+            self._apply_fixed_coords(fixed_lat, fixed_lon, fixed_alt or 0.0, "Command-Line Arguments")
+        elif not recalibrate:
+            self._load_saved_coords()
 
         self._add_log(f"Base Station initialized. Serial: {self.serial_port}, Web: http://{self.local_ip}:{self.web_port}")
 
@@ -102,6 +122,93 @@ class NTRIPBaseCaster:
         except Exception:
             return "127.0.0.1"
 
+    def _load_saved_coords(self) -> bool:
+        """Loads previously locked static base coordinates if available."""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r") as f:
+                    data = json.load(f)
+                if data.get("is_locked"):
+                    lat = float(data["lat"])
+                    lon = float(data["lon"])
+                    alt = float(data.get("alt", 0.0))
+                    self._apply_fixed_coords(lat, lon, alt, f"Saved Config ({data.get('timestamp', 'Unknown')})")
+                    return True
+            except Exception as e:
+                self._add_log(f"Failed to read saved coords: {e}", "WARN")
+        return False
+
+    def _apply_fixed_coords(self, lat: float, lon: float, alt: float, source: str) -> None:
+        """Locks base station into permanent static fixed mode (0 mm drift)."""
+        self.survey_lat = lat
+        self.survey_lon = lon
+        self.survey_alt = alt
+        self.is_static_fixed = True
+        self.survey_valid = True
+        self.survey_status = "LOCKED_STATIC"
+        self.survey_accuracy = 0.00
+        self.locked_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._add_log(f"🎯 LOCKED STATIC BASE ({source}): ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m) [0 mm Drift]")
+
+    def lock_now(self) -> bool:
+        """Immediately locks current accumulated average position and writes to disk."""
+        if not self.coord_samples:
+            if self.survey_lat != 0.0 and self.survey_lon != 0.0:
+                mean_lat, mean_lon, mean_alt = self.survey_lat, self.survey_lon, self.survey_alt
+            else:
+                self._add_log("Cannot lock: No GPS coordinates collected yet!", "WARN")
+                return False
+        else:
+            # Robust median / trimmed average
+            lats = sorted([s[0] for s in self.coord_samples])
+            lons = sorted([s[1] for s in self.coord_samples])
+            alts = sorted([s[2] for s in self.coord_samples])
+            trim = max(1, int(len(lats) * 0.05)) if len(lats) > 20 else 0
+            if trim > 0:
+                lats = lats[trim:-trim]
+                lons = lons[trim:-trim]
+                alts = alts[trim:-trim]
+            mean_lat = sum(lats) / len(lats)
+            mean_lon = sum(lons) / len(lons)
+            mean_alt = sum(alts) / len(alts)
+
+        self._apply_fixed_coords(mean_lat, mean_lon, mean_alt, "Manual Lock")
+
+        # Save to disk
+        try:
+            with open(self.config_file, "w") as f:
+                json.dump({
+                    "is_locked": True,
+                    "lat": round(mean_lat, 8),
+                    "lon": round(mean_lon, 8),
+                    "alt": round(mean_alt, 2),
+                    "samples": len(self.coord_samples),
+                    "timestamp": self.locked_timestamp
+                }, f, indent=2)
+            self._add_log(f"💾 Saved permanent static coordinates to {os.path.basename(self.config_file)}")
+            return True
+        except Exception as e:
+            self._add_log(f"Failed to save coordinates: {e}", "ERROR")
+            return False
+
+    def recalibrate(self) -> bool:
+        """Clears saved fixed position and restarts a fresh 1-hour calibration survey."""
+        try:
+            if os.path.exists(self.config_file):
+                os.remove(self.config_file)
+        except Exception:
+            pass
+
+        self.is_static_fixed = False
+        self.survey_valid = False
+        self.survey_status = "CALIBRATING"
+        self.survey_start_time = None
+        self.survey_duration = 0
+        self.survey_accuracy = 99.9
+        self.coord_samples.clear()
+        self._add_log("🔄 Recalibration triggered! Starting fresh Survey-In calibration...")
+        return True
+
     def start(self) -> None:
         """Starts NTRIP Caster, Web Dashboard, and Serial Reader threads."""
         print("=" * 75)
@@ -111,6 +218,11 @@ class NTRIPBaseCaster:
         print(f"  • Serial Port       : {self.serial_port} @ {self.baud_rate} baud")
         print(f"  • NTRIP Server Port : {self.server_port} (Mountpoint: /{self.mountpoint})")
         print(f"  • 🌐 Web Dashboard  : http://{self.local_ip}:{self.web_port}")
+        if self.is_static_fixed:
+            print(f"  • Mode              : 🎯 STATIC FIXED BASE (0 mm Drift)")
+            print(f"  • Coordinates       : {self.survey_lat:.8f}°, {self.survey_lon:.8f}°, {self.survey_alt:.2f}m")
+        else:
+            print(f"  • Mode              : ⏳ Auto-Calibrating ({self.survey_target_duration}s Target)")
         print("=" * 75 + "\n")
 
         # 1. Start background TCP Server thread for NTRIP Rovers
@@ -148,69 +260,65 @@ class NTRIPBaseCaster:
                 client_thread.start()
         except Exception as e:
             self._add_log(f"Server error: {e}", "ERROR")
-        finally:
-            server_sock.close()
 
     def _handle_client_handshake(self, client_sock: socket.socket, client_addr: tuple) -> None:
-        """Handles standard NTRIP 1.0/2.0 HTTP header handshake and deduplicates connections."""
-        client_sock.settimeout(5.0)
-        rover_ip = client_addr[0]
-        rover_port = client_addr[1]
-        addr_str = f"{rover_ip}:{rover_port}"
-
+        """Handles NTRIP 1.0 / 2.0 HTTP GET request handshake."""
+        ip, port = client_addr
         try:
-            req_data = b""
-            while b"\r\n\r\n" not in req_data and b"\n\n" not in req_data:
-                chunk = client_sock.recv(1024)
-                if not chunk:
-                    client_sock.close()
-                    return
-                req_data += chunk
-                if len(req_data) > 4096:
-                    break
+            client_sock.settimeout(5.0)
+            raw_req = client_sock.recv(2048).decode('ascii', errors='ignore')
 
-            req_text = req_data.decode('latin1', errors='ignore')
-            first_line = req_text.splitlines()[0] if req_text else ""
-            self._add_log(f"Rover handshake from {addr_str}: {first_line}")
-
-            if f"/{self.mountpoint}" not in first_line and f"/{self.mountpoint.lower()}" not in first_line:
-                self._add_log(f"Rover requested unknown mountpoint: {first_line}", "WARN")
-                client_sock.sendall(b"HTTP/1.0 404 Not Found\r\n\r\n")
+            if not raw_req:
                 client_sock.close()
                 return
 
-            client_sock.sendall(b"ICY 200 OK\r\n\r\n")
-            client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            client_sock.settimeout(2.0)
+            lines = raw_req.split('\r\n')
+            first_line = lines[0] if lines else ""
+            self._add_log(f"Rover handshake from {ip}:{port}: {first_line}")
 
+            # Send standard NTRIP Caster response
+            response = (
+                "ICY 200 OK\r\n"
+                "Server: ConeRobot-RPi5-NTRIPCaster/2.0\r\n"
+                "Content-Type: gnss/data\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            )
+            client_sock.sendall(response.encode('ascii'))
+            client_sock.settimeout(2.0)
+            client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+            # Deduplicate & register
             with self.clients_lock:
-                # Deduplicate: Clean up any older ghost sockets from the same IP
-                stale_socks = [s for s, m in self.clients_map.items() if m["ip"] == rover_ip]
-                for stale in stale_socks:
-                    del self.clients_map[stale]
+                to_remove = []
+                for sock, meta in self.clients_map.items():
+                    if meta["ip"] == ip:
+                        to_remove.append(sock)
+                for sock in to_remove:
                     try:
-                        stale.close()
+                        sock.close()
                     except Exception:
                         pass
+                    del self.clients_map[sock]
 
                 self.clients_map[client_sock] = {
-                    "ip": rover_ip,
-                    "port": rover_port,
+                    "ip": ip,
+                    "port": port,
                     "connected_at": time.time(),
                     "bytes_sent": 0
                 }
 
-            self._add_log(f"Stream Active: Broadcasting RTCM3 to Rover {rover_ip}")
+            self._add_log(f"Stream Active: Broadcasting RTCM3 to Rover {ip}")
 
         except Exception as e:
-            self._add_log(f"Handshake error with {addr_str}: {e}", "WARN")
+            self._add_log(f"Client handshake error ({ip}): {e}", "WARN")
             try:
                 client_sock.close()
             except Exception:
                 pass
 
     def _parse_nmea_coordinate(self, raw_coord: str, direction: str, is_lon: bool = False) -> Optional[float]:
-        """Convert NMEA DDMM.MMMM format to decimal degrees."""
+        """Convert NMEA DDMM.MMMM or DDDMM.MMMM format to decimal degrees."""
         if not raw_coord or not direction:
             return None
         try:
@@ -226,10 +334,13 @@ class NTRIPBaseCaster:
 
     def _update_survey_statistics(self, lat: float, lon: float, alt: float) -> None:
         """Calculates live Survey-In elapsed duration and position standard deviation."""
+        if self.is_static_fixed:
+            return
+
         now = time.time()
         if self.survey_start_time is None:
             self.survey_start_time = now
-            self._add_log("🛰️ GPS Lock acquired! Starting Survey-In convergence timer (Target: 300s)...")
+            self._add_log(f"🛰️ GPS Lock acquired! Starting Auto-Calibration timer (Target: {self.survey_target_duration}s)...")
 
         self.survey_duration = int(now - self.survey_start_time)
         self.coord_samples.append((lat, lon, alt))
@@ -247,31 +358,33 @@ class NTRIPBaseCaster:
             dy = [(lt - mean_lat) * lat_m for lt in lats]
             sigma_2d = math.sqrt((sum(x**2 for x in dx) + sum(y**2 for y in dy)) / len(dx))
             self.survey_accuracy = sigma_2d
+            self.survey_lat = mean_lat
+            self.survey_lon = mean_lon
+            self.survey_alt = sum(s[2] for s in self.coord_samples) / len(self.coord_samples)
 
-            if self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy:
-                if not self.survey_valid:
-                    self.survey_valid = True
-                    self.survey_status = "COMPLETED"
-                    self._add_log(f"🎯 Survey-In COMPLETED! Base locked at accuracy: {self.survey_accuracy:.2f}m")
+            # Auto-Lock condition reached
+            if (self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy) or (self.survey_duration >= self.survey_target_duration * 1.5):
+                self._add_log(f"🎯 Auto-Calibration COMPLETE! (Duration: {self.survey_duration}s, Acc: {self.survey_accuracy:.2f}m)")
+                self.lock_now()
             else:
-                self.survey_status = "IN_PROGRESS"
+                self.survey_status = "CALIBRATING"
 
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
         try:
-            if line.startswith('$GNGGA') or line.startswith('$GPGGA'):
+            if line.startswith(('$GNGGA', '$GPGGA', '$GAGGA', '$GBGGA', '$GLGGA')):
                 parts = line.split(',')
                 if len(parts) >= 10:
                     lat = self._parse_nmea_coordinate(parts[2], parts[3], False)
                     lon = self._parse_nmea_coordinate(parts[4], parts[5], True)
-                    if lat and lon:
+                    if not self.is_static_fixed and lat and lon:
                         self.survey_lat = lat
                         self.survey_lon = lon
                     if parts[7].isdigit():
                         self.satellites_tracked = int(parts[7])
                     if parts[8].replace('.', '', 1).isdigit():
                         self.hdop = float(parts[8])
-                    if parts[9].replace('.', '', 1).isdigit():
+                    if not self.is_static_fixed and parts[9].replace('.', '', 1).replace('-', '', 1).isdigit():
                         self.survey_alt = float(parts[9])
 
                     if lat and lon and self.satellites_tracked >= 4:
@@ -366,57 +479,50 @@ class NTRIPBaseCaster:
                         pass
 
     def _diagnostic_logger_loop(self) -> None:
-        """Prints live caster throughput and Survey-In progress to console."""
+        """Prints periodic terminal status summaries every 10 seconds."""
         while self.is_running:
-            time.sleep(6.0)
+            time.sleep(10.0)
             with self.clients_lock:
-                rover_count = len(self.clients_map)
+                rovers = len(self.clients_map)
+
             rtcm_kb = self.total_rtcm_bytes_read / 1024.0
 
-            remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
-            rem_min = remaining_sec // 60
-            rem_s = remaining_sec % 60
-
-            if self.survey_valid or self.survey_status == "COMPLETED":
-                status_icon = "🎯 [BASE READY]"
-                details = f"LOCKED (Accuracy: < {self.survey_accuracy:.2f}m) | Pos: ({self.survey_lat:.7f}, {self.survey_lon:.7f})"
-            elif self.survey_duration > 0:
-                status_icon = "⏳ [SURVEY-IN]"
-                details = f"{self.survey_duration}s/300s ({rem_min}m {rem_s:02d}s left) | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked}"
+            if self.is_static_fixed:
+                msg = f"🎯 [STATIC FIXED BASE] Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}, {self.survey_alt:.1f}m) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB [0 mm Drift]"
+            elif self.survey_valid:
+                msg = f"🎯 [BASE READY] Status: LOCKED (Accuracy: < {self.survey_accuracy:.2f}m) | Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB"
             else:
-                status_icon = "🛰️ [SURVEY-IN]"
-                details = f"Tracking {self.satellites_tracked} Sats (HDOP: {self.hdop:.2f}) | Pos: ({self.survey_lat:.7f}, {self.survey_lon:.7f})"
+                rem = max(0, self.survey_target_duration - self.survey_duration)
+                mins = rem // 60
+                secs = rem % 60
+                msg = f"⏳ [CALIBRATING] {self.survey_duration}s/{self.survey_target_duration}s ({mins}m {secs}s left) | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked} | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB"
 
-            msg = f"{status_icon} Status: {details} | Active Rovers: {rover_count} | RTCM: {rtcm_kb:.1f} KB"
-            print(msg)
-            self._add_log(msg)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
     def get_status_json(self) -> dict:
-        """Returns JSON representation of all base station metrics and live log history."""
+        """Generates real-time telemetry dictionary for HTTP dashboard."""
         with self.clients_lock:
             active_rovers = [
                 {
                     "ip": meta["ip"],
                     "port": meta["port"],
-                    "duration_sec": int(time.time() - meta["connected_at"]),
+                    "uptime_sec": int(time.time() - meta["connected_at"]),
                     "bytes_sent_kb": round(meta["bytes_sent"] / 1024.0, 1)
                 }
                 for meta in self.clients_map.values()
             ]
 
         with self.logs_lock:
-            log_list = list(self.logs)
+            log_list = list(self.logs)[-30:]
 
-        uptime_sec = int(time.time() - self.start_time)
         remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
-        rem_min = remaining_sec // 60
-        rem_s = remaining_sec % 60
-        remaining_str = "0m 00s" if remaining_sec == 0 else f"{rem_min}m {rem_s:02d}s"
+        remaining_str = f"{remaining_sec // 60}m {remaining_sec % 60:02d}s"
 
         return {
-            "uptime_sec": uptime_sec,
-            "survey_status": self.survey_status,
-            "survey_valid": self.survey_valid or (self.survey_status == "COMPLETED"),
+            "survey_status": "STATIC_FIXED" if self.is_static_fixed else self.survey_status,
+            "survey_valid": self.survey_valid,
+            "is_static_fixed": self.is_static_fixed,
+            "locked_timestamp": self.locked_timestamp,
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
             "remaining_sec": remaining_sec,
@@ -446,11 +552,35 @@ class NTRIPBaseCaster:
             protocol_version = "HTTP/1.1"
 
             def address_string(self) -> str:
-                """Prevent reverse DNS lookup that causes 30-60 second delays on local networks."""
                 return str(self.client_address[0])
 
             def log_message(self, format, *args):
                 pass
+
+            def do_POST(self):
+                if self.path == '/api/lock_now':
+                    success = caster_instance.lock_now()
+                    resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
+                    self.send_response(200 if success else 400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(resp)
+                elif self.path == '/api/recalibrate':
+                    success = caster_instance.recalibrate()
+                    resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(resp)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
 
             def do_GET(self):
                 if self.path.startswith('/api/status'):
@@ -501,92 +631,198 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --text: #f1f5f9;
       --text-muted: #94a3b8;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-    body { background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; }
-    .container { width: 100%; max-width: 1000px; }
-    
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--card-border); flex-wrap: wrap; gap: 12px; }
-    .logo { display: flex; align-items: center; gap: 12px; }
-    .logo-icon { font-size: 32px; filter: drop-shadow(0 0 10px var(--accent)); }
-    h1 { font-size: 24px; font-weight: 800; background: linear-gradient(135deg, #fff, var(--accent)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .status-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 9999px; font-size: 13px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; background: rgba(56, 189, 248, 0.1); border: 1px solid var(--accent); color: var(--accent); }
-    .status-badge.locked { background: rgba(16, 185, 129, 0.15); border-color: var(--success); color: var(--success); box-shadow: 0 0 15px var(--success-glow); }
-    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0% { transform: scale(0.95); opacity: 0.8; } 50% { transform: scale(1.4); opacity: 1; } 100% { transform: scale(0.95); opacity: 0.8; } }
-
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-bottom: 20px; }
-    .card { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--card-border); border-radius: 16px; padding: 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); }
-    .card-title { font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
-    
-    .metric-value { font-size: 32px; font-weight: 800; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #fff; }
-    .metric-unit { font-size: 16px; font-weight: 500; color: var(--text-muted); margin-left: 4px; }
-    .progress-bar-bg { background: rgba(255, 255, 255, 0.08); height: 10px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; }
-    .progress-bar-fill { background: linear-gradient(90deg, var(--warning), var(--accent)); height: 100%; width: 0%; transition: width 0.5s ease; }
-    .progress-bar-fill.complete { background: var(--success); box-shadow: 0 0 12px var(--success-glow); }
-    
-    .data-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 14px; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-icon { font-size: 32px; }
+    .brand-title { font-size: 24px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
+    .brand-subtitle { font-size: 13px; color: var(--text-muted); }
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 9999px;
+      font-size: 14px;
+      font-weight: 600;
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--warning);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .status-badge.locked {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      border-color: rgba(16, 185, 129, 0.3);
+      box-shadow: 0 0 15px var(--success-glow);
+    }
+    .status-badge.fixed {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border-color: rgba(56, 189, 248, 0.3);
+      box-shadow: 0 0 15px var(--accent-glow);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 20px;
+      backdrop-filter: blur(12px);
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .metric-value { font-size: 32px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+    .metric-unit { font-size: 16px; color: var(--text-muted); margin-left: 4px; }
+    .data-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 14px;
+    }
     .data-row:last-child { border-bottom: none; }
     .data-label { color: var(--text-muted); }
-    .data-val { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-weight: 600; }
-    .data-val.countdown { color: #38bdf8; font-weight: 700; }
-    
-    .console-card { grid-column: 1 / -1; }
-    .terminal-box { background: #050811; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; color: #38bdf8; height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-    .log-line { display: flex; gap: 10px; line-height: 1.4; word-break: break-all; }
-    .log-time { color: var(--text-muted); opacity: 0.7; }
-    .log-msg { color: #f1f5f9; }
+    .data-val { font-weight: 600; font-family: ui-monospace, monospace; }
+    .progress-container { margin: 16px 0; }
+    .progress-bar-bg {
+      height: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #38bdf8, #818cf8);
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    .progress-bar-fill.complete {
+      background: linear-gradient(90deg, #10b981, #34d399);
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px 14px;
+      background: #0284c7;
+      color: #fff;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #0369a1; }
+    .btn-warning { background: #d97706; }
+    .btn-warning:hover { background: #b45309; }
+    .btn-secondary { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.15); }
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.2); }
+    .button-group { display: flex; gap: 10px; margin-top: 14px; }
+    .code-box {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      color: #38bdf8;
+      white-space: pre;
+      overflow-x: auto;
+      margin-top: 8px;
+    }
+    .terminal-box {
+      background: #050811;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      color: #a5f3fc;
+      height: 200px;
+      overflow-y: auto;
+    }
+    .log-line { margin-bottom: 4px; }
+    .log-time { color: #64748b; margin-right: 8px; }
     .log-msg.error { color: #f87171; }
     .log-msg.warn { color: #fbbf24; }
-
-    .code-box { background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; color: #a5f3fc; overflow-x: auto; margin-top: 8px; }
-    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--accent); color: #000; padding: 8px 16px; border-radius: 8px; font-weight: 700; text-decoration: none; font-size: 13px; margin-top: 12px; transition: transform 0.2s, box-shadow 0.2s; border: none; cursor: pointer; }
-    .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 16px var(--accent-glow); }
   </style>
 </head>
 <body>
   <div class="container">
-    <header>
-      <div class="logo">
-        <div class="logo-icon">📡</div>
+    <div class="header">
+      <div class="brand">
+        <div class="brand-icon">📡</div>
         <div>
-          <h1>RTK Base Station</h1>
-          <div style="font-size: 12px; color: var(--text-muted);">Raspberry Pi 5 Local Caster</div>
+          <div class="brand-title">RTK Base Station</div>
+          <div class="brand-subtitle">Raspberry Pi 5 Local Caster & Auto-Lock</div>
         </div>
       </div>
       <div id="statusBadge" class="status-badge">
-        <div class="pulse-dot"></div>
-        <span id="statusText">Surveying...</span>
+        <span id="statusIcon">⏳</span>
+        <span id="statusText">CALIBRATING</span>
       </div>
-    </header>
+    </div>
 
     <div class="grid">
       <div class="card">
         <div class="card-title">
-          <span>🎯 Survey-In Calibration</span>
-          <span id="surveyPercent" class="data-val">0%</span>
+          <span>🎯 SURVEY-IN / STATIC CALIBRATION</span>
+          <span id="surveyPercent" class="data-val" style="color: var(--accent);">0%</span>
         </div>
-        <div class="progress-bar-bg">
-          <div id="surveyProgressBar" class="progress-bar-fill"></div>
+        <div class="progress-container">
+          <div class="progress-bar-bg">
+            <div id="surveyProgressBar" class="progress-bar-fill"></div>
+          </div>
         </div>
         <div class="data-row">
           <span class="data-label">⏳ Time Remaining:</span>
-          <span id="surveyRemaining" class="data-val countdown">5m 00s</span>
+          <span id="surveyRemaining" class="data-val">Calibrating...</span>
         </div>
         <div class="data-row">
           <span class="data-label">Elapsed Duration:</span>
-          <span id="surveyTime" class="data-val">0s / 300s</span>
+          <span id="surveyTime" class="data-val">0s / 3600s</span>
         </div>
         <div class="data-row">
           <span class="data-label">Live Accuracy StdDev (σ):</span>
           <span id="surveyAcc" class="data-val">-- m</span>
         </div>
         <div class="data-row">
-          <span class="data-label">Target Accuracy Threshold:</span>
-          <span class="data-val">&lt; 2.00 m</span>
-        </div>
-        <div class="data-row">
           <span class="data-label">Anchor Reference Status:</span>
           <span id="anchorStatus" class="data-val" style="color: var(--warning);">Converging...</span>
+        </div>
+        <div class="button-group">
+          <button id="lockNowBtn" onclick="lockPositionNow()" class="btn btn-warning">🔒 Lock Position Now</button>
+          <button id="recalBtn" onclick="recalibrateBase()" class="btn btn-secondary">🔄 Recalibrate</button>
         </div>
       </div>
 
@@ -604,7 +840,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
         <div class="data-row">
           <span class="data-label">Constellations:</span>
-          <span class="data-val">GPS + GLO + GAL + BDS</span>
+          <span class="data-val">GPS + GLO + GAL + BDS (L1/L5)</span>
         </div>
         <div class="data-row">
           <span class="data-label">Raw RTCM3 Ingested:</span>
@@ -632,7 +868,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="data-label">Elevation / Altitude:</span>
           <span id="baseAlt" class="data-val">0.00 m</span>
         </div>
-        <a id="mapsBtn" href="#" target="_blank" class="btn">🗺️ Open in Google Maps</a>
+        <div style="margin-top: 14px;">
+          <a id="mapsBtn" href="#" target="_blank" class="btn">🗺️ Open in Google Maps</a>
+        </div>
       </div>
 
       <div class="card">
@@ -654,13 +892,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="grid">
-      <div class="card console-card">
+      <div class="card" style="grid-column: 1 / -1;">
         <div class="card-title">
           <span>🖥️ Live Base Station Console & NMEA Logs</span>
           <span class="data-val" style="font-size: 11px; opacity: 0.7;">Auto-refreshing</span>
         </div>
         <div id="terminalBox" class="terminal-box">
-          <div class="log-line"><span class="log-time">[${l.time}]</span><span class="log-msg">Connecting to live log stream...</span></div>
+          <div class="log-line"><span class="log-msg">Connecting to live log stream...</span></div>
         </div>
       </div>
     </div>
@@ -673,39 +911,78 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       userScrolled = (term.scrollHeight - term.scrollTop - term.clientHeight) > 20;
     });
 
+    async function lockPositionNow() {
+      if (confirm('Lock the current averaged position as the permanent static base coordinate (0 mm drift)?')) {
+        try {
+          await fetch('/api/lock_now', { method: 'POST' });
+          updateDashboard();
+        } catch (e) {
+          alert('Lock failed: ' + e);
+        }
+      }
+    }
+
+    async function recalibrateBase() {
+      if (confirm('Clear saved coordinates and start a fresh 1-hour calibration survey?')) {
+        try {
+          await fetch('/api/recalibrate', { method: 'POST' });
+          updateDashboard();
+        } catch (e) {
+          alert('Recalibrate failed: ' + e);
+        }
+      }
+    }
+
     async function updateDashboard() {
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
 
-        const isComplete = data.survey_valid || data.survey_status === 'COMPLETED';
         const badge = document.getElementById('statusBadge');
         const statusText = document.getElementById('statusText');
+        const statusIcon = document.getElementById('statusIcon');
         const progressBar = document.getElementById('surveyProgressBar');
         const anchorStatus = document.getElementById('anchorStatus');
         const remainingEl = document.getElementById('surveyRemaining');
+        const lockBtn = document.getElementById('lockNowBtn');
 
-        if (isComplete) {
+        if (data.is_static_fixed) {
+          badge.className = 'status-badge fixed';
+          statusIcon.textContent = '🎯';
+          statusText.textContent = 'STATIC FIXED BASE (0 mm Drift)';
+          progressBar.className = 'progress-bar-fill complete';
+          progressBar.style.width = '100%';
+          document.getElementById('surveyPercent').textContent = '100%';
+          anchorStatus.textContent = 'PERMANENT STATIC LOCKED (0 mm)';
+          anchorStatus.style.color = 'var(--accent)';
+          remainingEl.textContent = `✅ Saved ${data.locked_timestamp || 'Active'}`;
+          remainingEl.style.color = 'var(--accent)';
+          lockBtn.style.display = 'none';
+        } else if (data.survey_valid) {
           badge.className = 'status-badge locked';
-          statusText.textContent = '🎯 Base Ready (Locked)';
+          statusIcon.textContent = '🎯';
+          statusText.textContent = 'CALIBRATION COMPLETE';
           progressBar.className = 'progress-bar-fill complete';
           progressBar.style.width = '100%';
           document.getElementById('surveyPercent').textContent = '100%';
           anchorStatus.textContent = 'LOCKED & VALID';
           anchorStatus.style.color = 'var(--success)';
-          remainingEl.textContent = '✅ Calibration Complete';
+          remainingEl.textContent = '✅ Auto-Locking...';
           remainingEl.style.color = 'var(--success)';
+          lockBtn.style.display = 'inline-flex';
         } else {
           badge.className = 'status-badge';
-          statusText.textContent = `⏳ Surveying (${data.remaining_str} left)`;
+          statusIcon.textContent = '⏳';
+          statusText.textContent = `CALIBRATING (${data.remaining_str} left)`;
           progressBar.className = 'progress-bar-fill';
           const pct = Math.min(100, Math.round((data.survey_duration / data.survey_target_duration) * 100));
           progressBar.style.width = pct + '%';
           document.getElementById('surveyPercent').textContent = pct + '%';
-          anchorStatus.textContent = 'Converging Samples...';
+          anchorStatus.textContent = `Converging Samples (${data.survey_duration}s)...`;
           anchorStatus.style.color = 'var(--warning)';
           remainingEl.textContent = `${data.remaining_str} remaining`;
           remainingEl.style.color = '#38bdf8';
+          lockBtn.style.display = 'inline-flex';
         }
 
         document.getElementById('surveyTime').textContent = `${data.survey_duration}s / ${data.survey_target_duration}s`;
@@ -760,6 +1037,12 @@ def main() -> None:
     parser.add_argument('--web-port', type=int, default=8080, help="Web Dashboard port (default: 8080)")
     parser.add_argument('--mountpoint', type=str, default='BASE', help="NTRIP mountpoint name (default: BASE)")
     parser.add_argument('--password', type=str, default='none', help="Optional authentication password")
+    parser.add_argument('--survey-time', type=int, default=3600, help="Survey-In calibration target time in seconds (default: 3600 = 1 hr)")
+    parser.add_argument('--survey-acc', type=float, default=0.5, help="Survey-In target accuracy in meters (default: 0.5m)")
+    parser.add_argument('--recalibrate', action='store_true', help="Clear saved coordinates and force a fresh calibration")
+    parser.add_argument('--fixed-lat', type=float, default=None, help="Manual fixed latitude override")
+    parser.add_argument('--fixed-lon', type=float, default=None, help="Manual fixed longitude override")
+    parser.add_argument('--fixed-alt', type=float, default=None, help="Manual fixed altitude override")
     args = parser.parse_args()
 
     caster = NTRIPBaseCaster(
@@ -768,8 +1051,15 @@ def main() -> None:
         server_port=args.port,
         web_port=args.web_port,
         mountpoint=args.mountpoint,
-        password=args.password
+        password=args.password,
+        survey_duration=args.survey_time,
+        survey_accuracy=args.survey_acc,
+        recalibrate=args.recalibrate,
+        fixed_lat=args.fixed_lat,
+        fixed_lon=args.fixed_lon,
+        fixed_alt=args.fixed_alt
     )
+
     try:
         caster.start()
     except KeyboardInterrupt:
