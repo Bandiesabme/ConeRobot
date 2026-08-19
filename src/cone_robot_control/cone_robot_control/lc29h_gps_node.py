@@ -341,7 +341,7 @@ class LC29HGPSNode(Node):
                     f"[NTRIP] Stream Connected! Receiving live RTCM3 corrections from [{self.ntrip_mountpoint}]"
                 )
                 self.ntrip_connected = True
-                sock.settimeout(6.0)
+                sock.settimeout(12.0)
                 last_gga_send_time = time.time()
 
                 # Stream RTCM3 binary correction data to LC29H serial port

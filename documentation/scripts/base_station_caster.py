@@ -8,8 +8,8 @@ Description:
     the Base GNSS HAT (Waveshare LC29H(BS) / LC29H(EA) on /dev/ttyAMA0 @ 115200)
     and provides:
       1. Local NTRIP 1.0/2.0 Caster TCP server on port 2101 (for rovers).
-      2. Modern Real-Time HTTP Web Dashboard on port 8080.
-      3. Live statistical Survey-In convergence engine with remaining time countdown.
+      2. High-performance, non-disconnecting TCP stream broadcast engine.
+      3. Modern Real-Time HTTP Web Dashboard on port 8080 with countdown timer.
 
 Usage:
     python3 base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE --serial /dev/ttyAMA0
@@ -19,6 +19,7 @@ Usage:
 import argparse
 from collections import deque
 from datetime import datetime
+import errno
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import math
@@ -68,7 +69,7 @@ class NTRIPBaseCaster:
         self.survey_valid = False
         self.survey_accuracy = 99.9
 
-        # Coordinate sample history for live statistical standard deviation
+        # Coordinate sample history
         self.coord_samples: Deque[Tuple[float, float, float]] = deque(maxlen=600)
         self.survey_lat = 0.0
         self.survey_lon = 0.0
@@ -172,7 +173,8 @@ class NTRIPBaseCaster:
                 return
 
             client_sock.sendall(b"ICY 200 OK\r\n\r\n")
-            client_sock.setblocking(False)
+            # Set healthy send timeout (do not use raw non-blocking to prevent premature disconnects)
+            client_sock.settimeout(3.0)
 
             with self.clients_lock:
                 self.clients.append(client_sock)
@@ -223,7 +225,6 @@ class NTRIPBaseCaster:
             mean_lat = sum(lats) / len(lats)
             mean_lon = sum(lons) / len(lons)
 
-            # Degree to meter conversion factors
             lat_m = 111132.0
             lon_m = 111412.0 * math.cos(math.radians(mean_lat))
 
@@ -232,7 +233,6 @@ class NTRIPBaseCaster:
             sigma_2d = math.sqrt((sum(x**2 for x in dx) + sum(y**2 for y in dy)) / len(dx))
             self.survey_accuracy = sigma_2d
 
-            # Check if Survey-In target is achieved
             if self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy:
                 if not self.survey_valid:
                     self.survey_valid = True
@@ -244,7 +244,6 @@ class NTRIPBaseCaster:
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
         try:
-            # Standard GGA
             if line.startswith('$GNGGA') or line.startswith('$GPGGA'):
                 parts = line.split(',')
                 if len(parts) >= 10:
@@ -263,7 +262,6 @@ class NTRIPBaseCaster:
                     if lat and lon and self.satellites_tracked >= 4:
                         self._update_survey_statistics(lat, lon, self.survey_alt)
 
-            # Parse GSV for satellites in view
             elif 'GSV' in line:
                 parts = line.split(',')
                 if len(parts) >= 4 and parts[3].isdigit():
@@ -275,7 +273,7 @@ class NTRIPBaseCaster:
             pass
 
     def _serial_reader_loop(self) -> None:
-        """Reads RTCM3 binary data + NMEA sentences cleanly."""
+        """Reads RTCM3 binary data + NMEA sentences and multicasts without dropping connections."""
         import serial
 
         while self.is_running:
@@ -285,7 +283,6 @@ class NTRIPBaseCaster:
                 ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.5)
                 self._add_log("Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...")
 
-                # Send configuration commands to enable NMEA GGA, GSA, GSV, RMC + Survey query
                 nmea_enable_cmds = [
                     b"$PAIR062,0,1*3F\r\n",  # Enable GGA @ 1 Hz
                     b"$PAIR062,2,1*39\r\n",  # Enable GSA @ 1 Hz
@@ -338,10 +335,23 @@ class NTRIPBaseCaster:
                         dead_clients = []
                         for client in self.clients:
                             try:
+                                # Drain any incoming keepalive/GGA from rover so TCP buffer never blocks
+                                try:
+                                    client.setblocking(False)
+                                    client.recv(512)
+                                except Exception:
+                                    pass
+                                finally:
+                                    client.setblocking(True)
+                                    client.settimeout(2.0)
+
                                 client.sendall(chunk)
                                 self.total_bytes_sent += len(chunk)
-                            except (BlockingIOError, socket.error):
-                                dead_clients.append(client)
+                            except socket.timeout:
+                                pass  # Transient timeout on slow Wi-Fi packet, do not drop client
+                            except socket.error as sock_err:
+                                if sock_err.errno in [errno.EPIPE, errno.ECONNRESET, errno.ENOTCONN, errno.EBADF]:
+                                    dead_clients.append(client)
 
                         for dead in dead_clients:
                             self.clients.remove(dead)
@@ -438,7 +448,7 @@ class NTRIPBaseCaster:
 
         class DashboardHandler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
-                pass  # Suppress HTTP request logs in terminal
+                pass
 
             def do_GET(self):
                 if self.path == '/api/status':
