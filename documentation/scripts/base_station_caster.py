@@ -4,6 +4,7 @@
 Raspberry Pi 5 RTK Base Station NTRIP Caster & Live Web Dashboard
 ==============================================================================
 Description:
+    Pure Standalone Python 3 application (Zero ROS dependencies).
     Reads raw RTCM3 differential correction packets and GNSS position from
     the Base GNSS HAT (Waveshare LC29H(BS) / LC29H(EA) on /dev/ttyAMA0 @ 115200)
     and provides:
@@ -669,7 +670,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="data-val" style="font-size: 11px; opacity: 0.7;">Auto-refreshing</span>
         </div>
         <div id="terminalBox" class="terminal-box">
-          <div class="log-line"><span class="log-time">--:--:--</span><span class="log-msg">Connecting to live log stream...</span></div>
+          <div class="log-line"><span class="log-time">[${l.time}]</span><span class="log-msg">Connecting to live log stream...</span></div>
         </div>
       </div>
     </div>
