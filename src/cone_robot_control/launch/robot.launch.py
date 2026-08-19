@@ -144,13 +144,13 @@ def generate_launch_description():
     # Declare Launch Arguments
     declare_robot_type_cmd = DeclareLaunchArgument(
         'robot_type',
-        default_value='custom',
-        description='Robot hardware preset: "gps" (IMU+GPS), "lidar" (IMU+LiDAR), "all", or "custom"'
+        default_value='all',
+        description='Robot hardware preset: "all" (IMU+GPS+LiDAR), "gps" (IMU+GPS), "lidar" (IMU+LiDAR), or "custom"'
     )
 
     declare_launch_lidar_cmd = DeclareLaunchArgument(
         'launch_lidar',
-        default_value='false',
+        default_value='true',
         description='Whether to launch YDLIDAR T-mini Plus driver node'
     )
 
