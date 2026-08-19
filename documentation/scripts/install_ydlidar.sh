@@ -62,6 +62,11 @@ else
     echo "rf2o_laser_odometry repository already exists at $RF2O_DEST."
 fi
 
+# Patch rf2o CMakeLists.txt to disable GCC 13 ARM vectorizer freeze (-O3 -> -O2 -fno-tree-vectorize)
+if [ -f "$RF2O_DEST/CMakeLists.txt" ]; then
+    sed -i 's/-O3/-O2 -fno-tree-vectorize/g' "$RF2O_DEST/CMakeLists.txt"
+fi
+
 echo "=== Patching ydlidar_ros2_driver_node.cpp for ROS 2 Jazzy compatibility ==="
 PATCH_SCRIPT="$SCRIPT_DIR/patch_ydlidar_jazzy.py"
 if [ -f "$PATCH_SCRIPT" ]; then
@@ -76,11 +81,13 @@ elif [ -f "$SCRIPT_DIR/init_ydlidar_udev.sh" ]; then
     bash "$SCRIPT_DIR/init_ydlidar_udev.sh"
 fi
 
-echo "=== 5. Building Workspace (Fast Low-Memory Mode) ==="
+echo "=== 5. Building Workspace (Fast Mode) ==="
 cd "$WORKSPACE_ROOT"
-export MAKEFLAGS="-j1"
-colcon build --symlink-install --parallel-workers 1 --executor sequential \
-    --cmake-args -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-O2 -DNDEBUG"
+# Clean stale CMake cache from previous stuck build
+rm -rf "$WORKSPACE_ROOT/build/rf2o_laser_odometry"
+
+export MAKEFLAGS="-j2"
+colcon build --symlink-install --parallel-workers 1 --executor sequential
 
 echo ""
 echo "=============================================================================="
