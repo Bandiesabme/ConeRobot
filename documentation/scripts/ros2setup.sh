@@ -62,6 +62,7 @@ sudo apt install -y \
     python3-lgpio \
     python3-smbus \
     python3-pip \
+    libboost-all-dev \
     i2c-tools
 
 # Install BNO08x IMU Python library
