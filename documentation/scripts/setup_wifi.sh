@@ -2,8 +2,17 @@
 # ==============================================================================
 # Automated Raspberry Pi 5 Wi-Fi Auto-Connect & Stability Setup Script
 # ==============================================================================
+# Description:
+#   - Configures automatic Wi-Fi connection for Raspberry Pi 5.
+#   - Disables Wi-Fi Power Saving permanently (stops ping spikes & SSH lag).
+#   - Supports automatic USB Wi-Fi adapter hotplugging:
+#       * When USB Wi-Fi (wlan1) is connected -> automatically disables onboard
+#         wlan0 to eliminate RF interference and dual-interface route flapping.
+#       * When USB Wi-Fi (wlan1) is unplugged -> automatically re-enables wlan0.
+#
 # Usage:
-#   sudo bash documentation/scripts/setup_wifi.sh
+#   sudo bash documentation/scripts/setup_wifi.sh [SSID] [PASSWORD]
+#   sudo bash documentation/scripts/setup_wifi.sh Bandi 1234445678
 # ==============================================================================
 
 set -e
@@ -26,35 +35,58 @@ if [ -d "/sys/class/net/wlan1" ] || [ -d "/sys/class/net/wlx*" ]; then
     HAS_WLAN1=true
 fi
 
-echo "⚙️ [1/4] Creating TP-Link USB Wi-Fi persistent udev rule..."
-echo 'SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2357", ATTRS{idProduct}=="010c", NAME="wlan1"' > /etc/udev/rules.d/70-tplink-wifi.rules
-udevadm control --reload-rules && udevadm trigger 2>/dev/null || true
-
-echo "⚙️ [2/4] Disabling Wi-Fi power save mode permanently (prevents drops)..."
-apt-get update -qq && apt-get install -y -qq iw
-
-cat << 'EOF' > /etc/systemd/system/wifi-powersave-off.service
-[Unit]
-Description=Disable Wi-Fi Power Save
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/iw dev wlan0 set power_save off
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
+echo "⚙️ [1/5] Setting up USB Wi-Fi persistent udev naming & hotplug rules..."
+# TP-Link and generic Realtek/MediaTek USB dongles
+cat << 'EOF' > /etc/udev/rules.d/70-wifi-naming.rules
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtl8xxxu|rtw88_*|mt76*", NAME="wlan1"
+SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2357", NAME="wlan1"
 EOF
 
-systemctl daemon-reload
-systemctl enable --now wifi-powersave-off.service 2>/dev/null || true
+# Auto-hotplug: disable wlan0 when wlan1 is connected, re-enable when unplugged
+cat << 'EOF' > /etc/udev/rules.d/99-wifi-hotplug.rules
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan1", RUN+="/usr/bin/ip link set wlan0 down"
+ACTION=="remove", SUBSYSTEM=="net", KERNEL=="wlan1", RUN+="/usr/bin/ip link set wlan0 up"
+EOF
 
-echo "⚙️ [3/4] Writing Netplan configuration..."
+udevadm control --reload-rules && udevadm trigger 2>/dev/null || true
+
+echo "⚙️ [2/5] Creating NetworkManager Dispatcher auto-switch script..."
+mkdir -p /etc/NetworkManager/dispatcher.d/
+cat << 'EOF' > /etc/NetworkManager/dispatcher.d/99-wifi-auto-switch.sh
+#!/bin/bash
+INTERFACE="$1"
+ACTION="$2"
+
+if [ "$INTERFACE" = "wlan1" ]; then
+    if [ "$ACTION" = "up" ]; then
+        # External antenna active -> turn off internal Wi-Fi to stop dual-radio conflict
+        ip link set wlan0 down 2>/dev/null || true
+    elif [ "$ACTION" = "down" ]; then
+        # External antenna removed -> restore internal Wi-Fi fallback
+        ip link set wlan0 up 2>/dev/null || true
+    fi
+fi
+EOF
+chmod +x /etc/NetworkManager/dispatcher.d/99-wifi-auto-switch.sh
+
+echo "⚙️ [3/5] Disabling Wi-Fi power save mode permanently (prevents SSH lag & drops)..."
+apt-get update -qq && apt-get install -y -qq iw
+
+# NetworkManager power save override (2 = disable powersave)
+mkdir -p /etc/NetworkManager/conf.d/
+cat << 'EOF' > /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf
+[connection]
+wifi.powersave = 2
+EOF
+
+# Immediate runtime power save disable
+iw dev wlan0 set power_save off 2>/dev/null || true
 if [ "$HAS_WLAN1" = true ]; then
-    echo "   -> Detected external antenna (wlan1). Configuring dual-antenna failover..."
-    cat <<EOF > /etc/netplan/50-cloud-init.yaml
+    iw dev wlan1 set power_save off 2>/dev/null || true
+fi
+
+echo "⚙️ [4/5] Writing Netplan configuration..."
+cat <<EOF > /etc/netplan/50-cloud-init.yaml
 network:
   version: 2
   ethernets:
@@ -66,7 +98,7 @@ network:
       optional: true
       dhcp4: true
       dhcp4-overrides:
-        route-metric: 100
+        route-metric: 50
       access-points:
         "${SSID}":
           password: "${PASSWORD}"
@@ -79,36 +111,29 @@ network:
         "${SSID}":
           password: "${PASSWORD}"
 EOF
-else
-    echo "   -> Configuring built-in Wi-Fi (wlan0)..."
-    cat <<EOF > /etc/netplan/50-cloud-init.yaml
-network:
-  version: 2
-  ethernets:
-    eth0:
-      optional: true
-      dhcp4: true
-  wifis:
-    wlan0:
-      optional: true
-      dhcp4: true
-      access-points:
-        "${SSID}":
-          password: "${PASSWORD}"
-EOF
-fi
 
 chmod 600 /etc/netplan/50-cloud-init.yaml
 
-echo "⚙️ [4/4] Applying Netplan network settings..."
-netplan generate
-systemctl restart systemd-networkd 2>/dev/null || true
-systemctl restart "netplan-wpa-wlan0.service" 2>/dev/null || true
+echo "⚙️ [5/5] Applying network settings & optimizing interface state..."
+netplan generate 2>/dev/null || true
+
+# If wlan1 is currently plugged in, immediately shut down wlan0
+if [ "$HAS_WLAN1" = true ]; then
+    echo "   -> External antenna (wlan1) is active. Disabling onboard wlan0..."
+    ip link set wlan0 down 2>/dev/null || true
+    ip link set wlan1 up 2>/dev/null || true
+fi
+
+systemctl restart NetworkManager 2>/dev/null || true
 
 echo ""
 echo "=================================================================="
-echo " ✅ Wi-Fi Auto-Connect & Stability Setup Complete!"
+echo " ✅ Wi-Fi Auto-Connect & Auto-Switching Setup Complete!"
 echo "=================================================================="
-echo "Connected IP Addresses:"
-ip -4 addr show | grep -E "inet " | grep -v "127.0.0.1" || echo "Acquiring DHCP IP..."
+echo "Active Wireless Link Status:"
+if [ "$HAS_WLAN1" = true ]; then
+    iw dev wlan1 link 2>/dev/null || true
+else
+    iw dev wlan0 link 2>/dev/null || true
+fi
 echo "=================================================================="
