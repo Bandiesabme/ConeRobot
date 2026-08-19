@@ -8,8 +8,10 @@ Description:
     the Base GNSS HAT (Waveshare LC29H(BS) / LC29H(EA) on /dev/ttyAMA0 @ 115200)
     and provides:
       1. Local NTRIP 1.0/2.0 Caster TCP server on port 2101 (for rovers).
-      2. High-performance, non-disconnecting TCP stream broadcast engine.
-      3. Modern Real-Time HTTP Web Dashboard on port 8080 with countdown timer.
+      2. Non-blocking high-speed async TCP multicast engine (zero serial delay).
+      3. Instant client deduplication & stale connection pruning.
+      4. Multi-threaded, lightning-fast HTTP Web Dashboard on port 8080.
+      5. 100% offline-ready (zero external CDN or font dependencies).
 
 Usage:
     python3 base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE --serial /dev/ttyAMA0
@@ -20,9 +22,10 @@ import argparse
 from collections import deque
 from datetime import datetime
 import errno
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
+import select
 import socket
 import sys
 import threading
@@ -47,8 +50,8 @@ class NTRIPBaseCaster:
         self.mountpoint = mountpoint.strip("/")
         self.password = password
 
-        self.clients: List[socket.socket] = []
-        self.client_metadata: Dict[str, dict] = {}
+        # Mapping: client_socket -> (ip, port, connect_time, bytes_sent)
+        self.clients_map: Dict[socket.socket, dict] = {}
         self.clients_lock = threading.Lock()
         self.is_running = True
         self.start_time = time.time()
@@ -113,7 +116,7 @@ class NTRIPBaseCaster:
         ntrip_thread = threading.Thread(target=self._tcp_server_loop, daemon=True)
         ntrip_thread.start()
 
-        # 2. Start background Web Dashboard HTTP server
+        # 2. Start background multi-threaded Web Dashboard HTTP server
         web_thread = threading.Thread(target=self._web_server_loop, daemon=True)
         web_thread.start()
 
@@ -148,9 +151,12 @@ class NTRIPBaseCaster:
             server_sock.close()
 
     def _handle_client_handshake(self, client_sock: socket.socket, client_addr: tuple) -> None:
-        """Handles standard NTRIP 1.0/2.0 HTTP header handshake with the rover."""
+        """Handles standard NTRIP 1.0/2.0 HTTP header handshake and deduplicates connections."""
         client_sock.settimeout(5.0)
-        addr_str = f"{client_addr[0]}:{client_addr[1]}"
+        rover_ip = client_addr[0]
+        rover_port = client_addr[1]
+        addr_str = f"{rover_ip}:{rover_port}"
+
         try:
             req_data = b""
             while b"\r\n\r\n" not in req_data and b"\n\n" not in req_data:
@@ -173,18 +179,27 @@ class NTRIPBaseCaster:
                 return
 
             client_sock.sendall(b"ICY 200 OK\r\n\r\n")
-            # Set healthy send timeout (do not use raw non-blocking to prevent premature disconnects)
-            client_sock.settimeout(3.0)
+            client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            client_sock.setblocking(False)
 
             with self.clients_lock:
-                self.clients.append(client_sock)
-                self.client_metadata[addr_str] = {
-                    "ip": client_addr[0],
-                    "port": client_addr[1],
+                # Deduplicate: Clean up any older ghost sockets from the same IP
+                stale_socks = [s for s, m in self.clients_map.items() if m["ip"] == rover_ip]
+                for stale in stale_socks:
+                    del self.clients_map[stale]
+                    try:
+                        stale.close()
+                    except Exception:
+                        pass
+
+                self.clients_map[client_sock] = {
+                    "ip": rover_ip,
+                    "port": rover_port,
                     "connected_at": time.time(),
                     "bytes_sent": 0
                 }
-            self._add_log(f"Stream Active: Broadcasting RTCM3 to Rover {client_addr[0]}")
+
+            self._add_log(f"Stream Active: Broadcasting RTCM3 to Rover {rover_ip}")
 
         except Exception as e:
             self._add_log(f"Handshake error with {addr_str}: {e}", "WARN")
@@ -218,7 +233,6 @@ class NTRIPBaseCaster:
         self.survey_duration = int(now - self.survey_start_time)
         self.coord_samples.append((lat, lon, alt))
 
-        # Compute mean & standard deviation in meters
         if len(self.coord_samples) >= 5:
             lats = [s[0] for s in self.coord_samples]
             lons = [s[1] for s in self.coord_samples]
@@ -273,7 +287,7 @@ class NTRIPBaseCaster:
             pass
 
     def _serial_reader_loop(self) -> None:
-        """Reads RTCM3 binary data + NMEA sentences and multicasts without dropping connections."""
+        """Reads RTCM3 binary data + NMEA sentences and non-blocking multicasts to rovers."""
         import serial
 
         while self.is_running:
@@ -284,11 +298,11 @@ class NTRIPBaseCaster:
                 self._add_log("Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...")
 
                 nmea_enable_cmds = [
-                    b"$PAIR062,0,1*3F\r\n",  # Enable GGA @ 1 Hz
-                    b"$PAIR062,2,1*39\r\n",  # Enable GSA @ 1 Hz
-                    b"$PAIR062,3,1*38\r\n",  # Enable GSV @ 1 Hz
-                    b"$PAIR062,4,1*3B\r\n",  # Enable RMC @ 1 Hz
-                    b"$PQTMSURVEY*77\r\n",   # Query Survey status
+                    b"$PAIR062,0,1*3F\r\n",
+                    b"$PAIR062,2,1*39\r\n",
+                    b"$PAIR062,3,1*38\r\n",
+                    b"$PAIR062,4,1*3B\r\n",
+                    b"$PQTMSURVEY*77\r\n",
                 ]
                 for cmd in nmea_enable_cmds:
                     try:
@@ -316,7 +330,6 @@ class NTRIPBaseCaster:
                     self.total_rtcm_bytes_read += len(chunk)
                     self.rtcm_packet_count += 1
 
-                    # Parse ASCII sentences cleanly from binary stream
                     raw_byte_stream.extend(chunk)
                     if len(raw_byte_stream) > 8192:
                         raw_byte_stream = raw_byte_stream[-4096:]
@@ -330,35 +343,30 @@ class NTRIPBaseCaster:
                             if clean_str:
                                 self._parse_survey_line(clean_str)
 
-                    # Multicast raw correction stream to all connected rovers
+                    # Non-blocking multicast using select to prevent any serial delay
                     with self.clients_lock:
-                        dead_clients = []
-                        for client in self.clients:
-                            try:
-                                # Drain any incoming keepalive/GGA from rover so TCP buffer never blocks
+                        all_socks = list(self.clients_map.keys())
+                        if all_socks:
+                            _, writable_socks, error_socks = select.select([], all_socks, all_socks, 0)
+                            dead_socks = list(error_socks)
+
+                            for client in writable_socks:
                                 try:
-                                    client.setblocking(False)
-                                    client.recv(512)
+                                    sent = client.send(chunk)
+                                    if sent > 0:
+                                        self.total_bytes_sent += sent
+                                        self.clients_map[client]["bytes_sent"] += sent
+                                except (socket.error, BlockingIOError) as e:
+                                    if getattr(e, 'errno', None) in [errno.EPIPE, errno.ECONNRESET, errno.ENOTCONN, errno.EBADF]:
+                                        dead_socks.append(client)
+
+                            for dead in dead_socks:
+                                if dead in self.clients_map:
+                                    del self.clients_map[dead]
+                                try:
+                                    dead.close()
                                 except Exception:
                                     pass
-                                finally:
-                                    client.setblocking(True)
-                                    client.settimeout(2.0)
-
-                                client.sendall(chunk)
-                                self.total_bytes_sent += len(chunk)
-                            except socket.timeout:
-                                pass  # Transient timeout on slow Wi-Fi packet, do not drop client
-                            except socket.error as sock_err:
-                                if sock_err.errno in [errno.EPIPE, errno.ECONNRESET, errno.ENOTCONN, errno.EBADF]:
-                                    dead_clients.append(client)
-
-                        for dead in dead_clients:
-                            self.clients.remove(dead)
-                            try:
-                                dead.close()
-                            except Exception:
-                                pass
 
             except Exception as e:
                 self._add_log(f"Serial Error: {e}. Retrying in 2 seconds...", "ERROR")
@@ -375,7 +383,7 @@ class NTRIPBaseCaster:
         while self.is_running:
             time.sleep(6.0)
             with self.clients_lock:
-                rover_count = len(self.clients)
+                rover_count = len(self.clients_map)
             rtcm_kb = self.total_rtcm_bytes_read / 1024.0
 
             remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
@@ -403,9 +411,10 @@ class NTRIPBaseCaster:
                 {
                     "ip": meta["ip"],
                     "port": meta["port"],
-                    "duration_sec": int(time.time() - meta["connected_at"])
+                    "duration_sec": int(time.time() - meta["connected_at"]),
+                    "bytes_sent_kb": round(meta["bytes_sent"] / 1024.0, 1)
                 }
-                for meta in self.client_metadata.values()
+                for meta in self.clients_map.values()
             ]
 
         with self.logs_lock:
@@ -434,7 +443,7 @@ class NTRIPBaseCaster:
             "hdop": round(self.hdop, 2),
             "rtcm_ingested_kb": round(self.total_rtcm_bytes_read / 1024.0, 1),
             "rtcm_broadcasted_kb": round(self.total_bytes_sent / 1024.0, 1),
-            "active_rovers_count": len(self.clients),
+            "active_rovers_count": len(active_rovers),
             "active_rovers": active_rovers,
             "mountpoint": self.mountpoint,
             "ntrip_port": self.server_port,
@@ -443,52 +452,55 @@ class NTRIPBaseCaster:
         }
 
     def _web_server_loop(self) -> None:
-        """Hosts lightweight HTTP Web Dashboard on port 8080."""
+        """Hosts multi-threaded, instant-response HTTP Web Dashboard on port 8080."""
         caster_instance = self
 
         class DashboardHandler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
             def log_message(self, format, *args):
                 pass
 
             def do_GET(self):
-                if self.path == '/api/status':
+                if self.path.startswith('/api/status'):
+                    payload = json.dumps(caster_instance.get_status_json()).encode('utf-8')
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(payload)))
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                    self.send_header('Connection', 'close')
                     self.end_headers()
-                    self.wfile.write(json.dumps(caster_instance.get_status_json()).encode('utf-8'))
+                    self.wfile.write(payload)
                 else:
+                    payload = DASHBOARD_HTML.encode('utf-8')
                     self.send_response(200)
                     self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.send_header('Content-Length', str(len(payload)))
                     self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+                    self.send_header('Connection', 'close')
                     self.end_headers()
-                    self.wfile.write(DASHBOARD_HTML.encode('utf-8'))
+                    self.wfile.write(payload)
 
-        server = HTTPServer(('0.0.0.0', self.web_port), DashboardHandler)
+        server = ThreadingHTTPServer(('0.0.0.0', self.web_port), DashboardHandler)
+        server.daemon_threads = True
         try:
             server.serve_forever()
         except Exception:
             server.server_close()
 
 
-# HTML5 / CSS / Vanilla JS Web Dashboard
+# 100% Offline-Ready HTML5 / CSS / Vanilla JS Web Dashboard
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-  <meta http-equiv="Pragma" content="no-cache">
-  <meta http-equiv="Expires" content="0">
   <title>ConeRobot RTK Base Station Dashboard</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #0b0f19;
-      --card-bg: rgba(23, 32, 54, 0.7);
+      --card-bg: rgba(23, 32, 54, 0.75);
       --card-border: rgba(56, 189, 248, 0.15);
       --accent: #38bdf8;
       --accent-glow: rgba(56, 189, 248, 0.35);
@@ -498,7 +510,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --text: #f1f5f9;
       --text-muted: #94a3b8;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Outfit', sans-serif; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
     body { background: var(--bg); color: var(--text); min-height: 100vh; padding: 24px 16px; display: flex; flex-direction: column; align-items: center; }
     .container { width: 100%; max-width: 1000px; }
     
@@ -515,8 +527,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .card { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--card-border); border-radius: 16px; padding: 20px; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); }
     .card-title { font-size: 14px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
     
-    /* Metrics */
-    .metric-value { font-size: 32px; font-weight: 800; font-family: 'JetBrains Mono', monospace; color: #fff; }
+    .metric-value { font-size: 32px; font-weight: 800; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #fff; }
     .metric-unit { font-size: 16px; font-weight: 500; color: var(--text-muted); margin-left: 4px; }
     .progress-bar-bg { background: rgba(255, 255, 255, 0.08); height: 10px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; }
     .progress-bar-fill { background: linear-gradient(90deg, var(--warning), var(--accent)); height: 100%; width: 0%; transition: width 0.5s ease; }
@@ -525,19 +536,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .data-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 14px; }
     .data-row:last-child { border-bottom: none; }
     .data-label { color: var(--text-muted); }
-    .data-val { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
+    .data-val { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-weight: 600; }
     .data-val.countdown { color: #38bdf8; font-weight: 700; }
     
-    /* Terminal Console Box */
     .console-card { grid-column: 1 / -1; }
-    .terminal-box { background: #050811; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 14px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #38bdf8; height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+    .terminal-box { background: #050811; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; color: #38bdf8; height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
     .log-line { display: flex; gap: 10px; line-height: 1.4; word-break: break-all; }
     .log-time { color: var(--text-muted); opacity: 0.7; }
     .log-msg { color: #f1f5f9; }
     .log-msg.error { color: #f87171; }
     .log-msg.warn { color: #fbbf24; }
 
-    .code-box { background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #a5f3fc; overflow-x: auto; margin-top: 8px; }
+    .code-box { background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; color: #a5f3fc; overflow-x: auto; margin-top: 8px; }
     .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--accent); color: #000; padding: 8px 16px; border-radius: 8px; font-weight: 700; text-decoration: none; font-size: 13px; margin-top: 12px; transition: transform 0.2s, box-shadow 0.2s; border: none; cursor: pointer; }
     .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 16px var(--accent-glow); }
   </style>
@@ -559,7 +569,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </header>
 
     <div class="grid">
-      <!-- Survey-In Progress Card -->
       <div class="card">
         <div class="card-title">
           <span>🎯 Survey-In Calibration</span>
@@ -590,7 +599,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Satellite & Signal Quality -->
       <div class="card">
         <div class="card-title">🛰️ GNSS Satellite Lock</div>
         <div style="display: flex; gap: 24px; margin-bottom: 12px;">
@@ -619,7 +627,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
 
     <div class="grid">
-      <!-- Fixed Reference Coordinates -->
       <div class="card">
         <div class="card-title">📍 Base Station Coordinates</div>
         <div class="data-row">
@@ -637,7 +644,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <a id="mapsBtn" href="#" target="_blank" class="btn">🗺️ Open in Google Maps</a>
       </div>
 
-      <!-- Connected Rovers & NTRIP URL -->
       <div class="card">
         <div class="card-title">
           <span>📡 Connected Rovers</span>
@@ -656,7 +662,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Live Terminal Console Log Box -->
     <div class="grid">
       <div class="card console-card">
         <div class="card-title">
@@ -682,7 +687,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const res = await fetch('/api/status');
         const data = await res.json();
 
-        // Update Survey Progress
         const isComplete = data.survey_valid || data.survey_status === 'COMPLETED';
         const badge = document.getElementById('statusBadge');
         const statusText = document.getElementById('statusText');
@@ -734,7 +738,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 ntrip_port: ${data.ntrip_port}
 ntrip_mountpoint: "${data.mountpoint}"`;
 
-        // Render Live Logs
         if (data.logs && data.logs.length > 0) {
           term.innerHTML = data.logs.map(l => {
             const cls = l.level === 'ERROR' ? 'error' : (l.level === 'WARN' ? 'warn' : '');
