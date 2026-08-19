@@ -41,7 +41,7 @@ lc29h_gps_node:
     ntrip_enable: true
 
     # Option A: Local Base Station Pi (Default - Ultra-precise < 1 cm)
-    ntrip_caster: "192.168.0.100"      # Base Station Pi IP (or "gpsBaseStation.local")
+    ntrip_caster: "192.168.0.102"      # Base Station Pi IP (or "gpsBaseStation.local")
     ntrip_port: 2101                  # Base Station NTRIP port
     ntrip_mountpoint: "BASE"          # Base Station mountpoint
     ntrip_user: "conerobot"           # Local username
