@@ -12,18 +12,15 @@
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# Update local package lists and upgrade existing packages
-sudo -E apt update && sudo -E apt upgrade -y
+# Update local package lists
+sudo apt update
 
 # Install essential helper utilities for keys, certificates, and software management
 sudo apt install -y software-properties-common curl gnupg lsb-release ca-certificates
 
 # Enable universe repository
 sudo add-apt-repository universe -y
-
-# Run a full distribution upgrade to update system libraries
 sudo apt update
-sudo apt dist-upgrade -y
 
 
 # ==============================================================================
