@@ -25,9 +25,6 @@ sudo add-apt-repository universe -y
 sudo apt update
 sudo apt dist-upgrade -y
 
-# Reboot the system to apply core kernel updates
-sudo reboot
-
 
 # ==============================================================================
 # 2. ADD ROS 2 REPOSITORIES & GPG KEY
@@ -47,11 +44,33 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-a
 # Refresh package lists to index the newly added ROS 2 repository
 sudo apt update
 
-# Install ROS 2 Base, CLI tools, desktop messages, build tools, and Rosdep dependency manager
-sudo apt install -y ros-jazzy-ros-base ros-jazzy-ros2cli ros-jazzy-ros2launch ros-jazzy-sensor-msgs ros-jazzy-std-srvs ros-jazzy-geometry-msgs ros-jazzy-visualization-msgs ros-jazzy-tf2-ros ros-jazzy-ament-lint-auto ros-jazzy-ament-lint-common python3-colcon-common-extensions python3-rosdep
+# Install ROS 2 Base, CLI tools, desktop messages, build tools, Rosdep, Foxglove bridge, and Raspberry Pi 5 GPIO/I2C tools
+sudo apt install -y \
+    ros-jazzy-ros-base \
+    ros-jazzy-ros2cli \
+    ros-jazzy-ros2launch \
+    ros-jazzy-ros2topic \
+    ros-jazzy-ros2node \
+    ros-jazzy-sensor-msgs \
+    ros-jazzy-std-srvs \
+    ros-jazzy-geometry-msgs \
+    ros-jazzy-nav-msgs \
+    ros-jazzy-visualization-msgs \
+    ros-jazzy-tf2-ros \
+    ros-jazzy-tf2-geometry-msgs \
+    ros-jazzy-foxglove-bridge \
+    python3-colcon-common-extensions \
+    python3-rosdep \
+    python3-gpiozero \
+    python3-lgpio \
+    python3-smbus \
+    python3-pip \
+    i2c-tools
+
+# Install BNO08x IMU Python library
+pip3 install --break-system-packages adafruit-circuitpython-bno08x
 
 # Initialize and update rosdep database
-# Initialize rosdep database if not already initialized
 if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
     sudo rosdep init
 fi

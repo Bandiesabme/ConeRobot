@@ -18,21 +18,15 @@ sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
-### Step B: Install ROS 2 Jazzy, GPIO, I2C & Sensor Libraries
+### Step B: Run Automated System & Driver Setup Scripts
 
 ```bash
 cd ~/github/ConeRobot  # or your workspace directory
+
+# 1. Install ROS 2 Jazzy, GPIO, I2C, Foxglove & Sensor Dependencies
 bash documentation/scripts/ros2setup.sh
 
-# Install Raspberry Pi 5 GPIO, I2C & ROS 2 CLI tools
-sudo apt update
-sudo apt install -y python3-gpiozero python3-lgpio python3-smbus i2c-tools python3-pip ros-jazzy-ros2cli-common-extensions ros-jazzy-ros2topic ros-jazzy-ros2node ros-jazzy-tf2-ros ros-jazzy-tf2-geometry-msgs ros-jazzy-rf2o-laser-odometry
-
-
-# Install Adafruit BNO08x IMU library
-pip3 install --break-system-packages adafruit-circuitpython-bno08x
-
-# Install YDLIDAR C++ SDK & ROS 2 driver
+# 2. Build and Install YDLIDAR SDK, YDLIDAR ROS 2 Driver & RF2O Laser Odometry Driver
 bash documentation/scripts/install_ydlidar.sh
 ```
 

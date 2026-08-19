@@ -128,18 +128,30 @@ def launch_setup(context, *args, **kwargs):
                 )
             )
         except PackageNotFoundError:
-            pass
+            print("\n" + "=" * 75)
+            print("  ⚠️  WARNING: 'rf2o_laser_odometry' is NOT installed!")
+            print("  Topic /odom will NOT publish until it is installed.")
+            print("  To install: sudo apt install ros-jazzy-rf2o-laser-odometry")
+            print("  Or from source: git clone https://github.com/MAPIRlab/rf2o_laser_odometry.git src/rf2o_laser_odometry")
+            print("=" * 75 + "\n")
 
     # 6. Foxglove WebSocket Bridge Node (port 8765)
     if launch_foxglove_val:
-        nodes_to_launch.append(
-            Node(
-                package='foxglove_bridge',
-                executable='foxglove_bridge',
-                name='foxglove_bridge',
-                output='screen'
+        try:
+            get_package_share_directory('foxglove_bridge')
+            nodes_to_launch.append(
+                Node(
+                    package='foxglove_bridge',
+                    executable='foxglove_bridge',
+                    name='foxglove_bridge',
+                    output='screen'
+                )
             )
-        )
+        except PackageNotFoundError:
+            print("\n" + "=" * 75)
+            print("  ⚠️  WARNING: 'foxglove_bridge' is NOT installed!")
+            print("  To install: sudo apt install ros-jazzy-foxglove-bridge")
+            print("=" * 75 + "\n")
 
     return nodes_to_launch
 

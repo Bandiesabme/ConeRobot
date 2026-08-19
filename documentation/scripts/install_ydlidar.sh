@@ -37,7 +37,7 @@ mkdir -p "$SDK_DIR/build"
     sudo make install
 )
 
-echo "=== 3. Setting up YDLIDAR ROS 2 Driver in Workspace ==="
+echo "=== 3. Setting up Drivers in Workspace ==="
 DRIVER_DEST="$WORKSPACE_ROOT/src/ydlidar_ros2_driver"
 OLD_MISPLACED_DEST="$HOME/src/ydlidar_ros2_driver"
 
@@ -51,6 +51,15 @@ elif [ ! -d "$DRIVER_DEST" ]; then
     git clone https://github.com/YDLIDAR/ydlidar_ros2_driver.git "$DRIVER_DEST"
 else
     echo "ydlidar_ros2_driver repository already exists at $DRIVER_DEST."
+fi
+
+# Setup RF2O Laser Odometry Driver
+RF2O_DEST="$WORKSPACE_ROOT/src/rf2o_laser_odometry"
+if [ ! -d "$RF2O_DEST" ]; then
+    echo "Cloning rf2o_laser_odometry into $RF2O_DEST..."
+    git clone https://github.com/MAPIRlab/rf2o_laser_odometry.git "$RF2O_DEST"
+else
+    echo "rf2o_laser_odometry repository already exists at $RF2O_DEST."
 fi
 
 echo "=== Patching ydlidar_ros2_driver_node.cpp for ROS 2 Jazzy compatibility ==="
