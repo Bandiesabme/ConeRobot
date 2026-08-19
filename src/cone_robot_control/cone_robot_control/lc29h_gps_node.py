@@ -167,15 +167,13 @@ class LC29HGPSNode(Node):
                     line_bytes, _, remaining = raw_buffer.partition(b'\n')
                     raw_buffer = remaining
                     line = line_bytes.decode('ascii', errors='ignore').strip()
-                    if '$GNGGA' in line or '$GPGGA' in line or '$GGA' in line:
-                        dollar_idx = line.find('$')
-                        self._parse_gga(line[dollar_idx:])
-                    elif '$GNRMC' in line or '$GPRMC' in line or '$RMC' in line:
-                        dollar_idx = line.find('$')
-                        self._parse_rmc(line[dollar_idx:])
-                    elif 'GSV' in line:
-                        dollar_idx = line.find('$')
-                        self._parse_gsv(line[dollar_idx:])
+                    if '$' in line:
+                        clean_sentence = line[line.find('$'):]
+                        header = clean_sentence.split(',')[0]
+                        if header.endswith('GGA'):
+                            self._parse_gga(clean_sentence)
+                        elif header.endswith('RMC'):
+                            self._parse_rmc(clean_sentence)
 
             except Exception as e:
                 self.get_logger().debug(f"Serial read error: {e}")
