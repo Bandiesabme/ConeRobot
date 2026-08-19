@@ -46,7 +46,7 @@ lc29h_gps_node:
     ntrip_mountpoint: "BASE"          # Base Station mountpoint
     ntrip_user: "conerobot"           # Local username
     ntrip_password: "none"            # Local password
-    ntrip_send_gga: true              # Send position feedback to base
+    ntrip_send_gga: false             # Set false for local single-base caster (no VRS needed)
 
     # Option B: Public RTK2Go Caster (Pforzheim Station)
     # ntrip_caster: "rtk2go.com"
