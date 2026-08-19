@@ -37,9 +37,15 @@ from typing import Optional, Tuple
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, Vector3
-from nav_msgs.msg import Odometry
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from std_msgs.msg import Float32, String
+
+try:
+    from nav_msgs.msg import Odometry
+    NAV_MSGS_AVAILABLE = True
+except ImportError:
+    NAV_MSGS_AVAILABLE = False
+    Odometry = None
 
 
 def normalize_angle_deg(deg: float) -> float:
@@ -129,7 +135,10 @@ class StepMotionController(Node):
 
         self.cmd_step_sub = self.create_subscription(Vector3, '/cmd_step', self._cmd_step_callback, 10)
         self.heading_sub = self.create_subscription(Float32, '/imu/heading', self._heading_callback, 10)
-        self.odom_sub = self.create_subscription(Odometry, '/odom', self._odom_callback, 10)
+        if NAV_MSGS_AVAILABLE:
+            self.odom_sub = self.create_subscription(Odometry, '/odom', self._odom_callback, 10)
+        else:
+            self.odom_sub = None
         self.fix_sub = self.create_subscription(NavSatFix, '/fix', self._fix_callback, 10)
 
         # --- Internal State ---

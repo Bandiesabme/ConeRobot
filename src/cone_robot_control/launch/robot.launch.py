@@ -1,5 +1,5 @@
 import os
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.conditions import IfCondition
@@ -107,24 +107,28 @@ def launch_setup(context, *args, **kwargs):
                     PythonLaunchDescriptionSource(ydlidar_launch_file)
                 )
             )
-        # 2D Laser Odometry Node (converts /scan -> /odom)
-        nodes_to_launch.append(
-            Node(
-                package='rf2o_laser_odometry',
-                executable='rf2o_laser_odometry_node',
-                name='rf2o_laser_odometry',
-                output='screen',
-                parameters=[{
-                    'laser_scan_topic': '/scan',
-                    'odom_topic': '/odom',
-                    'publish_tf': False,
-                    'base_frame_id': 'base_link',
-                    'odom_frame_id': 'odom',
-                    'laser_frame_id': 'laser_frame',
-                    'freq': 10.0
-                }]
+        # 2D Laser Odometry Node (converts /scan -> /odom) if rf2o_laser_odometry is installed
+        try:
+            get_package_share_directory('rf2o_laser_odometry')
+            nodes_to_launch.append(
+                Node(
+                    package='rf2o_laser_odometry',
+                    executable='rf2o_laser_odometry_node',
+                    name='rf2o_laser_odometry',
+                    output='screen',
+                    parameters=[{
+                        'laser_scan_topic': '/scan',
+                        'odom_topic': '/odom',
+                        'publish_tf': False,
+                        'base_frame_id': 'base_link',
+                        'odom_frame_id': 'odom',
+                        'laser_frame_id': 'laser_frame',
+                        'freq': 10.0
+                    }]
+                )
             )
-        )
+        except PackageNotFoundError:
+            pass
 
     # 6. Foxglove WebSocket Bridge Node (port 8765)
     if launch_foxglove_val:
