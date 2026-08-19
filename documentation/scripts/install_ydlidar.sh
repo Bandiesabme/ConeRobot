@@ -15,7 +15,7 @@ echo "=== Workspace Root detected: $WORKSPACE_ROOT ==="
 
 echo "=== 1. Installing Prerequisites ==="
 sudo apt update
-sudo apt install -y cmake build-essential git python3-colcon-common-extensions ros-jazzy-tf2-ros libboost-all-dev
+sudo apt install -y cmake build-essential git python3-colcon-common-extensions ros-jazzy-tf2-ros libboost-dev
 
 echo "=== 2. Building and Installing YDLidar-SDK C++ Library ==="
 SDK_DIR="$HOME/YDLidar-SDK"
@@ -76,16 +76,15 @@ elif [ -f "$SCRIPT_DIR/init_ydlidar_udev.sh" ]; then
     bash "$SCRIPT_DIR/init_ydlidar_udev.sh"
 fi
 
+echo "=== 5. Building Workspace ==="
+cd "$WORKSPACE_ROOT"
+colcon build --symlink-install
+
 echo ""
 echo "=============================================================================="
-echo "YDLIDAR T-mini Plus Setup Completed Successfully!"
+echo "✅ Setup and Build Completed Successfully!"
 echo "=============================================================================="
-echo "Next steps:"
-echo "1. Unplug and re-plug your YDLIDAR USB cable."
-echo "2. Build your workspace:"
-echo "   cd $WORKSPACE_ROOT"
-echo "   colcon build --symlink-install"
+echo "You can now run:"
 echo "   source install/setup.bash"
-echo "3. Launch your robot with LiDAR:"
-echo "   ros2 launch cone_robot_control robot.launch.py launch_lidar:=true"
+echo "   ros2 launch cone_robot_control robot.launch.py"
 echo "=============================================================================="
