@@ -137,35 +137,45 @@ class LC29HGPSNode(Node):
             self.serial_conn = serial.Serial(
                 port=self.serial_port_name,
                 baudrate=self.baud_rate,
-                timeout=1.0
+                timeout=0.1
             )
+            self.serial_conn.reset_input_buffer()
+            self.serial_conn.reset_output_buffer()
             self.get_logger().info(f"Successfully opened serial port: {self.serial_port_name}")
         except Exception as e:
             self.get_logger().error(f"Failed to open serial port {self.serial_port_name}: {e}")
             self.get_logger().error("Ensure user is in dialout group and port permissions are set.")
 
     def _serial_read_loop(self) -> None:
-        """Continuously reads NMEA sentences from the serial port."""
+        """Continuously reads NMEA sentences from the serial port using fast chunk buffering."""
+        raw_buffer = bytearray()
         while rclpy.ok() and self.is_running:
             if not self.serial_conn or not self.serial_conn.is_open:
                 time.sleep(1.0)
                 continue
 
             try:
-                line_bytes = self.serial_conn.readline()
-                if not line_bytes:
+                chunk = self.serial_conn.read(1024)
+                if not chunk:
                     continue
 
-                line = line_bytes.decode('ascii', errors='ignore').strip()
-                if '$GNGGA' in line or '$GPGGA' in line or '$GGA' in line:
-                    dollar_idx = line.find('$')
-                    self._parse_gga(line[dollar_idx:])
-                elif '$GNRMC' in line or '$GPRMC' in line or '$RMC' in line:
-                    dollar_idx = line.find('$')
-                    self._parse_rmc(line[dollar_idx:])
-                elif 'GSV' in line:
-                    dollar_idx = line.find('$')
-                    self._parse_gsv(line[dollar_idx:])
+                raw_buffer.extend(chunk)
+                if len(raw_buffer) > 8192:
+                    raw_buffer = raw_buffer[-4096:]
+
+                while b'\n' in raw_buffer:
+                    line_bytes, _, remaining = raw_buffer.partition(b'\n')
+                    raw_buffer = remaining
+                    line = line_bytes.decode('ascii', errors='ignore').strip()
+                    if '$GNGGA' in line or '$GPGGA' in line or '$GGA' in line:
+                        dollar_idx = line.find('$')
+                        self._parse_gga(line[dollar_idx:])
+                    elif '$GNRMC' in line or '$GPRMC' in line or '$RMC' in line:
+                        dollar_idx = line.find('$')
+                        self._parse_rmc(line[dollar_idx:])
+                    elif 'GSV' in line:
+                        dollar_idx = line.find('$')
+                        self._parse_gsv(line[dollar_idx:])
 
             except Exception as e:
                 self.get_logger().debug(f"Serial read error: {e}")
@@ -195,12 +205,27 @@ class LC29HGPSNode(Node):
         self.latest_gga_raw = line
 
         try:
-            raw_lat, lat_dir = parts[2], parts[3]
-            raw_lon, lon_dir = parts[4], parts[5]
+            raw_lat = parts[2]
+            lat_dir = parts[3]
+            raw_lon = parts[4]
+            lon_dir = parts[5]
             fix_qual_str = parts[6] if len(parts) > 6 else "0"
             num_sats_str = parts[7] if len(parts) > 7 else "0"
             hdop_str = parts[8] if len(parts) > 8 else "99.99"
             alt_str = parts[9] if len(parts) > 9 else "0.0"
+
+            if num_sats_str.isdigit() and int(num_sats_str) > 0:
+                self.current_num_sats = int(num_sats_str)
+            if fix_qual_str.isdigit():
+                self.current_fix_quality = int(fix_qual_str)
+            try:
+                self.current_hdop = float(hdop_str)
+            except ValueError:
+                self.current_hdop = 99.99
+            try:
+                self.current_alt = float(alt_str)
+            except ValueError:
+                self.current_alt = 0.0
 
             lat = self._parse_nmea_coordinate(raw_lat, lat_dir, is_lon=False)
             lon = self._parse_nmea_coordinate(raw_lon, lon_dir, is_lon=True)
@@ -208,19 +233,7 @@ class LC29HGPSNode(Node):
             if lat is not None and lon is not None:
                 self.current_lat = lat
                 self.current_lon = lon
-                self.current_fix_quality = int(fix_qual_str) if fix_qual_str.isdigit() else 0
-                if num_sats_str.isdigit() and int(num_sats_str) > 0:
-                    self.current_num_sats = int(num_sats_str)
-                try:
-                    self.current_hdop = float(hdop_str)
-                except ValueError:
-                    self.current_hdop = 99.99
-                try:
-                    self.current_alt = float(alt_str)
-                except ValueError:
-                    self.current_alt = 0.0
                 self.last_fix_time = time.time()
-
                 self._publish_navsat_fix()
 
         except Exception as e:
