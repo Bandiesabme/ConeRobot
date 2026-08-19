@@ -1,6 +1,6 @@
 # ==============================================================================
 # YDLIDAR T-MINI PLUS CONFIGURATION PARAMETERS
-# Hardware Spec: 230400 bps Baud Rate, 0.05m - 12m Range, 6Hz - 12Hz Frequency
+# Hardware Spec: 230400 bps Baud Rate, 0.05m - 12m Range, 6Hz Default Frequency
 # ==============================================================================
 
 ydlidar_ros2_driver_node:
@@ -9,23 +9,17 @@ ydlidar_ros2_driver_node:
     baudrate: 230400             # YDLIDAR T-mini Plus standard baud rate
     frame_id: "laser_frame"      # TF Frame ID for point cloud data
     ignore_array: ""
-    lidar_type: 1                # 1 = TYPE_TRIANGLE / Tmini protocol
-    device_type: 0               # 0 = TYPE_SERIAL
-    sample_rate: 4               # 4 kHz sampling rate for T-mini Plus
-    abnormal_check_count: 4
-    fixed_resolution: true
+    invalid_range_is_inf: false
     resolution_fixed: true
     auto_reconnect: true
-    reversion: false
-    inverted: false
+    reversion: true
+    inverted: true
     isSingleChannel: false
-    intensity: false
-    intensity_bit: 0
+    intensity: true              # T-mini Plus supports 8-bit intensity readings
+    intensity_bit: 8             # Intensity bit count (8-bit for T-mini Plus)
     support_motor_dtr: false
     angle_min: -180.0            # Minimum scanning angle (degrees)
     angle_max: 180.0             # Maximum scanning angle (degrees)
     range_min: 0.05              # Minimum ranging distance (meters)
     range_max: 12.0              # Maximum ranging distance (meters)
-    frequency: 8.0               # Default scan frequency (Hz)
-    invalid_range_is_inf: false
-
+    frequency: 6.0               # Default scan frequency (Hz)
