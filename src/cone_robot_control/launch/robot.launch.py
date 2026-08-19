@@ -123,7 +123,8 @@ def launch_setup(context, *args, **kwargs):
                         'base_frame_id': 'base_link',
                         'odom_frame_id': 'odom',
                         'laser_frame_id': 'laser_frame',
-                        'freq': 10.0
+                        'freq': 10.0,
+                        'init_pose_from_topic': ''  # CRITICAL: empty = don't wait for /base_pose_ground_truth (Gazebo-only topic)
                     }]
                 )
             )
