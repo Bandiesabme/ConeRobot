@@ -62,12 +62,10 @@ else
     echo "rf2o_laser_odometry repository already exists at $RF2O_DEST."
 fi
 
-# Patch rf2o CMakeLists.txt with fast low-memory compilation flags for Raspberry Pi
-if [ -f "$RF2O_DEST/CMakeLists.txt" ]; then
-    if ! grep -q "fno-var-tracking" "$RF2O_DEST/CMakeLists.txt"; then
-        sed -i 's/-O3//g' "$RF2O_DEST/CMakeLists.txt"
-        sed -i '1s/^/add_compile_options(-O1 -fno-var-tracking -fno-var-tracking-assignments)\n/' "$RF2O_DEST/CMakeLists.txt"
-    fi
+echo "=== Patching rf2o_laser_odometry for ROS 2 Jazzy & SensorDataQoS ==="
+PATCH_RF2O_SCRIPT="$SCRIPT_DIR/patch_rf2o_jazzy.py"
+if [ -f "$PATCH_RF2O_SCRIPT" ]; then
+    python3 "$PATCH_RF2O_SCRIPT" "$RF2O_DEST"
 fi
 
 echo "=== Patching ydlidar_ros2_driver_node.cpp for ROS 2 Jazzy compatibility ==="
