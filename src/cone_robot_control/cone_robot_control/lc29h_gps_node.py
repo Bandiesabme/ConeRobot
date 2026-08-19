@@ -157,10 +157,15 @@ class LC29HGPSNode(Node):
                     continue
 
                 line = line_bytes.decode('ascii', errors='ignore').strip()
-                if line.startswith('$GNGGA') or line.startswith('$GPGGA'):
-                    self._parse_gga(line)
-                elif line.startswith('$GNRMC') or line.startswith('$GPRMC'):
-                    self._parse_rmc(line)
+                if '$GNGGA' in line or '$GPGGA' in line or '$GGA' in line:
+                    dollar_idx = line.find('$')
+                    self._parse_gga(line[dollar_idx:])
+                elif '$GNRMC' in line or '$GPRMC' in line or '$RMC' in line:
+                    dollar_idx = line.find('$')
+                    self._parse_rmc(line[dollar_idx:])
+                elif 'GSV' in line:
+                    dollar_idx = line.find('$')
+                    self._parse_gsv(line[dollar_idx:])
 
             except Exception as e:
                 self.get_logger().debug(f"Serial read error: {e}")
@@ -184,7 +189,7 @@ class LC29HGPSNode(Node):
     def _parse_gga(self, line: str) -> None:
         """Parse NMEA $GNGGA sentence for position, altitude, and RTK fix status."""
         parts = line.split(',')
-        if len(parts) < 15:
+        if len(parts) < 10:
             return
 
         self.latest_gga_raw = line
@@ -192,10 +197,10 @@ class LC29HGPSNode(Node):
         try:
             raw_lat, lat_dir = parts[2], parts[3]
             raw_lon, lon_dir = parts[4], parts[5]
-            fix_qual_str = parts[6]
-            num_sats_str = parts[7]
-            hdop_str = parts[8]
-            alt_str = parts[9]
+            fix_qual_str = parts[6] if len(parts) > 6 else "0"
+            num_sats_str = parts[7] if len(parts) > 7 else "0"
+            hdop_str = parts[8] if len(parts) > 8 else "99.99"
+            alt_str = parts[9] if len(parts) > 9 else "0.0"
 
             lat = self._parse_nmea_coordinate(raw_lat, lat_dir, is_lon=False)
             lon = self._parse_nmea_coordinate(raw_lon, lon_dir, is_lon=True)
@@ -204,15 +209,33 @@ class LC29HGPSNode(Node):
                 self.current_lat = lat
                 self.current_lon = lon
                 self.current_fix_quality = int(fix_qual_str) if fix_qual_str.isdigit() else 0
-                self.current_num_sats = int(num_sats_str) if num_sats_str.isdigit() else 0
-                self.current_hdop = float(hdop_str) if hdop_str else 99.99
-                self.current_alt = float(alt_str) if alt_str else 0.0
+                if num_sats_str.isdigit() and int(num_sats_str) > 0:
+                    self.current_num_sats = int(num_sats_str)
+                try:
+                    self.current_hdop = float(hdop_str)
+                except ValueError:
+                    self.current_hdop = 99.99
+                try:
+                    self.current_alt = float(alt_str)
+                except ValueError:
+                    self.current_alt = 0.0
                 self.last_fix_time = time.time()
 
                 self._publish_navsat_fix()
 
         except Exception as e:
             self.get_logger().debug(f"Error parsing GGA: {e}")
+
+    def _parse_gsv(self, line: str) -> None:
+        """Parse NMEA GSV sentences to track satellites in view."""
+        try:
+            parts = line.split(',')
+            if len(parts) >= 4 and parts[3].isdigit():
+                sats_in_view = int(parts[3])
+                if sats_in_view > self.current_num_sats and self.current_fix_quality == 0:
+                    self.current_num_sats = sats_in_view
+        except Exception:
+            pass
 
     def _parse_rmc(self, line: str) -> None:
         """Parse NMEA $GNRMC sentence for speed/heading fallback."""
