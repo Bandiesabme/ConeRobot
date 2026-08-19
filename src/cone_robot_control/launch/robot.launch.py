@@ -115,7 +115,7 @@ def launch_setup(context, *args, **kwargs):
                     package='rf2o_laser_odometry',
                     executable='rf2o_laser_odometry_node',
                     name='rf2o_laser_odometry',
-                    output='screen',
+                    output='log',  # Redirect verbose odom INFO spam to log file, not terminal
                     parameters=[{
                         'laser_scan_topic': '/scan',
                         'odom_topic': '/odom',
@@ -125,8 +125,7 @@ def launch_setup(context, *args, **kwargs):
                         'laser_frame_id': 'laser_frame',
                         'freq': 6.0,  # Match YDLidar T-mini Plus scan rate (6Hz)
                         'init_pose_from_topic': ''  # CRITICAL: empty = don't wait for /base_pose_ground_truth (Gazebo-only topic)
-                    }],
-                    ros_arguments=['--log-level', 'rf2o_laser_odometry:=WARN']
+                    }]
                 )
             )
         except PackageNotFoundError:
