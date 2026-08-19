@@ -36,6 +36,7 @@ class GPSDriftBenchmark(Node):
         # Each entry: (lat, lon, alt, fix_type_str)
         self.samples: List[Tuple[float, float, float, str]] = []
         self.start_time = time.time()
+        self.is_completed = False
 
         self.sub = self.create_subscription(NavSatFix, '/fix', self.fix_callback, 10)
         print("\n" + "=" * 70)
@@ -87,6 +88,7 @@ class GPSDriftBenchmark(Node):
         sys.stdout.flush()
 
         if count >= self.target_samples:
+            self.is_completed = True
             print("\n")
             self.compute_and_display_results()
             rclpy.shutdown()
@@ -190,7 +192,7 @@ class GPSDriftBenchmark(Node):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="GPS & RTK Precision Drift Measurement")
-    parser.add_argument('--samples', type=int, default=300, help="Number of samples to collect (default: 300)")
+    parser.add_argument('--samples', type=int, default=3000, help="Target samples to collect (default: 3000, press Ctrl+C anytime to stop early)")
     args, _ = parser.parse_known_args()
 
     rclpy.init()
@@ -198,7 +200,9 @@ def main() -> None:
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        print("\nBenchmark interrupted by user.")
+        if not node.is_completed:
+            print("\n\n⏹️ Benchmark stopped by user (Ctrl+C). Computing statistics for collected samples...")
+            node.compute_and_display_results()
     finally:
         node.destroy_node()
 
