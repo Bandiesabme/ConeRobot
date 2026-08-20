@@ -168,6 +168,7 @@ class StepMotionController(Node):
         self.target_drive_cm: float = 0.0       # Relative distance (+ forward, - reverse)
         self.target_absolute_heading: float = 0.0
         self.heading_integral: float = 0.0      # PI controller error accumulator for motor trimming
+        self.turn_start_time: Optional[float] = None
         self.turn_settle_start: Optional[float] = None
         self.drive_start_time: Optional[float] = None
         self.active_distance_method: str = "none"
@@ -213,6 +214,7 @@ class StepMotionController(Node):
 
         # Determine Initial Phase
         if abs(turn_deg) >= self.turn_tolerance_deg:
+            self.turn_start_time = time.time()
             self._set_state(MotionState.TURNING)
             self.get_logger().info(
                 f"[PHASE 1: TURN] Rotating from {start_heading:.1f}° to {self.target_absolute_heading:.1f}° "
@@ -254,8 +256,10 @@ class StepMotionController(Node):
         if self.state == MotionState.TURNING:
             curr_h = self.current_heading if self.current_heading is not None else 0.0
             error_deg = shortest_angular_diff_deg(self.target_absolute_heading, curr_h)
+            turn_duration = (now - self.turn_start_time) if self.turn_start_time else 0.0
 
-            if abs(error_deg) <= self.turn_tolerance_deg:
+            # Complete if within tolerance OR if close (<= 2.5 deg) and turning has stabilized for > 1.5s
+            if abs(error_deg) <= self.turn_tolerance_deg or (turn_duration > 1.5 and abs(error_deg) <= 3.0):
                 # Settle timer to ensure robot comes to a steady standstill
                 if self.turn_settle_start is None:
                     self.turn_settle_start = now
@@ -264,7 +268,7 @@ class StepMotionController(Node):
 
                 if (now - self.turn_settle_start) >= self.turn_settle_time_s:
                     self.get_logger().info(
-                        f"[TURN COMPLETED] Target: {self.target_absolute_heading:.1f}°, Final: {curr_h:.1f}°"
+                        f"[TURN COMPLETED] Target: {self.target_absolute_heading:.1f}°, Final: {curr_h:.1f}° (Error: {error_deg:+.1f}°)"
                     )
                     # Proceed to Driving Phase or Complete
                     if abs(self.target_drive_cm) > 0.5:

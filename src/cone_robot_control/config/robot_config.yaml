@@ -12,7 +12,7 @@ mdd10_motor_controller:
     dir2_pin: 25   # Right Motor Direction (GPIO 25)
 
     # --- Physical Dimensions & Hardware Limits ---
-    wheel_track: 0.20          # Distance between left & right wheels (meters)
+    wheel_track: 0.290         # Distance between left & right wheels (meters)
     max_linear_speed: 1.0      # Maximum forward/reverse speed (m/s)
     max_angular_speed: 3.0     # Maximum turning speed (rad/s)
     cmd_timeout: 0.5           # Safety timeout (seconds)
@@ -62,10 +62,10 @@ step_motion_controller:
     control_rate_hz: 20.0             # Control loop execution frequency
     
     # --- Turning Parameters (IMU Closed Loop) ---
-    turn_kp: 0.04                     # Proportional gain for turning
-    turn_tolerance_deg: 1.5           # Heading error threshold in degrees
-    min_turn_speed: 0.25              # Minimum turning speed (rad/s) to overcome motor deadband
-    max_turn_speed: 1.8               # Maximum angular speed (rad/s)
+    turn_kp: 0.05                     # Proportional gain for turning
+    turn_tolerance_deg: 2.0           # Heading error threshold in degrees
+    min_turn_speed: 0.45              # Minimum turning speed (rad/s) to overcome floor tire scrub
+    max_turn_speed: 1.5               # Maximum angular speed (rad/s)
     turn_settle_time_s: 0.25          # Required stable duration before proceeding to drive
 
     # --- Linear Driving Parameters ---
