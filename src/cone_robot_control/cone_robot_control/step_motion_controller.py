@@ -386,6 +386,8 @@ class StepMotionController(Node):
         twist = Twist()
         twist.linear.x = float(vx)
         twist.angular.z = float(wz)
+        self.cmd_vel_pub.publish(twist)
+
     def _publish_diagnostics(self) -> None:
         """Reads Raspberry Pi 5 SoC temperature directly from Linux sysfs with 0 overhead."""
         try:
