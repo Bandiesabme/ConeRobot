@@ -304,10 +304,14 @@ class StepMotionController(Node):
             direction_sign = 1.0 if self.target_drive_cm >= 0 else -1.0
             vx = direction_sign * self.default_linear_speed
 
-            # Active IMU Straight-Line Yaw Lock
-            curr_h = self.current_heading if self.current_heading is not None else 0.0
-            heading_drift = shortest_angular_diff_deg(self.target_absolute_heading, curr_h)
-            yaw_correction = - (self.yaw_lock_kp * heading_drift) if direction_sign > 0 else (self.yaw_lock_kp * heading_drift)
+            # Active IMU Straight-Line Yaw Lock with safety clamp
+            if self.current_heading is not None and abs(self.target_turn_deg) < self.turn_tolerance_deg:
+                heading_drift = shortest_angular_diff_deg(self.target_absolute_heading, self.current_heading)
+                raw_yaw = - (self.yaw_lock_kp * heading_drift) if direction_sign > 0 else (self.yaw_lock_kp * heading_drift)
+                # Clamp yaw correction to gentle +/- 0.15 rad/s so robot drives straight without sharp turns
+                yaw_correction = max(-0.15, min(0.15, raw_yaw))
+            else:
+                yaw_correction = 0.0
 
             self._publish_cmd_vel(vx, yaw_correction)
 
@@ -318,6 +322,10 @@ class StepMotionController(Node):
         """Initializes sensor baselines for the straight-line drive phase."""
         self._set_state(MotionState.DRIVING)
         self.drive_start_time = time.time()
+
+        # Lock straight-line heading to current IMU heading at exact moment driving starts
+        if abs(self.target_turn_deg) < self.turn_tolerance_deg and self.current_heading is not None:
+            self.target_absolute_heading = self.current_heading
 
         # Capture Odometry baseline if recent (< 0.5s)
         if self.current_odom_pos and (time.time() - self.last_odom_time < 0.5):

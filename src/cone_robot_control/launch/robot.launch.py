@@ -119,7 +119,7 @@ def launch_setup(context, *args, **kwargs):
                     parameters=[{
                         'laser_scan_topic': '/scan',
                         'odom_topic': '/odom',
-                        'publish_tf': True,
+                        'publish_tf': False,
                         'base_frame_id': 'base_link',
                         'odom_frame_id': 'odom',
                         'laser_frame_id': 'laser_frame',
