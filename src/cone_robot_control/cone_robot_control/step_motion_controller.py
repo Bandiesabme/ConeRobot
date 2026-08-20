@@ -274,10 +274,8 @@ class StepMotionController(Node):
                         self._set_state(MotionState.IDLE)
             else:
                 self.turn_settle_start = None
-                # Proportional turn velocity
-                # In ROS 2, positive angular.z is Counter-Clockwise (left), negative is Clockwise (right).
-                # shortest_angular_diff_deg returns positive for clockwise, so we negate for ROS convention.
-                raw_wz = - (self.turn_kp * error_deg)
+                # Proportional turn velocity: positive error (CCW/Left) -> positive wz (Left)
+                raw_wz = self.turn_kp * error_deg
 
                 # Clamp with minimum stall-prevention velocity
                 sign = 1.0 if raw_wz >= 0 else -1.0
@@ -307,9 +305,10 @@ class StepMotionController(Node):
             # Active IMU Straight-Line Yaw Lock with safety clamp
             if self.current_heading is not None and abs(self.target_turn_deg) < self.turn_tolerance_deg:
                 heading_drift = shortest_angular_diff_deg(self.target_absolute_heading, self.current_heading)
-                raw_yaw = - (self.yaw_lock_kp * heading_drift) if direction_sign > 0 else (self.yaw_lock_kp * heading_drift)
-                # Clamp yaw correction to gentle +/- 0.15 rad/s so robot drives straight without sharp turns
-                yaw_correction = max(-0.15, min(0.15, raw_yaw))
+                # Corrective yaw steering: positive drift (target is left) -> steer left (+wz)
+                raw_yaw = (self.yaw_lock_kp * heading_drift) if direction_sign > 0 else (-self.yaw_lock_kp * heading_drift)
+                # Clamp yaw correction to gentle +/- 0.25 rad/s so robot tracks a perfect laser-straight line
+                yaw_correction = max(-0.25, min(0.25, raw_yaw))
             else:
                 yaw_correction = 0.0
 
