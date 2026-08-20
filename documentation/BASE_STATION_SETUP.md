@@ -50,7 +50,7 @@ cd ~
 git clone https://github.com/Bandiesabme/ConeRobot.git ~/github/ConeRobot
 
 # 5. Apply Wi-Fi auto-connect to router
-sudo bash ~/github/ConeRobot/documentation/scripts/setup_wifi.sh
+sudo bash ~/github/ConeRobot/scripts/setup_wifi.sh
 
 # Reboot to apply all firmware & permission changes
 sudo reboot
@@ -64,7 +64,7 @@ sudo reboot
 
 In your Base Pi terminal:
 ```bash
-python3 ~/github/ConeRobot/documentation/scripts/base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE
+python3 ~/github/ConeRobot/scripts/base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE
 ```
 
 *Expected output:*
@@ -117,7 +117,7 @@ Wants=network-online.target
 Type=simple
 User=conerobot
 WorkingDirectory=/home/conerobot/github/ConeRobot
-ExecStart=/usr/bin/python3 /home/conerobot/github/ConeRobot/documentation/scripts/base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE
+ExecStart=/usr/bin/python3 /home/conerobot/github/ConeRobot/scripts/base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE
 Restart=always
 RestartSec=3
 

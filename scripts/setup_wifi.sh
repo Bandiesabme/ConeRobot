@@ -11,14 +11,14 @@
 #       * When USB Wi-Fi (wlan1) is unplugged -> automatically re-enables wlan0.
 #
 # Usage:
-#   sudo bash documentation/scripts/setup_wifi.sh [SSID] [PASSWORD]
-#   sudo bash documentation/scripts/setup_wifi.sh Bandi 1234445678
+#   sudo bash scripts/setup_wifi.sh [SSID] [PASSWORD]
+#   sudo bash scripts/setup_wifi.sh Bandi 1234445678
 # ==============================================================================
 
 set -e
 
 if [ "$EUID" -ne 0 ]; then
-    echo "❌ Please run as root: sudo bash documentation/scripts/setup_wifi.sh"
+    echo "❌ Please run as root: sudo bash scripts/setup_wifi.sh"
     exit 1
 fi
 

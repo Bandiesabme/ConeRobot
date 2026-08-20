@@ -9,7 +9,7 @@ set -e
 
 # Capture script directory and workspace root at the absolute beginning
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "=== Workspace Root detected: $WORKSPACE_ROOT ==="
 
@@ -71,11 +71,9 @@ if [ -f "$PATCH_SCRIPT" ]; then
 fi
 
 echo "=== 4. Setting up USB udev Rules ==="
-UDEV_SCRIPT="$WORKSPACE_ROOT/documentation/scripts/init_ydlidar_udev.sh"
+UDEV_SCRIPT="$SCRIPT_DIR/init_ydlidar_udev.sh"
 if [ -f "$UDEV_SCRIPT" ]; then
     bash "$UDEV_SCRIPT"
-elif [ -f "$SCRIPT_DIR/init_ydlidar_udev.sh" ]; then
-    bash "$SCRIPT_DIR/init_ydlidar_udev.sh"
 fi
 
 echo "=== 5. Building Workspace (Fast Mode) ==="

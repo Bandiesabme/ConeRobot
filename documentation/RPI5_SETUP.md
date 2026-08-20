@@ -47,10 +47,10 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 cd ~/github/ConeRobot  # or your workspace directory
 
 # 1. Install ROS 2 Jazzy, GPIO, I2C, Foxglove & Sensor Dependencies
-bash documentation/scripts/ros2setup.sh
+bash scripts/ros2setup.sh
 
 # 2. Build and Install YDLIDAR SDK, YDLIDAR ROS 2 Driver & RF2O Laser Odometry Driver
-bash documentation/scripts/install_ydlidar.sh
+bash scripts/install_ydlidar.sh
 ```
 
 ### Step C: Configure I2C Bus Speed & USB Power Delivery in Boot Config

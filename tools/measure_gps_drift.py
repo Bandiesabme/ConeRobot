@@ -14,7 +14,7 @@ Description:
       4. 📊 Combined Overall Benchmark
 
 Usage:
-    python3 documentation/scripts/measure_gps_drift.py --samples 300
+    python3 tools/measure_gps_drift.py --samples 300
 ==============================================================================
 """
 
