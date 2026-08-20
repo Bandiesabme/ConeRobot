@@ -632,6 +632,35 @@ class NTRIPBaseCaster:
         with self.logs_lock:
             log_list = list(self.logs)[-30:]
 
+    @staticmethod
+    def _get_cpu_temp() -> Optional[float]:
+        """Reads Raspberry Pi CPU temperature in Celsius."""
+        try:
+            thermal_path = "/sys/class/thermal/thermal_zone0/temp"
+            if os.path.exists(thermal_path):
+                with open(thermal_path, "r") as f:
+                    temp_raw = f.read().strip()
+                return round(float(temp_raw) / 1000.0, 1)
+        except Exception:
+            pass
+        return None
+
+    def get_status_json(self) -> dict:
+        """Generates real-time telemetry dictionary for HTTP dashboard."""
+        with self.clients_lock:
+            active_rovers = [
+                {
+                    "ip": meta["ip"],
+                    "port": meta["port"],
+                    "uptime_sec": int(time.time() - meta["connected_at"]),
+                    "bytes_sent_kb": round(meta["bytes_sent"] / 1024.0, 1)
+                }
+                for meta in self.clients_map.values()
+            ]
+
+        with self.logs_lock:
+            log_list = list(self.logs)[-30:]
+
         remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
         remaining_str = f"{remaining_sec // 60}m {remaining_sec % 60:02d}s"
 
@@ -641,6 +670,7 @@ class NTRIPBaseCaster:
             "is_static_fixed": self.is_static_fixed,
             "locked_timestamp": self.locked_timestamp,
             "saved_coords": self._get_saved_coords_info(),
+            "cpu_temp": self._get_cpu_temp(),
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
             "remaining_sec": remaining_sec,
@@ -915,9 +945,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="brand-subtitle">Raspberry Pi 5 Local Caster & Auto-Lock</div>
         </div>
       </div>
-      <div id="statusBadge" class="status-badge">
-        <span id="statusIcon">⏳</span>
-        <span id="statusText">CALIBRATING</span>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <div id="cpuBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1);">
+          <span>🌡️ CPU:</span>
+          <span id="cpuTempVal" style="color: #34d399; font-family: ui-monospace, monospace; font-weight: 700;">-- °C</span>
+        </div>
+        <div id="statusBadge" class="status-badge">
+          <span id="statusIcon">⏳</span>
+          <span id="statusText">CALIBRATING</span>
+        </div>
       </div>
     </div>
 
@@ -1137,6 +1173,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             useSavedBtn.textContent = `📌 Use Saved (${data.saved_coords.lat.toFixed(5)}°, ${data.saved_coords.lon.toFixed(5)}°)`;
           } else {
             useSavedBtn.style.display = 'none';
+          }
+        }
+
+        if (data.cpu_temp !== null && data.cpu_temp !== undefined) {
+          const tempEl = document.getElementById('cpuTempVal');
+          tempEl.textContent = `${data.cpu_temp.toFixed(1)} °C`;
+          if (data.cpu_temp >= 75) {
+            tempEl.style.color = '#f87171';
+          } else if (data.cpu_temp >= 60) {
+            tempEl.style.color = '#fbbf24';
+          } else {
+            tempEl.style.color = '#34d399';
           }
         }
 
