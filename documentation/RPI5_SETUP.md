@@ -1,13 +1,36 @@
 # Raspberry Pi 5 Setup, Wiring & Launch Guide
 
-This is the comprehensive hardware configuration, wiring guide, system setup, and launch reference for driving the **Cytron MDD10 Rev 2.0 Dual DC Motor Driver**, the **MikroE BNO08x IMU**, the **Waveshare LC29H(DA) GPS/RTK HAT**, and the **YDLIDAR T-mini Plus LiDAR** on a **Raspberry Pi 5** running **Ubuntu 24.04 LTS (ROS 2 Jazzy)**.
+This is the comprehensive hardware configuration, wiring guide, system setup, and launch reference for driving the **Cytron MDD10 Rev 2.0 Dual DC Motor Driver**, the **MikroE BNO08x IMU**, the **Waveshare LC29H(DA) GPS/RTK HAT**, and the **YDLIDAR T-mini Plus LiDAR** on a **Raspberry Pi 5 (1 GB RAM Edition)** running **Ubuntu 24.04 LTS (ROS 2 Jazzy)**.
+
+> [!IMPORTANT]
+> **Hardware Constraint: 1 GB RAM Model**
+> The robot operates on a **Raspberry Pi 5 with 1 GB of RAM**. Every service, node, and build step must strictly adhere to low-memory design principles:
+> - **Headless Execution Only:** Never launch RViz2, Gazebo, or a desktop GUI on the Pi.
+> - **Remote-Brain Architecture:** Heavy computing (path planning, SLAM, vision, RViz) is strictly offloaded to the remote PC.
+> - **Swap Space:** A 2GB+ swapfile is mandatory to prevent Linux Out-Of-Memory (OOM) killer terminations during compilation or peak operations.
+> - **Throttled Compilation:** Colcon builds on the Pi should limit parallel compilation threads (`-j1` or `-j2`).
 
 ---
 
-## 1. System Preparation (Run Once on RPi 5)
+## 1. 1 GB RAM Optimization Guidelines & Rules
 
-### Step A: Create 2GB Swap Memory (Prevents Out-Of-Memory Freezes)
-To prevent OOM freezes during `colcon build` on Raspberry Pi 5 models:
+To keep the system stable and avoid out-of-memory crashes on the 1 GB RAM board, adhere to the following architecture rules:
+
+| Category | Guideline | Why It Matters |
+| :--- | :--- | :--- |
+| **GUI & Visualization** | Run **RViz2** & **Foxglove Studio** on remote PC/laptop only | RViz2 consumes 400 MB–1 GB+ RAM, which instantly exhausts Pi 5 1GB memory. |
+| **OS Footprint** | Run Ubuntu Server (headless, no X11/Wayland desktop) | Saves ~400 MB RAM compared to Ubuntu Desktop. |
+| **Compilation** | Use `colcon build --parallel-workers 2` or `MAKEFLAGS="-j1"` | GCC/Clang can consume 600 MB+ per core when building C++ templates (`rf2o`, `ydlidar`). |
+| **Logging & Output** | Suppress high-frequency INFO printouts (e.g. `--log-level WARN`) | Prevents terminal buffer accumulation and excessive stdout memory churn. |
+| **ROS 2 QoS Queues** | Set subscription queue depths to 1–5 (e.g., `SensorDataQoS` or `depth=1`) | Prevents unhandled message queues from buffering in RAM if network slows down. |
+| **Swap File** | 2 GB Swap with moderate swappiness (`vm.swappiness=60`) | Acts as a safety net against memory spikes. |
+
+---
+
+## 2. System Preparation (Run Once on RPi 5)
+
+### Step A: Create 2GB Swap Memory (Mandatory for 1GB RAM)
+To prevent OOM freezes during `colcon build` or peak runtime:
 
 ```bash
 sudo swapoff -a
@@ -81,7 +104,7 @@ sudo reboot
 
 ---
 
-## 2. Hardware Wiring Checklist
+## 3. Hardware Wiring Checklist
 
 All components interface with the Raspberry Pi 5 without pin conflicts:
 
@@ -131,7 +154,7 @@ Raspberry Pi 5 Pinout Allocation:
 
 ---
 
-## 3. Power Stability & Brownout Prevention
+## 4. Power Stability & Brownout Prevention
 
 1. **Step-Down Converter Voltage:** Set your 5V 5A DC-DC buck converter output to **5.15V – 5.20V** (official Raspberry Pi spec) to compensate for voltage drop across the USB-C cable under heavy load.
 2. **Buffer Capacitor:** Add a **1000 µF to 2200 µF (10V–16V)** electrolytic capacitor across the 5V power output to absorb transient current spikes when motors and LiDAR spin up.
@@ -139,10 +162,7 @@ Raspberry Pi 5 Pinout Allocation:
 
 ---
 
-
----
-
-## 4. Wi-Fi Auto-Connect & Long-Range Antenna Setup
+## 5. Wi-Fi Auto-Connect & Long-Range Antenna Setup
 
 ### Option A: One-Command Automated Setup (Recommended)
 
@@ -193,37 +213,31 @@ sudo chmod 600 /etc/netplan/50-cloud-init.yaml
 sudo netplan apply
 ```
 
-## 5. How to Build & Run on Raspberry Pi 5
+---
 
-### Step 1: Pull & Build Workspace
+## 6. How to Build & Run on Raspberry Pi 5 (1GB RAM)
+
+### Step 1: Pull & Build Workspace (Low-Memory Safe)
 
 ```bash
 cd ~/github/ConeRobot  # or your workspace directory
 git pull origin main
 
-colcon build --symlink-install
+# Build using 2 workers to avoid RAM exhaustion on 1GB board:
+colcon build --symlink-install --parallel-workers 2
 source install/setup.bash
 ```
 
 ### Step 2: Launch the Robot Stack
 
 ```bash
-# Launch Motors + IMU (Default)
+# Launch Full Robot Stack (Motors, IMU, GPS, LiDAR, Odometry, Foxglove Bridge)
 ros2 launch cone_robot_control robot.launch.py
-
-# Launch Motors + IMU + YDLIDAR
-ros2 launch cone_robot_control robot.launch.py launch_lidar:=true
-```
-
-Expected startup logs:
-```text
-[INFO] [mdd10_motor_controller]: Cytron MDD10 Motor Controller Node started successfully.
-[INFO] [bno08x_node]: BNO08x IMU Node initialized (Rate: 50.0 Hz, Flipped: True, Game Rotation: True)
 ```
 
 ---
 
-## 6. Live Diagnostics & Verification
+## 7. Live Diagnostics & Verification
 
 ### A. Monitor Sensors
 

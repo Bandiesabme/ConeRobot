@@ -1,0 +1,39 @@
+{
+  "server": {
+    "port": 8000,
+    "host": "0.0.0.0",
+    "scan_interval_sec": 10,
+    "robot_port": 8765
+  },
+  "topics": {
+    "gps_fix": "/fix",
+    "gps_status": "/gps/status",
+    "heading": "/imu/heading",
+    "imu_data": "/imu/data",
+    "step_status": "/step_status",
+    "scan": "/scan",
+    "odom": "/odom",
+    "cmd_vel": "/cmd_vel",
+    "battery": "/battery_state"
+  },
+  "robots": [
+    { "id": 1, "name": "ConeRobot 01", "host": "conerobot01.local", "ip": "" },
+    { "id": 2, "name": "ConeRobot 02", "host": "conerobot02.local", "ip": "" },
+    { "id": 3, "name": "ConeRobot 03", "host": "conerobot03.local", "ip": "" },
+    { "id": 4, "name": "ConeRobot 04", "host": "conerobot04.local", "ip": "" },
+    { "id": 5, "name": "ConeRobot 05", "host": "conerobot05.local", "ip": "" },
+    { "id": 6, "name": "ConeRobot 06", "host": "conerobot06.local", "ip": "" },
+    { "id": 7, "name": "ConeRobot 07", "host": "conerobot07.local", "ip": "" },
+    { "id": 8, "name": "ConeRobot 08", "host": "conerobot08.local", "ip": "" },
+    { "id": 9, "name": "ConeRobot 09", "host": "conerobot09.local", "ip": "" },
+    { "id": 10, "name": "ConeRobot 10", "host": "conerobot10.local", "ip": "" },
+    { "id": 11, "name": "ConeRobot 11", "host": "conerobot11.local", "ip": "" },
+    { "id": 12, "name": "ConeRobot 12", "host": "conerobot12.local", "ip": "" },
+    { "id": 13, "name": "ConeRobot 13", "host": "conerobot13.local", "ip": "" }
+  ],
+  "map": {
+    "default_lat": 47.4979,
+    "default_lon": 19.0402,
+    "default_zoom": 18
+  }
+}

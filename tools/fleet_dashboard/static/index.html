@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ConeRobot 13-Fleet Mission Control</title>
+  
+  <!-- Google Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  
+  <!-- Leaflet CSS for Map -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  
+  <!-- Custom Dashboard CSS -->
+  <link rel="stylesheet" href="css/dashboard.css">
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- Top Navigation & Status Bar -->
+    <header class="top-navbar">
+      <div class="brand-section">
+        <div class="radar-pulse"></div>
+        <div class="brand-text">
+          <h1>CONEROBOT <span>FLEET</span></h1>
+          <p class="subtitle">13-Robot Real-Time Mission Telemetry & GPS Tracking</p>
+        </div>
+      </div>
+
+      <!-- Quick Fleet Summary Chips -->
+      <div class="fleet-stats-bar">
+        <div class="stat-pill">
+          <span class="stat-dot green"></span>
+          <span class="stat-label">Active:</span>
+          <span class="stat-val" id="stat-active">0</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-dot yellow"></span>
+          <span class="stat-label">Idle:</span>
+          <span class="stat-val" id="stat-idle">0</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-dot red"></span>
+          <span class="stat-label">Offline:</span>
+          <span class="stat-val" id="stat-offline">13</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-dot cyan"></span>
+          <span class="stat-label">RTK Fix:</span>
+          <span class="stat-val" id="stat-rtk">0</span>
+        </div>
+      </div>
+
+      <!-- Header Action Controls -->
+      <div class="header-actions">
+        <button id="btn-scan" class="action-btn" title="Scan local Wi-Fi for active robots">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+          Scan Network
+        </button>
+        <button id="btn-settings" class="action-btn icon-only" title="Configure Topics & Hostnames">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area: Split View (Map on Top, Fleet Grid Below) -->
+    <main class="dashboard-body">
+      
+      <!-- Interactive GPS Fleet Map Section -->
+      <section class="map-section">
+        <div class="section-header">
+          <div class="title-with-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/>
+              <line x1="8" y1="2" x2="8" y2="18"/>
+              <line x1="16" y1="6" x2="16" y2="22"/>
+            </svg>
+            <h2>Live Fleet GPS Positioning</h2>
+          </div>
+          <div class="map-controls">
+            <button id="btn-fit-map" class="map-mini-btn" title="Fit all robots in view">Fit All</button>
+            <span class="map-legend-item"><span class="legend-dot green"></span> RTK Fix</span>
+            <span class="map-legend-item"><span class="legend-dot yellow"></span> Float</span>
+            <span class="map-legend-item"><span class="legend-dot red"></span> Lost</span>
+          </div>
+        </div>
+        <div id="fleet-map"></div>
+      </section>
+
+      <!-- 13-Robot Telemetry Grid -->
+      <section class="grid-section">
+        <div class="section-header">
+          <div class="title-with-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+              <line x1="6" y1="6" x2="6.01" y2="6"/>
+              <line x1="6" y1="18" x2="6.01" y2="18"/>
+            </svg>
+            <h2>Active Robot Telemetry Grid (13 Units)</h2>
+          </div>
+          <div class="grid-header-right">
+            <button id="btn-toggle-debug" class="map-mini-btn" style="background: rgba(255,255,255,0.06);">🔍 Debug Logs</button>
+            <span class="last-update-tag" id="last-update">Live: --</span>
+          </div>
+        </div>
+
+        <!-- 13 Real Robot Cards Grid -->
+        <div class="robot-cards-container" id="robot-cards-container"></div>
+      </section>
+
+      <!-- Live Real-Time Diagnostics Console (Collapsible) -->
+      <section class="debug-console-section" id="debug-section" style="margin-top: 15px; background: #0f172a; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <h3 style="font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 0;">🛰️ Live WebSocket & Topic Diagnostics</h3>
+          <button id="btn-clear-debug" style="font-size: 0.75rem; background: transparent; border: 1px solid rgba(255,255,255,0.1); color: var(--text-muted); border-radius: 4px; padding: 2px 8px; cursor: pointer;">Clear Logs</button>
+        </div>
+        <div id="debug-log-container" style="font-family: monospace; font-size: 0.75rem; color: #94a3b8; height: 120px; overflow-y: auto; background: #090d16; padding: 8px; border-radius: 6px; line-height: 1.5;"></div>
+      </section>
+    </main>
+
+    <!-- Modal: Robot Detail Inspector -->
+    <div id="robot-detail-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <h3 id="modal-robot-title">ConeRobot 01</h3>
+            <span id="modal-robot-badge" class="badge green">ACTIVE</span>
+          </div>
+          <button class="modal-close" id="btn-close-modal">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="detail-row">
+            <div class="detail-box">
+              <span class="box-label">IP & Host</span>
+              <span class="box-val" id="modal-ip">192.168.0.101</span>
+            </div>
+            <div class="detail-box">
+              <span class="box-label">GPS RTK Mode</span>
+              <span class="box-val highlight" id="modal-gps-mode">RTK FIX (24 Sats)</span>
+            </div>
+            <div class="detail-box">
+              <span class="box-label">Connection Status</span>
+              <span class="box-val" id="modal-ping">Connected</span>
+            </div>
+          </div>
+
+          <!-- Live Gauges: IMU 3D & Heading -->
+          <div class="gauges-row">
+            <div class="compass-widget">
+              <h4>IMU Heading</h4>
+              <div class="compass-circle">
+                <div class="compass-needle" id="modal-needle"></div>
+                <div class="compass-label-n">N</div>
+                <div class="compass-degrees" id="modal-heading-val">045.2°</div>
+              </div>
+            </div>
+            <div class="orientation-table">
+              <h4>Euler Angles</h4>
+              <div class="euler-metric"><span>Heading (Yaw):</span> <strong id="modal-yaw">45.2°</strong></div>
+              <div class="euler-metric"><span>Pitch:</span> <strong id="modal-pitch">0.2°</strong></div>
+              <div class="euler-metric"><span>Roll:</span> <strong id="modal-roll">-0.4°</strong></div>
+              <div class="euler-metric"><span>CPU Load:</span> <strong id="modal-cpu">--</strong></div>
+              <div class="euler-metric"><span>RAM Usage:</span> <strong id="modal-ram">--</strong></div>
+              <div class="euler-metric"><span>CPU SoC Temp:</span> <strong id="modal-temp">--</strong></div>
+            </div>
+          </div>
+
+          <!-- GPS Coordinates -->
+          <div class="gps-coords-card">
+            <h4>Raw Position Data</h4>
+            <div class="coords-grid">
+              <div><span>Latitude:</span> <strong id="modal-lat">47.4979123</strong></div>
+              <div><span>Longitude:</span> <strong id="modal-lon">19.0402456</strong></div>
+              <div><span>Altitude:</span> <strong id="modal-alt">105.4 m</strong></div>
+              <div><span>HDOP:</span> <strong id="modal-hdop">0.82</strong></div>
+            </div>
+          </div>
+
+          <!-- LiDAR Status Card -->
+          <div class="step-status-card" id="modal-lidar-card">
+            <h4>LiDAR Sensor (/scan)</h4>
+            <div class="step-grid">
+              <div><span>Hardware Status:</span> <strong id="modal-lidar-status">Checking...</strong></div>
+              <div><span>Scan Frequency:</span> <strong id="modal-lidar-freq">--</strong></div>
+            </div>
+          </div>
+
+          <!-- Step Controller Status -->
+          <div class="step-status-card">
+            <h4>Step Motion Controller</h4>
+            <div class="step-grid">
+              <div><span>Current Action:</span> <strong id="modal-motion-state">Driving Forward</strong></div>
+              <div><span>Linear Speed:</span> <strong id="modal-speed">0.35 m/s</strong></div>
+              <div><span>Distance Progress:</span> <strong id="modal-dist-progress">45 / 200 cm</strong></div>
+              <div><span>Turn Progress:</span> <strong id="modal-turn-progress">0° / 0°</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Topic & Settings Configuration -->
+    <div id="settings-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>⚙️ Fleet & Topic Configuration</h3>
+          <button class="modal-close" id="btn-close-settings">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="settings-desc">Easily modify standard ROS 2 topic names. Any updates take effect immediately without modifying HTML/JS.</p>
+          
+          <form id="settings-form">
+            <div class="form-group">
+              <label>ConeRobot 01 IP or Hostname (e.g. 192.168.0.55 or conerobot.local):</label>
+              <input type="text" id="robot1-ip" class="form-input" placeholder="e.g. 192.168.0.100 or conerobot.local">
+            </div>
+            <div class="form-group">
+              <label>LiDAR LaserScan Topic:</label>
+              <input type="text" id="topic-lidar" class="form-input" value="/scan">
+            </div>
+            <div class="form-group">
+              <label>GPS Fix Topic:</label>
+              <input type="text" id="topic-gps" class="form-input" value="/fix">
+            </div>
+            <div class="form-group">
+              <label>IMU Heading Topic:</label>
+              <input type="text" id="topic-heading" class="form-input" value="/imu/heading">
+            </div>
+            <div class="form-group">
+              <label>IMU Data Topic:</label>
+              <input type="text" id="topic-imu" class="form-input" value="/imu/data">
+            </div>
+            <div class="form-group">
+              <label>Step Status Topic:</label>
+              <input type="text" id="topic-step" class="form-input" value="/step_status">
+            </div>
+            <div class="form-group">
+              <label>Battery State Topic:</label>
+              <input type="text" id="topic-battery" class="form-input" value="/battery_state">
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="save-btn">Save Topic Settings</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Leaflet JS for Maps -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Custom Fleet JS with cache buster -->
+  <script src="js/dashboard.js?v=v216"></script>
+</body>
+</html>

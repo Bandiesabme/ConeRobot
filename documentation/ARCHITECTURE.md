@@ -8,7 +8,8 @@ This document details the **Remote-Brain Offloaded Compute Architecture** and **
 
 In this architecture, heavy computational tasks (path planning, sensor fusion, computer vision, obstacle avoidance) are offloaded from the robot's onboard microcontroller to a powerful remote machine (Ubuntu Laptop).
 
-- **Raspberry Pi 5 (Hardware I/O Gateway)**:
+- **Raspberry Pi 5 (Hardware I/O Gateway - 1 GB RAM Edition)**:
+  - Strict low-memory constraint: Runs in headless mode (no GUI/RViz) with ~400MB base footprint.
   - Connects directly to physical hardware sensors (LiDAR, GPS, IMU) and motor drivers.
   - Runs lightweight ROS 2 driver nodes that broadcast raw sensor data onto the ROS 2 DDS network over Wi-Fi.
   - Subscribes to `/cmd_vel` to drive the Cytron MDD10 motor controller GPIO pins.

@@ -30,8 +30,10 @@ License: MIT
 ==============================================================================
 """
 
+import os
 import math
 import time
+import json
 from typing import Optional, Tuple
 
 import rclpy
@@ -132,6 +134,10 @@ class StepMotionController(Node):
         # --- Publishers & Subscribers ---
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.status_pub = self.create_publisher(String, '/step_status', 10)
+        self.diag_pub = self.create_publisher(String, '/robot/diagnostics', 10)
+
+        # 2.0s Lightweight SoC Diagnostics Timer (0 overhead)
+        self.diag_timer = self.create_timer(2.0, self._publish_diagnostics)
 
         self.cmd_step_sub = self.create_subscription(Vector3, '/cmd_step', self._cmd_step_callback, 10)
         self.heading_sub = self.create_subscription(Float32, '/imu/heading', self._heading_callback, 10)
@@ -380,7 +386,23 @@ class StepMotionController(Node):
         twist = Twist()
         twist.linear.x = float(vx)
         twist.angular.z = float(wz)
-        self.cmd_vel_pub.publish(twist)
+    def _publish_diagnostics(self) -> None:
+        """Reads Raspberry Pi 5 SoC temperature directly from Linux sysfs with 0 overhead."""
+        try:
+            temp_c = None
+            # Standard Raspberry Pi / Ubuntu 24.04 LTS thermal zone
+            if os.path.exists('/sys/class/thermal/thermal_zone0/temp'):
+                with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+                    raw_val = f.read().strip()
+                    if raw_val:
+                        temp_c = round(float(raw_val) / 1000.0, 1)
+
+            if temp_c is not None:
+                diag_msg = String()
+                diag_msg.data = json.dumps({"cpu_temp": f"{temp_c:.1f} °C", "temp_val": temp_c})
+                self.diag_pub.publish(diag_msg)
+        except Exception:
+            pass
 
     def destroy_node(self) -> None:
         """Clean stop on node shutdown."""
