@@ -22,4 +22,4 @@ ydlidar_ros2_driver_node:
     angle_max: 180.0             # Maximum scanning angle (degrees)
     range_min: 0.05              # Minimum ranging distance (meters)
     range_max: 12.0              # Maximum ranging distance (meters)
-    frequency: 6.0               # Default scan frequency (Hz)
+    frequency: 10.0               # Default scan frequency (Hz)
