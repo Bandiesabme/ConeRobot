@@ -314,7 +314,7 @@ class StepMotionController(Node):
                 # PI control: positive drift (target is to the left) -> steer left (+wz)
                 p_term = self.yaw_lock_kp * heading_drift
                 i_term = (self.yaw_lock_kp * 0.2) * self.heading_integral
-                raw_yaw = (p_term + i_term) if direction_sign > 0 else -(p_term + i_term)
+                raw_yaw = p_term + i_term
                 
                 # Authority clamp to +/- 0.40 rad/s
                 yaw_correction = max(-0.40, min(0.40, raw_yaw))
