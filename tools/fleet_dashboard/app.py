@@ -107,12 +107,20 @@ def scan_network_job():
                 h = host_futures[fut]
                 res_ip = fut.result()
                 if res_ip:
-                    slot_id = 1
-                    for num in range(1, 14):
-                        if f"{num:02d}" in h or f"robot{num}" in h:
-                            slot_id = num
-                            break
-                    print(f"[DISCOVERY] Found ConeRobot via '{h}' -> {res_ip}:{robot_port}")
+                    used_ips = {v["ip"] for v in discovered_cache.values()}
+                    if res_ip in used_ips:
+                        continue  # Prevent adding duplicate cards for the same physical robot
+
+                    # Extract numeric robot ID from hostname if present
+                    import re
+                    match = re.search(r'(\d+)', h)
+                    if match and 1 <= int(match.group(1)) <= 13:
+                        slot_id = int(match.group(1))
+                    else:
+                        free_slots = [r["id"] for r in cfg.get("robots", []) if r["id"] not in discovered_cache]
+                        slot_id = free_slots[0] if free_slots else 1
+
+                    print(f"[DISCOVERY] Found ConeRobot via '{h}' -> {res_ip}:{robot_port} (Assigned to Robot {slot_id:02d})")
                     discovered_cache[slot_id] = {
                         "id": slot_id,
                         "name": f"ConeRobot {slot_id:02d}",

@@ -393,9 +393,9 @@ function handleSysInfoData(r, sys) {
 }
 
 function cdrAlign(ptr, alignment) {
-  const rel = ptr - 13;
+  const rel = ptr - 17;
   const alignedRel = (rel + (alignment - 1)) & ~(alignment - 1);
-  return 13 + alignedRel;
+  return 17 + alignedRel;
 }
 
 function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
@@ -406,10 +406,9 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
   // Opcode 1 = Message Data
   if (op === 1) {
     const subId = view.getUint32(1, true);
-    const topic = channelMap[subId] || channelMap[1] || '/foxglove_bridge/sysinfo';
+    const topic = channelMap[subId];
     if (!topic) {
-      logDebug(`⚠️ [Robot ${robotId}] Unknown subId: ${subId}`, 'warn');
-      return;
+      return; // Skip messages for unmapped or unsubscribed channels
     }
 
     const r = realTelemetry[robotId];
@@ -417,17 +416,18 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
 
     try {
       // 0. foxglove.SystemInfo (/foxglove_bridge/sysinfo)
-      if (topic.includes('sysinfo')) {
+      if (topic === '/foxglove_bridge/sysinfo' || topic.endsWith('sysinfo')) {
         const jsonBytes = new Uint8Array(buffer, 13);
         const rawText = new TextDecoder('utf-8').decode(jsonBytes);
-        const jsonMatch = rawText.substring(rawText.indexOf('{'), rawText.lastIndexOf('}') + 1);
-        if (jsonMatch) {
+        const firstBrace = rawText.indexOf('{');
+        const lastBrace = rawText.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
           try {
-            const sys = JSON.parse(jsonMatch);
+            const jsonStr = rawText.substring(firstBrace, lastBrace + 1);
+            const sys = JSON.parse(jsonStr);
             handleSysInfoData(r, sys);
-            logDebug(`📊 [Robot ${robotId}] SysInfo: ${r.health.cpu_load}`, 'topic');
           } catch(e) {
-            logDebug(`⚠️ [Robot ${robotId}] SysInfo parse error: ${e.message}`, 'warn');
+            // Silently ignore non-JSON or partial binary packets
           }
         }
         return;
@@ -480,8 +480,13 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
       // 3. std_msgs/msg/Float32 (/imu/heading)
       else if (topic === configuredTopics.heading || topic === '/imu/heading') {
         if (ptr + 4 <= buffer.byteLength) {
-          const val = view.getFloat32(ptr, true);
-          r.imu.heading = Number(val.toFixed(1));
+          let val = view.getFloat32(ptr, true);
+          val = ((val % 360) + 360) % 360;
+          const rounded = Number(val.toFixed(1));
+          if (r.imu.heading !== rounded) {
+            r.imu.heading = rounded;
+            logDebug(`🧭 [Robot ${robotId}] Live Heading: ${r.imu.heading}°`, 'topic');
+          }
         }
       }
 
@@ -568,15 +573,17 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
           const siny_cosp = 2 * (w * z + x * y);
           const cosy_cosp = 1 - 2 * (y * y + z * z);
           let yaw = Math.atan2(siny_cosp, cosy_cosp) * (180 / Math.PI);
-          if (yaw < 0) yaw += 360;
+          yaw = ((yaw % 360) + 360) % 360;
+          if (yaw >= 359.95) yaw = 0.0;
 
           r.imu.roll = Number(roll.toFixed(1));
           r.imu.pitch = Number(pitch.toFixed(1));
           r.imu.yaw = Number(yaw.toFixed(1));
           
-          // Only fallback to raw yaw if dedicated /imu/heading topic is not present
-          if (r.imu.heading === null || r.imu.heading === undefined) {
-            r.imu.heading = Number(yaw.toFixed(1));
+          const prevH = r.imu.heading;
+          r.imu.heading = Number(yaw.toFixed(1));
+          if (prevH === null || Math.abs((prevH || 0) - r.imu.heading) > 0.4) {
+            logDebug(`🧭 [Robot ${robotId}] IMU Live Yaw: ${r.imu.heading}° (Pitch: ${r.imu.pitch}°, Roll: ${r.imu.roll}°)`, 'topic');
           }
         }
       }
@@ -777,7 +784,7 @@ function renderUIUpdates() {
         gpsEl.style.color = 'var(--text-muted)';
       }
 
-      headEl.innerText = (r.imu.heading !== null) ? `${r.imu.heading}°` : 'Waiting for IMU...';
+      headEl.innerText = (r.imu.heading !== null) ? `${Number(r.imu.heading).toFixed(1)}°` : 'Waiting for IMU...';
       stepEl.innerText = r.motion.step_progress;
       pingEl.innerText = '🟢 Connected';
 
