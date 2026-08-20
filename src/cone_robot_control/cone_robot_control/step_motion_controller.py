@@ -303,7 +303,7 @@ class StepMotionController(Node):
             direction_sign = 1.0 if self.target_drive_cm >= 0 else -1.0
             vx = direction_sign * self.default_linear_speed
 
-            # Active IMU Straight-Line Yaw Lock with PI Controller
+            # Active IMU Straight-Line Yaw Lock with PI Controller (Standard ROS 2 CCW convention)
             if self.current_heading is not None and abs(self.target_turn_deg) < self.turn_tolerance_deg:
                 heading_drift = shortest_angular_diff_deg(self.target_absolute_heading, self.current_heading)
                 
@@ -311,13 +311,13 @@ class StepMotionController(Node):
                 dt = 1.0 / self.control_rate_hz
                 self.heading_integral = max(-10.0, min(10.0, self.heading_integral + (heading_drift * dt)))
                 
-                # PI control: P responds immediately, I cancels out continuous motor friction imbalance
+                # PI control: positive drift (target is to the left) -> steer left (+wz)
                 p_term = self.yaw_lock_kp * heading_drift
-                i_term = (self.yaw_lock_kp * 0.3) * self.heading_integral
+                i_term = (self.yaw_lock_kp * 0.2) * self.heading_integral
                 raw_yaw = (p_term + i_term) if direction_sign > 0 else -(p_term + i_term)
                 
-                # Authority clamp to +/- 0.45 rad/s (firm enough to overcome gearbox friction)
-                yaw_correction = max(-0.45, min(0.45, raw_yaw))
+                # Authority clamp to +/- 0.40 rad/s
+                yaw_correction = max(-0.40, min(0.40, raw_yaw))
             else:
                 yaw_correction = 0.0
 
