@@ -69,7 +69,7 @@ step_motion_controller:
     turn_settle_time_s: 0.25          # Required stable duration before proceeding to drive
 
     # --- Linear Driving Parameters ---
-    default_linear_speed: 0.25        # Forward/reverse cruising speed (m/s)
+    default_linear_speed: 0.15        # Forward/reverse cruising speed (m/s)
     yaw_lock_kp: 0.05                 # Active IMU straight-line yaw correction gain
     calibrated_speed_mps: 0.25        # Measured speed for open-loop time integration fallback
 
