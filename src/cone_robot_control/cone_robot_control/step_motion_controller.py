@@ -167,6 +167,7 @@ class StepMotionController(Node):
         self.target_turn_deg: float = 0.0       # Relative turn angle (+ right, - left)
         self.target_drive_cm: float = 0.0       # Relative distance (+ forward, - reverse)
         self.target_absolute_heading: float = 0.0
+        self.heading_integral: float = 0.0      # PI controller error accumulator for motor trimming
         self.turn_settle_start: Optional[float] = None
         self.drive_start_time: Optional[float] = None
         self.active_distance_method: str = "none"
@@ -302,13 +303,21 @@ class StepMotionController(Node):
             direction_sign = 1.0 if self.target_drive_cm >= 0 else -1.0
             vx = direction_sign * self.default_linear_speed
 
-            # Active IMU Straight-Line Yaw Lock with safety clamp
+            # Active IMU Straight-Line Yaw Lock with PI Controller
             if self.current_heading is not None and abs(self.target_turn_deg) < self.turn_tolerance_deg:
                 heading_drift = shortest_angular_diff_deg(self.target_absolute_heading, self.current_heading)
-                # Corrective yaw steering: positive drift (target is left) -> steer left (+wz)
-                raw_yaw = (self.yaw_lock_kp * heading_drift) if direction_sign > 0 else (-self.yaw_lock_kp * heading_drift)
-                # Clamp yaw correction to gentle +/- 0.25 rad/s so robot tracks a perfect laser-straight line
-                yaw_correction = max(-0.25, min(0.25, raw_yaw))
+                
+                # Accumulate integral error with anti-windup (+/- 10 deg*s)
+                dt = 1.0 / self.control_rate_hz
+                self.heading_integral = max(-10.0, min(10.0, self.heading_integral + (heading_drift * dt)))
+                
+                # PI control: P responds immediately, I cancels out continuous motor friction imbalance
+                p_term = self.yaw_lock_kp * heading_drift
+                i_term = (self.yaw_lock_kp * 0.3) * self.heading_integral
+                raw_yaw = (p_term + i_term) if direction_sign > 0 else -(p_term + i_term)
+                
+                # Authority clamp to +/- 0.45 rad/s (firm enough to overcome gearbox friction)
+                yaw_correction = max(-0.45, min(0.45, raw_yaw))
             else:
                 yaw_correction = 0.0
 
@@ -321,6 +330,7 @@ class StepMotionController(Node):
         """Initializes sensor baselines for the straight-line drive phase."""
         self._set_state(MotionState.DRIVING)
         self.drive_start_time = time.time()
+        self.heading_integral = 0.0
 
         # Lock straight-line heading to current IMU heading at exact moment driving starts
         if abs(self.target_turn_deg) < self.turn_tolerance_deg and self.current_heading is not None:

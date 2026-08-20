@@ -70,7 +70,7 @@ step_motion_controller:
 
     # --- Linear Driving Parameters ---
     default_linear_speed: 0.15        # Forward/reverse cruising speed (m/s)
-    yaw_lock_kp: 0.05                 # Active IMU straight-line yaw correction gain
+    yaw_lock_kp: 0.12                 # Active IMU straight-line yaw correction gain
     calibrated_speed_mps: 0.25        # Measured speed for open-loop time integration fallback
 
     # --- Multi-Sensor Distance Tracking ---
