@@ -49,6 +49,7 @@ class NTRIPBaseCaster:
         survey_duration: int = 3600,
         survey_accuracy: float = 0.5,
         recalibrate: bool = False,
+        use_saved: bool = False,
         fixed_lat: Optional[float] = None,
         fixed_lon: Optional[float] = None,
         fixed_alt: Optional[float] = None
@@ -93,16 +94,37 @@ class NTRIPBaseCaster:
         self.survey_lon = 0.0
         self.survey_alt = 0.0
         self.satellites_tracked = 0
-        self.hdop = 99.9
+        self.msm_sats: Dict[int, int] = {}
+        self.hdop = 1.0
         self.local_ip = self._get_local_ip()
 
-        # Check manual coordinates or saved coordinates
+        # Check manual coordinates or explicit use_saved flag (does NOT auto-lock without user intent)
         if fixed_lat is not None and fixed_lon is not None:
             self._apply_fixed_coords(fixed_lat, fixed_lon, fixed_alt or 0.0, "Command-Line Arguments")
-        elif not recalibrate:
+        elif use_saved and not recalibrate:
             self._load_saved_coords()
 
+        saved = self._get_saved_coords_info()
+        if saved and not self.is_static_fixed:
+            self._add_log(f"💡 Saved coordinates found from {saved.get('timestamp', 'past session')}. Click 'Use Saved Position' on dashboard or use --use-saved to apply.")
+
         self._add_log(f"Base Station initialized. Serial: {self.serial_port}, Web: http://{self.local_ip}:{self.web_port}")
+
+    def _get_saved_coords_info(self) -> Optional[dict]:
+        """Returns saved coordinates dictionary if present on disk."""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r") as f:
+                    data = json.load(f)
+                if data.get("is_locked"):
+                    return data
+            except Exception:
+                pass
+        return None
+
+    def use_saved_now(self) -> bool:
+        """Explicitly applies previously saved static coordinates upon user request."""
+        return self._load_saved_coords()
 
     def _add_log(self, text: str, level: str = "INFO") -> None:
         """Adds a log entry with timestamp for the web console and terminal."""
@@ -124,16 +146,14 @@ class NTRIPBaseCaster:
 
     def _load_saved_coords(self) -> bool:
         """Loads previously locked static base coordinates if available."""
-        if os.path.exists(self.config_file):
+        saved = self._get_saved_coords_info()
+        if saved:
             try:
-                with open(self.config_file, "r") as f:
-                    data = json.load(f)
-                if data.get("is_locked"):
-                    lat = float(data["lat"])
-                    lon = float(data["lon"])
-                    alt = float(data.get("alt", 0.0))
-                    self._apply_fixed_coords(lat, lon, alt, f"Saved Config ({data.get('timestamp', 'Unknown')})")
-                    return True
+                lat = float(saved["lat"])
+                lon = float(saved["lon"])
+                alt = float(saved.get("alt", 0.0))
+                self._apply_fixed_coords(lat, lon, alt, f"Saved Config ({saved.get('timestamp', 'Unknown')})")
+                return True
             except Exception as e:
                 self._add_log(f"Failed to read saved coords: {e}", "WARN")
         return False
@@ -369,6 +389,85 @@ class NTRIPBaseCaster:
             else:
                 self.survey_status = "CALIBRATING"
 
+    @staticmethod
+    def _ecef_to_lla(x: float, y: float, z: float) -> Tuple[float, float, float]:
+        """Converts WGS-84 ECEF coordinates (meters) to Latitude, Longitude, and Altitude."""
+        a = 6378137.0
+        f = 1.0 / 298.257223563
+        b = a * (1.0 - f)
+        e2 = 1.0 - (b * b) / (a * a)
+        e_prime2 = (a * a - b * b) / (b * b)
+
+        p = math.sqrt(x * x + y * y)
+        if p < 1e-6:
+            lat = 90.0 if z > 0 else -90.0
+            return lat, 0.0, abs(z) - b
+
+        theta = math.atan2(z * a, p * b)
+        lat = math.atan2(
+            z + e_prime2 * b * (math.sin(theta) ** 3),
+            p - e2 * a * (math.cos(theta) ** 3)
+        )
+        lon = math.atan2(y, x)
+        n = a / math.sqrt(1.0 - e2 * (math.sin(lat) ** 2))
+        alt = p / math.cos(lat) - n
+        return math.degrees(lat), math.degrees(lon), alt
+
+    @staticmethod
+    def _get_bits(data: bytes, bit_offset: int, num_bits: int) -> int:
+        """Extracts an arbitrary unsigned bitfield from a byte sequence."""
+        val = 0
+        for i in range(num_bits):
+            pos = bit_offset + i
+            byte_idx = pos // 8
+            if byte_idx >= len(data):
+                break
+            bit_idx = 7 - (pos % 8)
+            bit = (data[byte_idx] >> bit_idx) & 1
+            val = (val << 1) | bit
+        return val
+
+    @staticmethod
+    def _get_signed_bits(data: bytes, bit_offset: int, num_bits: int) -> int:
+        """Extracts a signed two's-complement bitfield."""
+        val = NTRIPBaseCaster._get_bits(data, bit_offset, num_bits)
+        if val & (1 << (num_bits - 1)):
+            val -= (1 << num_bits)
+        return val
+
+    def _parse_rtcm3_payload(self, msg_id: int, payload: bytes) -> None:
+        """Extracts satellite tracking masks and reference station coordinates directly from RTCM3."""
+        try:
+            # 1. Message 1005 / 1006: Base Station Antenna Reference Point (ARP)
+            if msg_id in (1005, 1006) and len(payload) >= 19:
+                raw_x = self._get_signed_bits(payload, 34, 38)
+                raw_y = self._get_signed_bits(payload, 74, 38)
+                raw_z = self._get_signed_bits(payload, 114, 38)
+                x = raw_x * 0.0001
+                y = raw_y * 0.0001
+                z = raw_z * 0.0001
+                if abs(x) > 1000.0 and abs(y) > 1000.0:
+                    lat, lon, alt = self._ecef_to_lla(x, y, z)
+                    if not self.is_static_fixed:
+                        self.survey_lat = lat
+                        self.survey_lon = lon
+                        self.survey_alt = alt
+                        self._update_survey_statistics(lat, lon, alt)
+
+            # 2. MSM Messages (1071-1077 GPS, 1081-1087 GLO, 1091-1097 GAL, 1111-1117 QZS, 1121-1127 BDS)
+            elif 1071 <= msg_id <= 1137 and len(payload) >= 18:
+                sat_mask = self._get_bits(payload, 73, 64)
+                num_sats = bin(sat_mask).count('1')
+                constellation = msg_id // 10
+                self.msm_sats[constellation] = num_sats
+                total_sats = sum(self.msm_sats.values())
+                if total_sats > 0:
+                    self.satellites_tracked = total_sats
+                    if self.survey_lat != 0.0 and not self.is_static_fixed:
+                        self._update_survey_statistics(self.survey_lat, self.survey_lon, self.survey_alt)
+        except Exception:
+            pass
+
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
         try:
@@ -434,17 +533,35 @@ class NTRIPBaseCaster:
                     self.rtcm_packet_count += 1
 
                     raw_byte_stream.extend(chunk)
-                    if len(raw_byte_stream) > 8192:
-                        raw_byte_stream = raw_byte_stream[-4096:]
+                    if len(raw_byte_stream) > 16384:
+                        raw_byte_stream = raw_byte_stream[-8192:]
 
-                    while b'\n' in raw_byte_stream:
-                        line_bytes, _, remaining = raw_byte_stream.partition(b'\n')
-                        raw_byte_stream = remaining
-                        if b'$' in line_bytes:
-                            dollar_idx = line_bytes.find(b'$')
-                            clean_str = line_bytes[dollar_idx:].decode('ascii', errors='ignore').strip()
-                            if clean_str:
-                                self._parse_survey_line(clean_str)
+                    # 1. Parse RTCM3 binary frames (0xD3)
+                    idx = 0
+                    while idx < len(raw_byte_stream):
+                        if raw_byte_stream[idx] == 0xD3:
+                            if idx + 3 <= len(raw_byte_stream):
+                                msg_len = ((raw_byte_stream[idx + 1] & 0x03) << 8) | raw_byte_stream[idx + 2]
+                                frame_len = msg_len + 6
+                                if idx + frame_len <= len(raw_byte_stream):
+                                    frame_payload = raw_byte_stream[idx + 3 : idx + 3 + msg_len]
+                                    if len(frame_payload) >= 2:
+                                        msg_id = (frame_payload[0] << 4) | (frame_payload[1] >> 4)
+                                        self._parse_rtcm3_payload(msg_id, frame_payload)
+                                    idx += frame_len
+                                    continue
+                        idx += 1
+
+                    # 2. Parse NMEA ASCII sentences if present
+                    if b'$' in raw_byte_stream:
+                        while b'\n' in raw_byte_stream:
+                            line_bytes, _, remaining = raw_byte_stream.partition(b'\n')
+                            raw_byte_stream = remaining
+                            if b'$' in line_bytes:
+                                dollar_idx = line_bytes.find(b'$')
+                                clean_str = line_bytes[dollar_idx:].decode('ascii', errors='ignore').strip()
+                                if clean_str:
+                                    self._parse_survey_line(clean_str)
 
                     # Multicast complete RTCM chunks to all active rover sockets (without holding lock)
                     with self.clients_lock:
@@ -523,6 +640,7 @@ class NTRIPBaseCaster:
             "survey_valid": self.survey_valid,
             "is_static_fixed": self.is_static_fixed,
             "locked_timestamp": self.locked_timestamp,
+            "saved_coords": self._get_saved_coords_info(),
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
             "remaining_sec": remaining_sec,
@@ -560,6 +678,16 @@ class NTRIPBaseCaster:
             def do_POST(self):
                 if self.path == '/api/lock_now':
                     success = caster_instance.lock_now()
+                    resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
+                    self.send_response(200 if success else 400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(resp)
+                elif self.path == '/api/use_saved':
+                    success = caster_instance.use_saved_now()
                     resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
                     self.send_response(200 if success else 400)
                     self.send_header('Content-Type', 'application/json')
@@ -822,6 +950,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
         <div class="button-group">
           <button id="lockNowBtn" onclick="lockPositionNow()" class="btn btn-warning">🔒 Lock Position Now</button>
+          <button id="useSavedBtn" onclick="useSavedCoords()" class="btn btn-secondary" style="display: none;">📌 Use Saved Position</button>
           <button id="recalBtn" onclick="recalibrateBase()" class="btn btn-secondary">🔄 Recalibrate</button>
         </div>
       </div>
@@ -922,6 +1051,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    async function useSavedCoords() {
+      if (confirm('Apply saved static base coordinates from previous session (0 mm drift)?')) {
+        try {
+          const res = await fetch('/api/use_saved', { method: 'POST' });
+          const json = await res.json();
+          if (json.status === 'ok') {
+            updateDashboard();
+          } else {
+            alert('Failed to apply saved coordinates.');
+          }
+        } catch (e) {
+          alert('Error: ' + e);
+        }
+      }
+    }
+
     async function recalibrateBase() {
       if (confirm('Clear saved coordinates and start a fresh 1-hour calibration survey?')) {
         try {
@@ -945,6 +1090,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const anchorStatus = document.getElementById('anchorStatus');
         const remainingEl = document.getElementById('surveyRemaining');
         const lockBtn = document.getElementById('lockNowBtn');
+        const useSavedBtn = document.getElementById('useSavedBtn');
 
         if (data.is_static_fixed) {
           badge.className = 'status-badge fixed';
@@ -958,6 +1104,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           remainingEl.textContent = `✅ Saved ${data.locked_timestamp || 'Active'}`;
           remainingEl.style.color = 'var(--accent)';
           lockBtn.style.display = 'none';
+          useSavedBtn.style.display = 'none';
         } else if (data.survey_valid) {
           badge.className = 'status-badge locked';
           statusIcon.textContent = '🎯';
@@ -970,6 +1117,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           remainingEl.textContent = '✅ Auto-Locking...';
           remainingEl.style.color = 'var(--success)';
           lockBtn.style.display = 'inline-flex';
+          useSavedBtn.style.display = 'none';
         } else {
           badge.className = 'status-badge';
           statusIcon.textContent = '⏳';
@@ -983,6 +1131,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           remainingEl.textContent = `${data.remaining_str} remaining`;
           remainingEl.style.color = '#38bdf8';
           lockBtn.style.display = 'inline-flex';
+
+          if (data.saved_coords) {
+            useSavedBtn.style.display = 'inline-flex';
+            useSavedBtn.textContent = `📌 Use Saved (${data.saved_coords.lat.toFixed(5)}°, ${data.saved_coords.lon.toFixed(5)}°)`;
+          } else {
+            useSavedBtn.style.display = 'none';
+          }
         }
 
         document.getElementById('surveyTime').textContent = `${data.survey_duration}s / ${data.survey_target_duration}s`;
@@ -1040,6 +1195,7 @@ def main() -> None:
     parser.add_argument('--survey-time', type=int, default=3600, help="Survey-In calibration target time in seconds (default: 3600 = 1 hr)")
     parser.add_argument('--survey-acc', type=float, default=0.5, help="Survey-In target accuracy in meters (default: 0.5m)")
     parser.add_argument('--recalibrate', action='store_true', help="Clear saved coordinates and force a fresh calibration")
+    parser.add_argument('--use-saved', action='store_true', help="Explicitly lock using previously saved static coordinates on boot")
     parser.add_argument('--fixed-lat', type=float, default=None, help="Manual fixed latitude override")
     parser.add_argument('--fixed-lon', type=float, default=None, help="Manual fixed longitude override")
     parser.add_argument('--fixed-alt', type=float, default=None, help="Manual fixed altitude override")
@@ -1055,6 +1211,7 @@ def main() -> None:
         survey_duration=args.survey_time,
         survey_accuracy=args.survey_acc,
         recalibrate=args.recalibrate,
+        use_saved=args.use_saved,
         fixed_lat=args.fixed_lat,
         fixed_lon=args.fixed_lon,
         fixed_alt=args.fixed_alt
