@@ -62,11 +62,11 @@ step_motion_controller:
     control_rate_hz: 20.0             # Control loop execution frequency
     
     # --- Turning Parameters (IMU Closed Loop) ---
-    turn_kp: 0.05                     # Proportional gain for turning
+    turn_kp: 0.08                     # Proportional gain for turning (snappier approach)
     turn_tolerance_deg: 2.0           # Heading error threshold in degrees
-    min_turn_speed: 0.45              # Minimum turning speed (rad/s) to overcome floor tire scrub
+    min_turn_speed: 0.70              # Assertive turn speed (rad/s) so it doesn't crawl at the end
     max_turn_speed: 1.5               # Maximum angular speed (rad/s)
-    turn_settle_time_s: 0.25          # Required stable duration before proceeding to drive
+    turn_settle_time_s: 0.10          # Fast settle time (0.10s) for immediate completion
 
     # --- Linear Driving Parameters ---
     default_linear_speed: 0.15        # Forward/reverse cruising speed (m/s)

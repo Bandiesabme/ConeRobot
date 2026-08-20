@@ -258,8 +258,8 @@ class StepMotionController(Node):
             error_deg = shortest_angular_diff_deg(self.target_absolute_heading, curr_h)
             turn_duration = (now - self.turn_start_time) if self.turn_start_time else 0.0
 
-            # Complete if within tolerance OR if close (<= 2.5 deg) and turning has stabilized for > 1.5s
-            if abs(error_deg) <= self.turn_tolerance_deg or (turn_duration > 1.5 and abs(error_deg) <= 3.0):
+            # Complete if within tolerance OR if close (<= 3.0 deg) and turning has stabilized for > 0.8s
+            if abs(error_deg) <= self.turn_tolerance_deg or (turn_duration > 0.8 and abs(error_deg) <= 3.0):
                 # Settle timer to ensure robot comes to a steady standstill
                 if self.turn_settle_start is None:
                     self.turn_settle_start = now
