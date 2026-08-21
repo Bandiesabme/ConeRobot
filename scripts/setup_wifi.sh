@@ -51,46 +51,15 @@ if [ -d "/sys/class/net/wlan1" ] || [ -d "/sys/class/net/wlx*" ]; then
     HAS_WLAN1=true
 fi
 
-echo "⚙️ [1/4] Setting up USB Wi-Fi persistent naming & smart hotplug rules..."
-# 1. Device naming rule
+echo "⚙️ [1/4] Configuring USB Wi-Fi naming rules & removing conflicting handlers..."
+# 1. Device naming rule for USB Wi-Fi dongles
 cat << 'EOF' > /etc/udev/rules.d/70-wifi-naming.rules
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtl8xxxu|rtw88_*|mt76*", NAME="wlan1"
 SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2357", NAME="wlan1"
 EOF
 
-# 2. Automated Smart Switching Script
-cat << 'EOF' > /usr/local/bin/wifi-hotplug-handler.sh
-#!/bin/bash
-ACTION="$1"
-
-if [ "$ACTION" = "add" ]; then
-    # Trigger netplan so wlan1 connects to Wi-Fi
-    netplan apply 2>/dev/null || true
-
-    # In background: wait until wlan1 has an IP address, THEN turn off wlan0 to eliminate RF interference
-    (
-        for i in {1..25}; do
-            sleep 1
-            if ip -4 addr show wlan1 2>/dev/null | grep -q "inet "; then
-                # wlan1 is connected with an IP -> shut down onboard wlan0 to eliminate interference
-                ip link set wlan0 down 2>/dev/null || true
-                break
-            fi
-        done
-    ) &
-elif [ "$ACTION" = "remove" ]; then
-    # When wlan1 is unplugged, restore wlan0 immediately
-    ip link set wlan0 up 2>/dev/null || true
-    netplan apply 2>/dev/null || true
-fi
-EOF
-chmod +x /usr/local/bin/wifi-hotplug-handler.sh
-
-# 3. Udev hotplug trigger
-cat << 'EOF' > /etc/udev/rules.d/99-wifi-hotplug.rules
-SUBSYSTEM=="net", ACTION=="add", KERNEL=="wlan1", RUN+="/usr/local/bin/wifi-hotplug-handler.sh add"
-SUBSYSTEM=="net", ACTION=="remove", KERNEL=="wlan1", RUN+="/usr/local/bin/wifi-hotplug-handler.sh remove"
-EOF
+# 2. PURGE any legacy link-down or hotplug kill scripts to prevent accidental lockouts
+rm -f /etc/udev/rules.d/99-wifi-hotplug.rules /usr/local/bin/wifi-hotplug-handler.sh /etc/NetworkManager/dispatcher.d/99-wifi-auto-switch.sh
 
 udevadm control --reload-rules && udevadm trigger 2>/dev/null || true
 
@@ -155,12 +124,6 @@ if [ "$IS_SSH" = true ]; then
     echo "   -> Active wireless link preserved so SSH is not disconnected."
     echo "   -> New Netplan configuration will cleanly take full effect upon reboot (sudo reboot)."
 else
-    # If on local console or non-SSH, apply immediately
-    if [ "$HAS_WLAN1" = true ]; then
-        echo "   -> External antenna (wlan1) active. Disabling onboard wlan0..."
-        ip link set wlan0 down 2>/dev/null || true
-        ip link set wlan1 up 2>/dev/null || true
-    fi
     systemctl restart NetworkManager 2>/dev/null || true
 fi
 
