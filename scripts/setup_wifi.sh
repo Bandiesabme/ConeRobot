@@ -114,17 +114,27 @@ EOF
 
 chmod 600 /etc/netplan/50-cloud-init.yaml
 
-echo "⚙️ [5/5] Applying network settings & optimizing interface state..."
+echo "⚙️ [5/5] Generating Netplan & configuring interface state (SSH-Safe)..."
 netplan generate 2>/dev/null || true
 
-# If wlan1 is currently plugged in, immediately shut down wlan0
-if [ "$HAS_WLAN1" = true ]; then
-    echo "   -> External antenna (wlan1) is active. Disabling onboard wlan0..."
-    ip link set wlan0 down 2>/dev/null || true
-    ip link set wlan1 up 2>/dev/null || true
+# Check if currently connected via SSH to avoid killing the active session
+IS_SSH=false
+if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ]; then
+    IS_SSH=true
 fi
 
-systemctl restart NetworkManager 2>/dev/null || true
+if [ "$IS_SSH" = true ]; then
+    echo "   -> Active SSH session detected. Network configurations written safely."
+    echo "   -> NetworkManager will cleanly switch to new Netplan configuration upon reboot (sudo reboot)."
+else
+    # If on local console or non-SSH, apply immediately
+    if [ "$HAS_WLAN1" = true ]; then
+        echo "   -> External antenna (wlan1) active. Disabling onboard wlan0..."
+        ip link set wlan0 down 2>/dev/null || true
+        ip link set wlan1 up 2>/dev/null || true
+    fi
+    systemctl restart NetworkManager 2>/dev/null || true
+fi
 
 echo ""
 echo "=================================================================="

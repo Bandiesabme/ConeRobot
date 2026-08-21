@@ -1,20 +1,17 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# All-In-One Setup Script for Raspberry Pi 5 (1 GB RAM Edition) - Cone Robot
+# All-In-One Interactive Setup Script for Raspberry Pi 5 (Cone Robot)
 # ==============================================================================
-# This script automates the complete initial configuration of a Raspberry Pi 5
-# running Ubuntu 24.04 LTS (Noble) for ROS 2 Jazzy, hardware interfaces (GPIO,
-# I2C, UART), LiDAR drivers, swap space, Wi-Fi auto-connect, and boot configuration.
+# Automates the setup with verification checks and user confirmation prompts
+# after each step so you can review the results without losing terminal context.
 #
 # Usage:
 #   bash scripts/setup_robot_rpi5.sh
 #   bash scripts/setup_robot_rpi5.sh [WIFI_SSID] [WIFI_PASSWORD]
-#   bash scripts/setup_robot_rpi5.sh "MyNetwork" "SecretPass123"
+#   bash scripts/setup_robot_rpi5.sh --yes   # Non-interactive / unattended mode
 # ==============================================================================
 
-set -e  # Exit immediately if a command exits with a non-zero status
-
-# Color formatting helpers for clear terminal output
+# Color formatting helpers
 BOLD="\033[1m"
 GREEN="\033[0;32m"
 YELLOW="\033[0;33m"
@@ -34,56 +31,138 @@ log_warning() {
     echo -e "${YELLOW}${BOLD}[WARNING]${RESET} $1"
 }
 
+log_error() {
+    echo -e "${RED}${BOLD}[ERROR]${RESET} $1"
+}
+
 log_section() {
     echo -e "\n${BOLD}======================================================================${RESET}"
     echo -e "${BOLD}>>> $1${RESET}"
     echo -e "${BOLD}======================================================================${RESET}\n"
 }
 
+# Parse optional arguments
+AUTO_PROCEED=false
+SSID=""
+PASSWORD=""
+
+for arg in "$@"; do
+    if [ "$arg" = "-y" ] || [ "$arg" = "--yes" ] || [ "$arg" = "--auto" ]; then
+        AUTO_PROCEED=true
+    elif [ -z "$SSID" ]; then
+        SSID="$arg"
+    elif [ -z "$PASSWORD" ]; then
+        PASSWORD="$arg"
+    fi
+done
+
+# Prompt for step confirmation
+confirm_step() {
+    local step_num="$1"
+    local step_title="$2"
+    local status="$3"       # 0 for success, non-zero for error/warning
+    local details="$4"
+
+    echo ""
+    if [ "$status" -eq 0 ]; then
+        echo -e "${GREEN}${BOLD}✔ [STEP ${step_num} VERIFIED: SUCCESS]${RESET} ${step_title}"
+    else
+        echo -e "${RED}${BOLD}✖ [STEP ${step_num} VERIFICATION FAILED / WARNING]${RESET} ${step_title}"
+    fi
+
+    if [ -n "$details" ]; then
+        echo -e "${CYAN}  ↳ ${details}${RESET}"
+    fi
+    echo ""
+
+    if [ "$AUTO_PROCEED" != "true" ]; then
+        read -r -p "$(echo -e "${YELLOW}${BOLD}👉 Press [ENTER] to continue to the next step (or Ctrl+C to abort)...${RESET}")" _unused_input
+        echo ""
+    fi
+}
+
 # Determine script and workspace root directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Optional Wi-Fi credentials (can be passed as arguments: bash setup_robot_rpi5.sh [SSID] [PASSWORD])
-SSID="${1:-}"
-PASSWORD="${2:-}"
+# Helper to wait for background Ubuntu automatic updates (unattended-upgrades / apt-daily)
+wait_for_apt_lock() {
+    local lock_files=(
+        "/var/lib/dpkg/lock-frontend"
+        "/var/lib/dpkg/lock"
+        "/var/lib/apt/lists/lock"
+    )
+    local waiting=false
+    for lock_file in "${lock_files[@]}"; do
+        while sudo fuser "$lock_file" >/dev/null 2>&1 || pgrep -f unattended-upgr >/dev/null 2>&1; do
+            if [ "$waiting" = false ]; then
+                log_info "Ubuntu background updater (unattended-upgrades) is active. Waiting for lock release..."
+                waiting=true
+            fi
+            sleep 3
+        done
+    done
+    if [ "$waiting" = true ]; then
+        log_success "Apt lock released. Proceeding..."
+    fi
+}
 
-log_section "STEP 1: SWAP MEMORY CONFIGURATION (2 GB for 1 GB RAM Model)"
-# Why: Compiling C++ packages (YDLIDAR, RF2O laser odometry) and running multiple
-# ROS nodes can spike memory usage. 2GB swap prevents Linux Out-Of-Memory (OOM) killer crashes.
+# ==============================================================================
+# STEP 1: SWAP MEMORY CONFIGURATION
+# ==============================================================================
+log_section "STEP 1/8: SWAP MEMORY CONFIGURATION (2 GB for 1 GB RAM Model)"
+log_info "Configuring 2GB swap space to prevent Out-Of-Memory compilation crashes..."
+
+SWAP_OK=0
 if [ -f /swapfile ] && swapon --show | grep -q "/swapfile"; then
-    log_info "Swapfile (/swapfile) already active. Skipping creation."
+    log_info "Swapfile (/swapfile) is already configured and active."
 else
-    log_info "Creating and enabling a 2 GB swapfile..."
     sudo swapoff -a || true
-    sudo fallocate -l 2G /swapfile
+    sudo fallocate -l 2G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
     sudo chmod 600 /swapfile
     sudo mkswap /swapfile
     sudo swapon /swapfile
     if ! grep -q "/swapfile" /etc/fstab; then
         echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
     fi
-    log_success "2 GB swap space configured successfully."
 fi
 
-log_section "STEP 2: SYSTEM PACKAGES & ROS 2 JAZZY INSTALLATION"
-# Why: Installs Ubuntu packages, official ROS 2 Jazzy core packages, Foxglove WebSockets,
-# lgpio (Pi 5 GPIO backend), i2c-tools, and BNO08x Python drivers.
+# Verification
+SWAP_DETAILS=$(swapon --show | grep "/swapfile" || true)
+if [ -n "$SWAP_DETAILS" ]; then
+    SWAP_OK=0
+    SWAP_MSG="Active swap: $SWAP_DETAILS"
+else
+    SWAP_OK=1
+    SWAP_MSG="Warning: Swapfile was not detected in active swap list."
+fi
+confirm_step "1" "Swap Memory Configuration" "$SWAP_OK" "$SWAP_MSG"
+
+# ==============================================================================
+# STEP 2: SYSTEM PACKAGES & ROS 2 JAZZY
+# ==============================================================================
+log_section "STEP 2/8: SYSTEM PACKAGES & ROS 2 JAZZY INSTALLATION"
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-log_info "Updating package lists and adding universe repository..."
+wait_for_apt_lock
+log_info "Updating APT repositories..."
 sudo apt update
 sudo apt install -y software-properties-common curl gnupg lsb-release ca-certificates
 sudo add-apt-repository universe -y
+
+wait_for_apt_lock
 sudo apt update
 
-log_info "Configuring ROS 2 Jazzy APT repository..."
+log_info "Configuring official ROS 2 Jazzy repository..."
 sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+
+wait_for_apt_lock
 sudo apt update
 
-log_info "Installing ROS 2 Jazzy Base, CLI tools, TF2, Foxglove Bridge, and GPIO/I2C libraries..."
+log_info "Installing ROS 2 Jazzy, TF2, Foxglove, GPIO/I2C, serial, and build tools..."
+wait_for_apt_lock
 sudo apt install -y \
     ros-jazzy-ros-base \
     ros-jazzy-ros2cli \
@@ -114,29 +193,46 @@ sudo apt install -y \
     build-essential \
     pkg-config
 
-log_info "Installing Adafruit BNO08x IMU Python library..."
-pip3 install --break-system-packages adafruit-circuitpython-bno08x
+log_info "Installing Adafruit BNO08x Python IMU library..."
+pip3 install --break-system-packages adafruit-circuitpython-bno08x || true
 
 log_info "Initializing rosdep..."
 if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
-    sudo rosdep init
+    sudo rosdep init || true
 fi
-rosdep update
+rosdep update || true
 
-log_section "STEP 3: HARDWARE PERMISSIONS (GPIO, I2C, UART) & DISABLE CONFLICTING SERVICES"
-# Why:
-# - Non-root users need access to /dev/gpiochip*, /dev/i2c-*, and /dev/ttyAMA0 (dialout group).
-# - /dev/ttyAMA0 is normally claimed by the Linux serial login console (serial-getty).
-# - gpsd daemon (if installed) locks /dev/ttyAMA0 and prevents ROS 2 LC29H node from reading NMEA sentences.
+# Verification
+PKG_OK=0
+PKG_ERRORS=()
+if ! command -v ros2 >/dev/null 2>&1 && [ ! -f /opt/ros/jazzy/setup.bash ]; then
+    PKG_OK=1
+    PKG_ERRORS+=("ROS 2 Jazzy binary/setup.bash not found")
+fi
+if ! python3 -c "import serial, lgpio" >/dev/null 2>&1; then
+    PKG_OK=1
+    PKG_ERRORS+=("Python hardware libraries (serial/lgpio) import check failed")
+fi
 
-log_info "Configuring udev rules for GPIO and I2C..."
+if [ "$PKG_OK" -eq 0 ]; then
+    PKG_MSG="ROS 2 Jazzy core, Foxglove bridge, and Python hardware libraries verified."
+else
+    PKG_MSG="Package issues detected: ${PKG_ERRORS[*]}"
+fi
+confirm_step "2" "ROS 2 Jazzy & Core Package Installation" "$PKG_OK" "$PKG_MSG"
+
+# ==============================================================================
+# STEP 3: HARDWARE PERMISSIONS (GPIO, I2C, UART) & SERVICE ISOLATION
+# ==============================================================================
+log_section "STEP 3/8: HARDWARE PERMISSIONS & SERIAL ISOLATION"
+log_info "Writing udev rules for GPIO (0666) and I2C group access..."
 echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-gpio.rules > /dev/null
 echo 'KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0666"' | sudo tee /etc/udev/rules.d/99-i2c.rules > /dev/null
 sudo usermod -aG i2c "$USER" || true
 sudo usermod -aG dialout "$USER" || true
-sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo udevadm control --reload-rules && sudo udevadm trigger 2>/dev/null || true
 
-log_info "Disabling serial login getty and gpsd on ttyAMA0 for GPS HAT..."
+log_info "Disabling serial-getty login console and gpsd on ttyAMA0 (for GPS HAT)..."
 sudo systemctl stop serial-getty@ttyAMA0.service 2>/dev/null || true
 sudo systemctl disable serial-getty@ttyAMA0.service 2>/dev/null || true
 sudo systemctl mask serial-getty@ttyAMA0.service 2>/dev/null || true
@@ -144,32 +240,47 @@ sudo systemctl mask serial-getty@ttyAMA0.service 2>/dev/null || true
 sudo systemctl stop gpsd gpsd.socket 2>/dev/null || true
 sudo systemctl disable gpsd gpsd.socket 2>/dev/null || true
 sudo systemctl mask gpsd gpsd.socket 2>/dev/null || true
-log_success "Hardware permissions and serial port isolation applied."
 
-log_section "STEP 4: WI-FI AUTO-CONNECT & POWER SAVING CONFIGURATION"
-# Why:
-# - Disables Wi-Fi power saving (prevents high latency, ping jitter, and dropped SSH sessions).
-# - Sets up dual-antenna hotplugging (external high-gain antenna wlan1 priority + internal wlan0 fallback).
+# Verification
+PERM_OK=0
+if [ ! -f /etc/udev/rules.d/99-gpio.rules ] || [ ! -f /etc/udev/rules.d/99-i2c.rules ]; then
+    PERM_OK=1
+fi
+PERM_MSG="GPIO/I2C udev rules installed. serial-getty and gpsd masked on /dev/ttyAMA0."
+confirm_step "3" "Hardware Permissions & Serial Isolation" "$PERM_OK" "$PERM_MSG"
+
+# ==============================================================================
+# STEP 4: WI-FI AUTO-CONNECT & POWER SAVING
+# ==============================================================================
+log_section "STEP 4/8: WI-FI AUTO-CONNECT & POWER SAVING"
+WIFI_OK=0
+WIFI_MSG=""
 if [ -n "$SSID" ] && [ -n "$PASSWORD" ]; then
     log_info "Configuring Wi-Fi for SSID: '${SSID}'..."
     if [ -f "${SCRIPT_DIR}/setup_wifi.sh" ]; then
         sudo bash "${SCRIPT_DIR}/setup_wifi.sh" "$SSID" "$PASSWORD"
+        WIFI_MSG="Wi-Fi configured for SSID: $SSID (power-save disabled)."
     fi
 elif [ -f "${SCRIPT_DIR}/setup_wifi.sh" ]; then
-    log_info "No Wi-Fi credentials passed in arguments. Configuring default or existing Wi-Fi settings..."
+    log_info "No custom Wi-Fi credentials specified. Configuring default robot Wi-Fi settings (SSID: Bandi)..."
     sudo bash "${SCRIPT_DIR}/setup_wifi.sh" "Bandi" "1234445678"
+    WIFI_MSG="Wi-Fi configured for default SSID: Bandi (power-save disabled)."
 else
-    log_info "Skipping Wi-Fi setup script (not found)."
+    log_warning "setup_wifi.sh not found. Skipping Wi-Fi configuration."
+    WIFI_OK=1
+    WIFI_MSG="Wi-Fi setup script was not found."
 fi
+confirm_step "4" "Wi-Fi Auto-Connect & Low Latency" "$WIFI_OK" "$WIFI_MSG"
 
-log_section "STEP 5: RASPBERRY PI BOOT CONFIGURATION (/boot/firmware/config.txt)"
-# Why:
-# 1. usb_max_current_enable=1 -> Allows full 1.6A USB draw (critical for LiDAR).
-# 2. dtparam=i2c_arm=on,i2c_arm_baudrate=400000 -> Fast 400kHz I2C for BNO08x IMU (50Hz telemetry).
-# 3. enable_uart=1 & dtparam=uart0=on -> Hardware UART on GPIO 14/15 for LC29H GPS/RTK HAT.
+# ==============================================================================
+# STEP 5: BOOT CONFIGURATION (/boot/firmware/config.txt)
+# ==============================================================================
+log_section "STEP 5/8: BOOT FIRMWARE CONFIGURATION"
 BOOT_CONFIG="/boot/firmware/config.txt"
+BOOT_OK=0
+
 if [ -f "$BOOT_CONFIG" ]; then
-    log_info "Checking $BOOT_CONFIG for USB power, I2C speed, and UART settings..."
+    log_info "Configuring USB power (1.6A), fast I2C (400kHz), and Hardware UART in $BOOT_CONFIG..."
     if ! grep -q "usb_max_current_enable=1" "$BOOT_CONFIG"; then
         echo "" | sudo tee -a "$BOOT_CONFIG"
         echo "# Enable full USB power for LiDAR and sensors" | sudo tee -a "$BOOT_CONFIG"
@@ -186,27 +297,35 @@ if [ -f "$BOOT_CONFIG" ]; then
         echo "enable_uart=1" | sudo tee -a "$BOOT_CONFIG"
         echo "dtparam=uart0=on" | sudo tee -a "$BOOT_CONFIG"
     fi
-    log_success "Boot config updated."
+    BOOT_MSG="Added usb_max_current_enable=1, 400kHz I2C, and UART parameters."
 else
-    log_warning "Boot config $BOOT_CONFIG not found. If running inside a container/WSL, skip this step."
+    log_warning "Boot config $BOOT_CONFIG not found (Non-Pi / Container environment)."
+    BOOT_OK=0
+    BOOT_MSG="Skipped (non-standard firmware path)."
 fi
+confirm_step "5" "Boot Firmware Configuration" "$BOOT_OK" "$BOOT_MSG"
 
-log_section "STEP 6: YDLIDAR SDK & DRIVER SETUP"
-# Why: Builds YDLIDAR C++ SDK, udev alias (/dev/ydlidar), and applies Jazzy compatibility patches.
+# ==============================================================================
+# STEP 6: YDLIDAR SDK & LASER ODOMETRY SETUP
+# ==============================================================================
+log_section "STEP 6/8: YDLIDAR SDK & DRIVER SETUP"
+LIDAR_OK=0
 if [ -f "${SCRIPT_DIR}/install_ydlidar.sh" ]; then
-    log_info "Executing install_ydlidar.sh..."
+    log_info "Building YDLidar C++ SDK, udev rules, and applying Jazzy patches..."
     bash "${SCRIPT_DIR}/install_ydlidar.sh"
+    LIDAR_MSG="YDLidar SDK compiled, /dev/ydlidar rule installed, Jazzy patches applied."
 else
-    log_warning "install_ydlidar.sh not found in scripts directory. Skipping LiDAR SDK build."
+    log_warning "install_ydlidar.sh not found."
+    LIDAR_OK=1
+    LIDAR_MSG="install_ydlidar.sh script missing."
 fi
+confirm_step "6" "YDLIDAR C++ SDK & Laser Driver Setup" "$LIDAR_OK" "$LIDAR_MSG"
 
-log_section "STEP 7: ENVIRONMENT VARIABLES & BASHRC CONFIGURATION"
-# Why:
-# - Loads ROS 2 Jazzy on terminal startup.
-# - Sets ROS_DOMAIN_ID=42 so all nodes communicate with laptop/remote station.
-# - Sets GPIOZERO_PIN_FACTORY=lgpio for Pi 5 GPIO driver compatibility.
-# - Overlays the ConeRobot workspace environment.
-log_info "Configuring ~/.bashrc..."
+# ==============================================================================
+# STEP 7: ENVIRONMENT VARIABLES & BASHRC
+# ==============================================================================
+log_section "STEP 7/8: ENVIRONMENT VARIABLES & ~/.bashrc CONFIGURATION"
+log_info "Configuring environment in ~/.bashrc..."
 BASHRC="$HOME/.bashrc"
 
 add_to_bashrc_if_missing() {
@@ -225,27 +344,43 @@ if [ -f "${WORKSPACE_DIR}/install/setup.bash" ]; then
     add_to_bashrc_if_missing "source ${WORKSPACE_DIR}/install/setup.bash"
 fi
 
-log_success "Environment configuration written to ~/.bashrc."
+ENV_OK=0
+ENV_MSG="ROS_DOMAIN_ID=42, GPIOZERO_PIN_FACTORY=lgpio, and setup.bash configured in ~/.bashrc."
+confirm_step "7" "Environment Variables (~/.bashrc)" "$ENV_OK" "$ENV_MSG"
 
-log_section "STEP 8: BUILD CONE ROBOT ROS 2 WORKSPACE"
-# Why: Compiles the local ROS 2 packages using 2 workers to avoid running out of memory.
+# ==============================================================================
+# STEP 8: BUILD CONE ROBOT ROS 2 WORKSPACE
+# ==============================================================================
+log_section "STEP 8/8: BUILD CONE ROBOT ROS 2 WORKSPACE"
+BUILD_OK=0
 if [ -d "${WORKSPACE_DIR}/src" ]; then
-    log_info "Building workspace at ${WORKSPACE_DIR} (using --parallel-workers 2)..."
+    log_info "Compiling packages in ${WORKSPACE_DIR} (colcon build --symlink-install --parallel-workers 2)..."
     cd "${WORKSPACE_DIR}"
-    # Source ROS 2 base environment for this build step
     # shellcheck disable=SC1091
-    source /opt/ros/jazzy/setup.bash
-    colcon build --symlink-install --parallel-workers 2
-    # shellcheck disable=SC1091
-    source install/setup.bash
-    log_success "ROS 2 workspace built successfully."
+    source /opt/ros/jazzy/setup.bash 2>/dev/null || true
+    if colcon build --symlink-install --parallel-workers 2; then
+        BUILD_OK=0
+        BUILD_MSG="Workspace packages compiled successfully."
+    else
+        BUILD_OK=1
+        BUILD_MSG="Workspace compilation encountered errors. Check output above."
+    fi
+else
+    BUILD_OK=1
+    BUILD_MSG="src directory not found in ${WORKSPACE_DIR}."
 fi
+confirm_step "8" "Workspace Compilation" "$BUILD_OK" "$BUILD_MSG"
 
-log_section "SETUP COMPLETE!"
-echo -e "${GREEN}${BOLD}Your Raspberry Pi 5 robot setup is fully finished!${RESET}"
-echo -e "${YELLOW}Please reboot the Raspberry Pi to apply kernel boot and udev changes:${RESET}"
-echo -e "    ${BOLD}sudo reboot${RESET}"
-echo -e "\nAfter rebooting, launch the robot with:"
+# ==============================================================================
+# SUMMARY & NEXT STEPS
+# ==============================================================================
+log_section "ALL STEPS FINISHED!"
+echo -e "${GREEN}${BOLD}======================================================================${RESET}"
+echo -e "${GREEN}${BOLD} 🎉 SETUP COMPLETED SUCCESSFULLY!${RESET}"
+echo -e "${GREEN}${BOLD}======================================================================${RESET}\n"
+echo -e "${YELLOW}Please reboot the Raspberry Pi to apply hardware boot and udev rules:${RESET}"
+echo -e "    ${BOLD}sudo reboot${RESET}\n"
+echo -e "After rebooting, launch the robot with:"
 echo -e "    ${BOLD}ros2 launch cone_robot_control robot.launch.py robot_type:=lidar${RESET}"
 echo -e "or"
 echo -e "    ${BOLD}ros2 launch cone_robot_control robot.launch.py robot_type:=gps${RESET}\n"

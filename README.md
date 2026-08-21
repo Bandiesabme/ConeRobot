@@ -66,15 +66,20 @@ The system uses a **Remote-Brain Offloaded Compute Architecture**: heavy decisio
 
 ## 4. Quickstart Testing Commands
 
-### On Raspberry Pi 5 (One-Time Setup & Hardware Drivers):
+### On Raspberry Pi 5 (One-Time Setup & Hardware Drivers via SSH):
 ```bash
+# Connect over SSH and navigate to repository:
+ssh conerobot@<PI5_IP>
 cd ~/github/ConeRobot
 git pull origin main
 
-# One-time automated system setup & driver compilation (Run once on new Pi):
-bash scripts/setup_robot_rpi5.sh
+# Optional: Run inside tmux so Wi-Fi/SSH hiccups won't cancel the setup:
+tmux new -s setup
 
-# Or build/rebuild the workspace:
+# One-time automated interactive setup & driver compilation:
+bash scripts/setup_robot_rpi5.sh "Bandi" "1234445678"
+
+# Or build/rebuild the workspace manually later:
 colcon build --symlink-install --parallel-workers 2
 source install/setup.bash
 
@@ -84,6 +89,9 @@ ros2 launch cone_robot_control robot.launch.py robot_type:=gps
 # Option B: Launch for LiDAR Robot (Motors + IMU + YDLIDAR + Step Controller)
 ros2 launch cone_robot_control robot.launch.py robot_type:=lidar
 ```
+
+> [!TIP]
+> **If Wi-Fi drops during setup over SSH**: Simply reconnect with `ssh conerobot@<PI5_IP>` and run `tmux attach -t setup` to resume right where you left off.
 
 ### Motion Step Control Testing (`Turn X° & Drive Y cm`):
 Send discrete turn and drive commands on `/cmd_step` (`Vector3: x=distance_cm, z=turn_degrees`):

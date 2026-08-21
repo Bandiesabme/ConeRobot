@@ -70,6 +70,11 @@ if [ -f "$PATCH_SCRIPT" ]; then
     python3 "$PATCH_SCRIPT" "$DRIVER_DEST/src/ydlidar_ros2_driver_node.cpp"
 fi
 
+PATCH_RF2O_SCRIPT="$SCRIPT_DIR/patch_rf2o_jazzy.py"
+if [ -f "$PATCH_RF2O_SCRIPT" ] && [ -d "$RF2O_DEST" ]; then
+    python3 "$PATCH_RF2O_SCRIPT" "$RF2O_DEST"
+fi
+
 echo "=== 4. Setting up USB udev Rules ==="
 UDEV_SCRIPT="$SCRIPT_DIR/init_ydlidar_udev.sh"
 if [ -f "$UDEV_SCRIPT" ]; then

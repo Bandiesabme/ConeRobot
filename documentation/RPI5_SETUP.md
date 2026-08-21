@@ -29,22 +29,52 @@ To keep the system stable and avoid out-of-memory crashes on the 1 GB RAM board,
 
 ## 2. System Preparation (Run Once on RPi 5)
 
-### Option 1: Automated All-In-One Setup (Recommended)
+### Option 1: Automated All-In-One Setup via SSH (Recommended)
 
-Run the single unified script to configure swap, install ROS 2 Jazzy, build drivers, set udev rules, configure Wi-Fi auto-connect / disable power-saving, configure boot params, and compile the workspace:
+> [!TIP]
+> **Setting Up Over SSH via Wi-Fi**:
+> When running the setup over an SSH Wi-Fi connection, always run inside **`tmux`**. If your laptop goes to sleep, changes Wi-Fi, or drops the connection, the script will continue running in the background on the Pi without aborting.
 
 ```bash
-cd ~/github/ConeRobot  # or your workspace directory
+# 1. Connect to your Raspberry Pi 5 over SSH
+ssh conerobot@<PI5_IP>
+
+# 2. Navigate to the repository
+cd ~/github/ConeRobot
 git pull origin main
 
-# Standard setup (uses default SSID 'Bandi'):
+# 3. Start a persistent tmux session (guarantees SSH drops won't abort the build)
+tmux new -s setup
+
+# 4. Run the interactive setup script:
+# Option A: Standard setup (SSID 'Bandi')
 bash scripts/setup_robot_rpi5.sh
 
-# Or with your custom Wi-Fi network credentials:
+# Option B: With your custom Wi-Fi network credentials
 bash scripts/setup_robot_rpi5.sh "YOUR_WIFI_SSID" "YOUR_WIFI_PASSWORD"
 
+# 5. Reboot when finished to apply all boot & hardware settings:
 sudo reboot
 ```
+
+> **What happens if your Wi-Fi drops or your laptop goes to sleep?**
+> The Raspberry Pi continues running the setup script in the background inside `tmux` without interruption.
+> 
+> **How to resume your session:**
+> 1. Reconnect over SSH:
+>    ```bash
+>    ssh conerobot@<PI5_IP>
+>    ```
+> 2. Re-attach to your setup terminal:
+>    ```bash
+>    tmux attach -t setup    # (or simply: tmux a)
+>    ```
+> 3. Your entire terminal screen, output history, and interactive `[ENTER]` prompt will reappear right where you left off.
+> 
+> **Useful `tmux` Shortcuts**:
+> - **Detach session without closing**: Press `Ctrl + B`, release, then press `D`.
+> - **Scroll through previous terminal logs**: Press `Ctrl + B`, release, then press `[` (use Arrow Keys or `Page Up` / `Page Down` to scroll; press `Q` to exit scroll mode).
+> - **List active sessions**: `tmux ls`
 
 ---
 
