@@ -210,7 +210,7 @@ Raspberry Pi 5 Pinout Allocation:
 ## 4. Power Stability & Brownout Prevention
 
 1. **Step-Down Converter Voltage:** Set your 5V 5A DC-DC buck converter output to **5.15V – 5.20V** (official Raspberry Pi spec) to compensate for voltage drop across the USB-C cable under heavy load.
-2. **Buffer Capacitor:** Add a **1000 µF to 2200 µF (10V–16V)** electrolytic capacitor across the 5V power output to absorb transient current spikes when motors and LiDAR spin up.
+
 3. **Motor Cable Twisting:** Tightly twist positive and negative wires between the Cytron MDD10 driver and motors to cancel out magnetic interference on the IMU.
 
 ---

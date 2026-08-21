@@ -51,39 +51,48 @@ if [ -d "/sys/class/net/wlan1" ] || [ -d "/sys/class/net/wlx*" ]; then
     HAS_WLAN1=true
 fi
 
-echo "⚙️ [1/5] Setting up USB Wi-Fi persistent udev naming & hotplug rules..."
-# TP-Link and generic Realtek/MediaTek USB dongles
+echo "⚙️ [1/4] Setting up USB Wi-Fi persistent naming & smart hotplug rules..."
+# 1. Device naming rule
 cat << 'EOF' > /etc/udev/rules.d/70-wifi-naming.rules
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtl8xxxu|rtw88_*|mt76*", NAME="wlan1"
 SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2357", NAME="wlan1"
 EOF
 
-# Auto-hotplug: disable wlan0 when wlan1 is connected, re-enable when unplugged
+# 2. Automated Smart Switching Script
+cat << 'EOF' > /usr/local/bin/wifi-hotplug-handler.sh
+#!/bin/bash
+ACTION="$1"
+
+if [ "$ACTION" = "add" ]; then
+    # Trigger netplan so wlan1 connects to Wi-Fi
+    netplan apply 2>/dev/null || true
+
+    # In background: wait until wlan1 has an IP address, THEN turn off wlan0 to eliminate RF interference
+    (
+        for i in {1..25}; do
+            sleep 1
+            if ip -4 addr show wlan1 2>/dev/null | grep -q "inet "; then
+                # wlan1 is connected with an IP -> shut down onboard wlan0 to eliminate interference
+                ip link set wlan0 down 2>/dev/null || true
+                break
+            fi
+        done
+    ) &
+elif [ "$ACTION" = "remove" ]; then
+    # When wlan1 is unplugged, restore wlan0 immediately
+    ip link set wlan0 up 2>/dev/null || true
+    netplan apply 2>/dev/null || true
+fi
+EOF
+chmod +x /usr/local/bin/wifi-hotplug-handler.sh
+
+# 3. Udev hotplug trigger
 cat << 'EOF' > /etc/udev/rules.d/99-wifi-hotplug.rules
-ACTION=="add", SUBSYSTEM=="net", KERNEL=="wlan1", RUN+="/usr/bin/ip link set wlan0 down"
-ACTION=="remove", SUBSYSTEM=="net", KERNEL=="wlan1", RUN+="/usr/bin/ip link set wlan0 up"
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="wlan1", RUN+="/usr/local/bin/wifi-hotplug-handler.sh add"
+SUBSYSTEM=="net", ACTION=="remove", KERNEL=="wlan1", RUN+="/usr/local/bin/wifi-hotplug-handler.sh remove"
 EOF
 
 udevadm control --reload-rules && udevadm trigger 2>/dev/null || true
-
-echo "⚙️ [2/5] Creating NetworkManager Dispatcher auto-switch script..."
-mkdir -p /etc/NetworkManager/dispatcher.d/
-cat << 'EOF' > /etc/NetworkManager/dispatcher.d/99-wifi-auto-switch.sh
-#!/bin/bash
-INTERFACE="$1"
-ACTION="$2"
-
-if [ "$INTERFACE" = "wlan1" ]; then
-    if [ "$ACTION" = "up" ]; then
-        # External antenna active -> turn off internal Wi-Fi to stop dual-radio conflict
-        ip link set wlan0 down 2>/dev/null || true
-    elif [ "$ACTION" = "down" ]; then
-        # External antenna removed -> restore internal Wi-Fi fallback
-        ip link set wlan0 up 2>/dev/null || true
-    fi
-fi
-EOF
-chmod +x /etc/NetworkManager/dispatcher.d/99-wifi-auto-switch.sh
 
 echo "⚙️ [3/5] Disabling Wi-Fi power save mode permanently (prevents SSH lag & drops)..."
 if ! command -v iw >/dev/null 2>&1; then
