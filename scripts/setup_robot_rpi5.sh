@@ -262,9 +262,9 @@ if [ -n "$SSID" ] && [ -n "$PASSWORD" ]; then
         WIFI_MSG="Wi-Fi configured for SSID: $SSID (power-save disabled)."
     fi
 elif [ -f "${SCRIPT_DIR}/setup_wifi.sh" ]; then
-    log_info "No custom Wi-Fi credentials specified. Configuring default robot Wi-Fi settings (SSID: Bandi)..."
-    sudo SSH_CONNECTION="$SSH_CONNECTION" SSH_CLIENT="$SSH_CLIENT" SSH_TTY="$SSH_TTY" bash "${SCRIPT_DIR}/setup_wifi.sh" "Bandi" "1234445678"
-    WIFI_MSG="Wi-Fi configured for default SSID: Bandi (power-save disabled)."
+    log_info "No custom Wi-Fi arguments provided. Auto-detecting existing Wi-Fi credentials or using default (Bandi)..."
+    sudo SSH_CONNECTION="$SSH_CONNECTION" SSH_CLIENT="$SSH_CLIENT" SSH_TTY="$SSH_TTY" bash "${SCRIPT_DIR}/setup_wifi.sh"
+    WIFI_MSG="Wi-Fi configured for external antenna/extender (power-save disabled)."
 else
     log_warning "setup_wifi.sh not found. Skipping Wi-Fi configuration."
     WIFI_OK=1

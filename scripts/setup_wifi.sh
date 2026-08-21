@@ -22,8 +22,24 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-SSID="${1:-Bandi}"
-PASSWORD="${2:-1234445678}"
+SSID="${1:-}"
+PASSWORD="${2:-}"
+
+# Auto-detect existing Wi-Fi credentials from current Netplan config if not passed
+EXISTING_NETPLAN="/etc/netplan/50-cloud-init.yaml"
+if [ -z "$SSID" ] && [ -f "$EXISTING_NETPLAN" ]; then
+    DETECTED_SSID=$(grep -E '^\s+["'\''a-zA-Z0-9_-]+":' "$EXISTING_NETPLAN" | grep -v 'wlan' | grep -v 'version' | head -n 1 | tr -d '": \t' || true)
+    DETECTED_PASS=$(grep -E 'password:\s*' "$EXISTING_NETPLAN" | head -n 1 | sed 's/.*password:\s*//; s/["'\'']//g; s/\s*$//' || true)
+    if [ -n "$DETECTED_SSID" ] && [ -n "$DETECTED_PASS" ]; then
+        SSID="$DETECTED_SSID"
+        PASSWORD="$DETECTED_PASS"
+        echo "🔍 Auto-detected existing Wi-Fi configuration (SSID: '${SSID}')"
+    fi
+fi
+
+# Fallback to default credentials if none provided and none detected
+SSID="${SSID:-Bandi}"
+PASSWORD="${PASSWORD:-1234445678}"
 
 echo "=================================================================="
 echo " 📶 Configuring Wi-Fi Auto-Connect for SSID: ${SSID}"
