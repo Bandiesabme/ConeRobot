@@ -146,10 +146,27 @@ export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
 wait_for_apt_lock
-log_info "Updating APT repositories..."
-sudo apt update
+log_info "Ensuring full Ubuntu 24.04 repository sources (noble, noble-updates, noble-security, universe, multiverse)..."
+
+# Fix incomplete Ubuntu 24.04 noble repository sources (prevents 'unmet dependencies / held broken packages')
+UBUNTU_SOURCES="/etc/apt/sources.list.d/ubuntu.sources"
+if [ -f "$UBUNTU_SOURCES" ]; then
+    sudo tee "$UBUNTU_SOURCES" > /dev/null << 'EOF'
+Types: deb
+URIs: http://ports.ubuntu.com/ubuntu-ports/
+Suites: noble noble-updates noble-security noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+fi
+
+sudo apt update || true
+sudo apt --fix-broken install -y || true
+
+log_info "Installing prerequisite utilities..."
 sudo apt install -y software-properties-common curl gnupg lsb-release ca-certificates
-sudo add-apt-repository universe -y
+sudo add-apt-repository universe -y || true
+sudo add-apt-repository multiverse -y || true
 
 wait_for_apt_lock
 sudo apt update
@@ -194,13 +211,15 @@ sudo apt install -y \
     pkg-config
 
 log_info "Installing Adafruit BNO08x Python IMU library..."
-pip3 install --break-system-packages adafruit-circuitpython-bno08x || true
+python3 -m pip install --break-system-packages adafruit-circuitpython-bno08x || true
 
 log_info "Initializing rosdep..."
-if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
-    sudo rosdep init || true
+if command -v rosdep >/dev/null 2>&1; then
+    if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+        sudo rosdep init || true
+    fi
+    rosdep update || true
 fi
-rosdep update || true
 
 # Verification
 PKG_OK=0
