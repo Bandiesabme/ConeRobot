@@ -70,7 +70,9 @@ EOF
 chmod +x /etc/NetworkManager/dispatcher.d/99-wifi-auto-switch.sh
 
 echo "⚙️ [3/5] Disabling Wi-Fi power save mode permanently (prevents SSH lag & drops)..."
-apt-get update -qq && apt-get install -y -qq iw
+if ! command -v iw >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq iw
+fi
 
 # NetworkManager power save override (2 = disable powersave)
 mkdir -p /etc/NetworkManager/conf.d/
@@ -119,13 +121,14 @@ netplan generate 2>/dev/null || true
 
 # Check if currently connected via SSH to avoid killing the active session
 IS_SSH=false
-if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ]; then
+if [ -n "$SSH_CONNECTION" ] || [ -n "$SSH_CLIENT" ] || [ -n "$SSH_TTY" ] || who am i 2>/dev/null | grep -q "(.*)" || pstree -s $$ 2>/dev/null | grep -q sshd; then
     IS_SSH=true
 fi
 
 if [ "$IS_SSH" = true ]; then
     echo "   -> Active SSH session detected. Network configurations written safely."
-    echo "   -> NetworkManager will cleanly switch to new Netplan configuration upon reboot (sudo reboot)."
+    echo "   -> Active wireless link preserved so SSH is not disconnected."
+    echo "   -> New Netplan configuration will cleanly take full effect upon reboot (sudo reboot)."
 else
     # If on local console or non-SSH, apply immediately
     if [ "$HAS_WLAN1" = true ]; then
