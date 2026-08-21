@@ -51,15 +51,52 @@ if [ -d "/sys/class/net/wlan1" ] || [ -d "/sys/class/net/wlx*" ]; then
     HAS_WLAN1=true
 fi
 
-echo "⚙️ [1/4] Configuring USB Wi-Fi naming rules & removing conflicting handlers..."
-# 1. Device naming rule for USB Wi-Fi dongles
+echo "⚙️ [1/4] Installing automated Wi-Fi dongle switcher (systemd background service)..."
+# 1. Device naming rule
 cat << 'EOF' > /etc/udev/rules.d/70-wifi-naming.rules
 SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rtl8xxxu|rtw88_*|mt76*", NAME="wlan1"
 SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="2357", NAME="wlan1"
 EOF
 
-# 2. PURGE any legacy link-down or hotplug kill scripts to prevent accidental lockouts
-rm -f /etc/udev/rules.d/99-wifi-hotplug.rules /usr/local/bin/wifi-hotplug-handler.sh /etc/NetworkManager/dispatcher.d/99-wifi-auto-switch.sh
+# 2. Switcher background worker
+cat << 'EOF' > /usr/local/bin/wifi-dongle-switcher.sh
+#!/bin/bash
+IFACE="${1:-wlan1}"
+
+# Trigger netplan in systemd context so wlan1 starts connection & DHCP
+netplan apply 2>/dev/null || true
+
+# Wait up to 30 seconds for wlan1 to acquire an IPv4 address
+for i in {1..30}; do
+    sleep 1
+    if ip -4 addr show "$IFACE" 2>/dev/null | grep -q "inet "; then
+        # Verified: wlan1 is online and has an IP!
+        # Now safely disable internal wlan0 to eliminate 2.4GHz radio interference
+        ip link set wlan0 down 2>/dev/null || true
+        exit 0
+    fi
+done
+EOF
+chmod +x /usr/local/bin/wifi-dongle-switcher.sh
+
+# 3. Systemd background service unit
+cat << 'EOF' > /etc/systemd/system/wifi-dongle-switch@.service
+[Unit]
+Description=Automatic Wi-Fi USB Dongle Online & Interference Switcher for %I
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wifi-dongle-switcher.sh %I
+KillMode=process
+EOF
+systemctl daemon-reload
+
+# 4. Udev trigger to launch systemd background service on insert, and restore wlan0 on unplug
+cat << 'EOF' > /etc/udev/rules.d/99-wifi-dongle.rules
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="wlan1", TAG+="systemd", ENV{SYSTEMD_WANTS}="wifi-dongle-switch@wlan1.service"
+SUBSYSTEM=="net", ACTION=="remove", KERNEL=="wlan1", RUN+="/usr/bin/ip link set wlan0 up"
+EOF
 
 udevadm control --reload-rules && udevadm trigger 2>/dev/null || true
 
