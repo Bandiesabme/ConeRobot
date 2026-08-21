@@ -210,6 +210,8 @@ sudo apt install -y \
     python3-lgpio \
     python3-smbus \
     python3-pip \
+    python3-setuptools \
+    python3-wheel \
     python3-serial \
     libboost-dev \
     i2c-tools \
@@ -220,8 +222,9 @@ sudo apt install -y \
     build-essential \
     pkg-config
 
-log_info "Installing Adafruit BNO08x Python IMU library..."
-python3 -m pip install --break-system-packages adafruit-circuitpython-bno08x || true
+log_info "Installing Adafruit BNO08x Python IMU library and CircuitPython Blinka layer..."
+sudo python3 -m pip install --break-system-packages adafruit-circuitpython-bno08x adafruit-blinka || \
+python3 -m pip install --break-system-packages adafruit-circuitpython-bno08x adafruit-blinka || true
 
 log_info "Initializing rosdep..."
 if command -v rosdep >/dev/null 2>&1; then
@@ -244,7 +247,8 @@ if ! python3 -c "import serial, lgpio" >/dev/null 2>&1; then
 fi
 if ! python3 -c "import adafruit_bno08x" >/dev/null 2>&1; then
     PKG_OK=1
-    PKG_ERRORS+=("Adafruit BNO08x Python library missing")
+    BNO_ERR=$(python3 -c "import adafruit_bno08x" 2>&1 || true)
+    PKG_ERRORS+=("Adafruit BNO08x Python library missing ($BNO_ERR)")
 fi
 
 if [ "$PKG_OK" -eq 0 ]; then
