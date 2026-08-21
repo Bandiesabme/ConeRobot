@@ -126,12 +126,15 @@ network:
     eth0:
       optional: true
       dhcp4: true
+      dhcp4-overrides:
+        use-hostname: false
   wifis:
     wlan1:
       optional: true
       dhcp4: true
       dhcp4-overrides:
         route-metric: 50
+        use-hostname: false
       access-points:
         "${SSID}":
           password: "${PASSWORD}"
@@ -140,6 +143,7 @@ network:
       dhcp4: true
       dhcp4-overrides:
         route-metric: 600
+        use-hostname: false
       access-points:
         "${SSID}":
           password: "${PASSWORD}"
