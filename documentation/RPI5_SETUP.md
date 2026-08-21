@@ -29,6 +29,29 @@ To keep the system stable and avoid out-of-memory crashes on the 1 GB RAM board,
 
 ## 2. System Preparation (Run Once on RPi 5)
 
+### Option 1: Automated All-In-One Setup (Recommended)
+
+Run the single unified script to configure swap, install ROS 2 Jazzy, build drivers, set udev rules, configure Wi-Fi auto-connect / disable power-saving, configure boot params, and compile the workspace:
+
+```bash
+cd ~/github/ConeRobot  # or your workspace directory
+git pull origin main
+
+# Standard setup (uses default SSID 'Bandi'):
+bash scripts/setup_robot_rpi5.sh
+
+# Or with your custom Wi-Fi network credentials:
+bash scripts/setup_robot_rpi5.sh "YOUR_WIFI_SSID" "YOUR_WIFI_PASSWORD"
+
+sudo reboot
+```
+
+---
+
+### Option 2: Step-by-Step Manual Setup
+
+If you prefer to run each step manually, follow steps A through D below:
+
 ### Step A: Create 2GB Swap Memory (Mandatory for 1GB RAM)
 To prevent OOM freezes during `colcon build` or peak runtime:
 
@@ -41,7 +64,7 @@ sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
-### Step B: Run Automated System & Driver Setup Scripts
+### Step B: Run Driver Setup Scripts
 
 ```bash
 cd ~/github/ConeRobot  # or your workspace directory

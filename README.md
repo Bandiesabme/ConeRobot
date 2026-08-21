@@ -66,11 +66,16 @@ The system uses a **Remote-Brain Offloaded Compute Architecture**: heavy decisio
 
 ## 4. Quickstart Testing Commands
 
-### On Raspberry Pi 5 (Start Hardware Drivers & Motor Controller):
+### On Raspberry Pi 5 (One-Time Setup & Hardware Drivers):
 ```bash
 cd ~/github/ConeRobot
 git pull origin main
-colcon build --symlink-install
+
+# One-time automated system setup & driver compilation (Run once on new Pi):
+bash scripts/setup_robot_rpi5.sh
+
+# Or build/rebuild the workspace:
+colcon build --symlink-install --parallel-workers 2
 source install/setup.bash
 
 # Option A: Launch for GPS Robot (Motors + IMU + RTK GPS + Step Controller)
