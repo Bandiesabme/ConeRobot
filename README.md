@@ -68,12 +68,15 @@ The system uses a **Remote-Brain Offloaded Compute Architecture**: heavy decisio
 
 ### On Raspberry Pi 5 (One-Time Setup & Hardware Drivers via SSH):
 ```bash
-# Connect over SSH and navigate to repository:
+# 1. Connect over SSH:
 ssh conerobot@<PI5_IP>
-cd ~/github/ConeRobot
-git pull origin main
 
-# Optional: Run inside tmux so Wi-Fi/SSH hiccups won't cancel the setup:
+# 2. Create the folder and clone the repository (First-time setup):
+mkdir -p ~/github && cd ~/github
+git clone https://github.com/Bandiesabme/ConeRobot.git
+cd ConeRobot
+
+# 3. Start a persistent tmux session (so Wi-Fi/SSH hiccups won't cancel the setup):
 tmux new -s setup
 
 # One-time automated interactive setup & driver compilation:

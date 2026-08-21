@@ -85,26 +85,35 @@ confirm_step() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Helper to wait for background Ubuntu automatic updates (unattended-upgrades / apt-daily)
+# Helper to safely and automatically release background Ubuntu updater locks
 wait_for_apt_lock() {
+    # 1. Gracefully stop background update services so they don't block manual setup
+    sudo systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+
     local lock_files=(
         "/var/lib/dpkg/lock-frontend"
         "/var/lib/dpkg/lock"
         "/var/lib/apt/lists/lock"
     )
-    local waiting=false
+    local waited=0
     for lock_file in "${lock_files[@]}"; do
         while sudo fuser "$lock_file" >/dev/null 2>&1 || pgrep -f unattended-upgr >/dev/null 2>&1; do
-            if [ "$waiting" = false ]; then
-                log_info "Ubuntu background updater (unattended-upgrades) is active. Waiting for lock release..."
-                waiting=true
+            if [ "$waited" -eq 0 ]; then
+                log_info "Stopping background update services and waiting for APT lock..."
             fi
-            sleep 3
+            sleep 2
+            waited=$((waited + 2))
+            if [ "$waited" -ge 8 ]; then
+                # If still held after 8 seconds, politely terminate the holder
+                sudo kill -15 $(sudo fuser "$lock_file" 2>/dev/null) 2>/dev/null || true
+                sleep 1
+                break
+            fi
         done
     done
-    if [ "$waiting" = true ]; then
-        log_success "Apt lock released. Proceeding..."
-    fi
+
+    # 2. Heal any partially configured packages if interrupted
+    sudo dpkg --configure -a 2>/dev/null || true
 }
 
 # ==============================================================================

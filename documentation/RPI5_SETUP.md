@@ -39,9 +39,10 @@ To keep the system stable and avoid out-of-memory crashes on the 1 GB RAM board,
 # 1. Connect to your Raspberry Pi 5 over SSH
 ssh conerobot@<PI5_IP>
 
-# 2. Navigate to the repository
-cd ~/github/ConeRobot
-git pull origin main
+# 2. Create the github folder and clone the repository (First-time setup)
+mkdir -p ~/github && cd ~/github
+git clone https://github.com/Bandiesabme/ConeRobot.git
+cd ConeRobot
 
 # 3. Start a persistent tmux session (guarantees SSH drops won't abort the build)
 tmux new -s setup
