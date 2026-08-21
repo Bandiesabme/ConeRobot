@@ -226,6 +226,14 @@ log_info "Installing Adafruit BNO08x Python IMU library and CircuitPython Blinka
 sudo python3 -m pip install --break-system-packages adafruit-circuitpython-bno08x adafruit-blinka || \
 python3 -m pip install --break-system-packages adafruit-circuitpython-bno08x adafruit-blinka || true
 
+# Apply GPIO & I2C udev rules immediately so CircuitPython Blinka can access /dev/gpiochip*
+echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-gpio.rules > /dev/null
+echo 'KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0666"' | sudo tee /etc/udev/rules.d/99-i2c.rules > /dev/null
+sudo usermod -aG i2c "$USER" || true
+sudo usermod -aG dialout "$USER" || true
+sudo udevadm control --reload-rules && sudo udevadm trigger 2>/dev/null || true
+sudo chmod 666 /dev/gpiochip* 2>/dev/null || true
+
 log_info "Initializing rosdep..."
 if command -v rosdep >/dev/null 2>&1; then
     if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
@@ -262,12 +270,13 @@ confirm_step "2" "ROS 2 Jazzy & Core Package Installation" "$PKG_OK" "$PKG_MSG"
 # STEP 3: HARDWARE PERMISSIONS (GPIO, I2C, UART) & SERVICE ISOLATION
 # ==============================================================================
 log_section "STEP 3/8: HARDWARE PERMISSIONS & SERIAL ISOLATION"
-log_info "Writing udev rules for GPIO (0666) and I2C group access..."
+log_info "Ensuring udev rules for GPIO (0666) and I2C group access..."
 echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", MODE="0666"' | sudo tee /etc/udev/rules.d/99-gpio.rules > /dev/null
 echo 'KERNEL=="i2c-[0-9]*", GROUP="i2c", MODE="0666"' | sudo tee /etc/udev/rules.d/99-i2c.rules > /dev/null
 sudo usermod -aG i2c "$USER" || true
 sudo usermod -aG dialout "$USER" || true
 sudo udevadm control --reload-rules && sudo udevadm trigger 2>/dev/null || true
+sudo chmod 666 /dev/gpiochip* 2>/dev/null || true
 
 log_info "Disabling serial-getty login console and gpsd on ttyAMA0 (for GPS HAT)..."
 sudo systemctl stop serial-getty@ttyAMA0.service 2>/dev/null || true
