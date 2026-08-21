@@ -15,7 +15,13 @@ echo "=== Workspace Root detected: $WORKSPACE_ROOT ==="
 
 echo "=== 1. Installing Prerequisites ==="
 sudo apt update
-sudo apt install -y cmake build-essential git python3-colcon-common-extensions ros-jazzy-tf2-ros libboost-dev
+sudo apt install -y cmake build-essential git python3-colcon-common-extensions ros-jazzy-ament-cmake ros-jazzy-tf2-ros libboost-dev
+
+# Source ROS 2 base environment
+if [ -f /opt/ros/jazzy/setup.bash ]; then
+    # shellcheck disable=SC1091
+    source /opt/ros/jazzy/setup.bash
+fi
 
 echo "=== 2. Building and Installing YDLidar-SDK C++ Library ==="
 SDK_DIR="$HOME/YDLidar-SDK"
@@ -84,16 +90,25 @@ fi
 echo "=== 5. Building Workspace (Fast Mode) ==="
 cd "$WORKSPACE_ROOT"
 # Clean stale CMake cache from previous build
-rm -rf "$WORKSPACE_ROOT/build/rf2o_laser_odometry"
+rm -rf "$WORKSPACE_ROOT/build/rf2o_laser_odometry" "$WORKSPACE_ROOT/build/ydlidar_ros2_driver"
+
+if [ -f /opt/ros/jazzy/setup.bash ]; then
+    # shellcheck disable=SC1091
+    source /opt/ros/jazzy/setup.bash
+fi
 
 export MAKEFLAGS="-j1"
-colcon build --symlink-install --parallel-workers 1 --executor sequential
-
-echo ""
-echo "=============================================================================="
-echo "✅ Setup and Build Completed Successfully!"
-echo "=============================================================================="
-echo "You can now run:"
-echo "   source install/setup.bash"
-echo "   ros2 launch cone_robot_control robot.launch.py"
-echo "=============================================================================="
+if colcon build --symlink-install --parallel-workers 1 --executor sequential; then
+    echo ""
+    echo "=============================================================================="
+    echo "✅ Setup and Build Completed Successfully!"
+    echo "=============================================================================="
+    echo "You can now run:"
+    echo "   source install/setup.bash"
+    echo "   ros2 launch cone_robot_control robot.launch.py"
+    echo "=============================================================================="
+    exit 0
+else
+    echo "❌ colcon build failed for LiDAR / laser odometry drivers."
+    exit 1
+fi

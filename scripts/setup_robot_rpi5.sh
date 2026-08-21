@@ -2,7 +2,7 @@
 # ==============================================================================
 # All-In-One Interactive Setup Script for Raspberry Pi 5 (Cone Robot)
 # ==============================================================================
-# Automates the setup with verification checks and user confirmation prompts
+# Automates the setup with strict verification checks and user confirmation prompts
 # after each step so you can review the results without losing terminal context.
 #
 # Usage:
@@ -194,6 +194,7 @@ sudo apt install -y \
     ros-jazzy-tf2-ros \
     ros-jazzy-tf2-geometry-msgs \
     ros-jazzy-foxglove-bridge \
+    ros-jazzy-ament-cmake \
     python3-colcon-common-extensions \
     python3-rosdep \
     python3-gpiozero \
@@ -224,13 +225,17 @@ fi
 # Verification
 PKG_OK=0
 PKG_ERRORS=()
-if ! command -v ros2 >/dev/null 2>&1 && [ ! -f /opt/ros/jazzy/setup.bash ]; then
+if [ ! -f /opt/ros/jazzy/setup.bash ]; then
     PKG_OK=1
-    PKG_ERRORS+=("ROS 2 Jazzy binary/setup.bash not found")
+    PKG_ERRORS+=("ROS 2 Jazzy (/opt/ros/jazzy/setup.bash) not found")
 fi
 if ! python3 -c "import serial, lgpio" >/dev/null 2>&1; then
     PKG_OK=1
-    PKG_ERRORS+=("Python hardware libraries (serial/lgpio) import check failed")
+    PKG_ERRORS+=("Python serial/lgpio libraries missing")
+fi
+if ! python3 -c "import adafruit_bno08x" >/dev/null 2>&1; then
+    PKG_OK=1
+    PKG_ERRORS+=("Adafruit BNO08x Python library missing")
 fi
 
 if [ "$PKG_OK" -eq 0 ]; then
@@ -262,10 +267,21 @@ sudo systemctl mask gpsd gpsd.socket 2>/dev/null || true
 
 # Verification
 PERM_OK=0
-if [ ! -f /etc/udev/rules.d/99-gpio.rules ] || [ ! -f /etc/udev/rules.d/99-i2c.rules ]; then
+PERM_ERRORS=()
+if [ ! -f /etc/udev/rules.d/99-gpio.rules ]; then
     PERM_OK=1
+    PERM_ERRORS+=("/etc/udev/rules.d/99-gpio.rules missing")
 fi
-PERM_MSG="GPIO/I2C udev rules installed. serial-getty and gpsd masked on /dev/ttyAMA0."
+if [ ! -f /etc/udev/rules.d/99-i2c.rules ]; then
+    PERM_OK=1
+    PERM_ERRORS+=("/etc/udev/rules.d/99-i2c.rules missing")
+fi
+
+if [ "$PERM_OK" -eq 0 ]; then
+    PERM_MSG="GPIO/I2C udev rules installed. serial-getty and gpsd masked on /dev/ttyAMA0."
+else
+    PERM_MSG="Permissions issues: ${PERM_ERRORS[*]}"
+fi
 confirm_step "3" "Hardware Permissions & Serial Isolation" "$PERM_OK" "$PERM_MSG"
 
 # ==============================================================================
@@ -277,17 +293,31 @@ WIFI_MSG=""
 if [ -n "$SSID" ] && [ -n "$PASSWORD" ]; then
     log_info "Configuring Wi-Fi for SSID: '${SSID}'..."
     if [ -f "${SCRIPT_DIR}/setup_wifi.sh" ]; then
-        sudo SSH_CONNECTION="$SSH_CONNECTION" SSH_CLIENT="$SSH_CLIENT" SSH_TTY="$SSH_TTY" bash "${SCRIPT_DIR}/setup_wifi.sh" "$SSID" "$PASSWORD"
-        WIFI_MSG="Wi-Fi configured for SSID: $SSID (power-save disabled)."
+        if sudo SSH_CONNECTION="$SSH_CONNECTION" SSH_CLIENT="$SSH_CLIENT" SSH_TTY="$SSH_TTY" bash "${SCRIPT_DIR}/setup_wifi.sh" "$SSID" "$PASSWORD"; then
+            WIFI_MSG="Wi-Fi configured for SSID: $SSID (power-save disabled)."
+        else
+            WIFI_OK=1
+            WIFI_MSG="setup_wifi.sh returned an error code."
+        fi
     fi
 elif [ -f "${SCRIPT_DIR}/setup_wifi.sh" ]; then
     log_info "No custom Wi-Fi arguments provided. Auto-detecting existing Wi-Fi credentials or using default (Bandi)..."
-    sudo SSH_CONNECTION="$SSH_CONNECTION" SSH_CLIENT="$SSH_CLIENT" SSH_TTY="$SSH_TTY" bash "${SCRIPT_DIR}/setup_wifi.sh"
-    WIFI_MSG="Wi-Fi configured for external antenna/extender (power-save disabled)."
+    if sudo SSH_CONNECTION="$SSH_CONNECTION" SSH_CLIENT="$SSH_CLIENT" SSH_TTY="$SSH_TTY" bash "${SCRIPT_DIR}/setup_wifi.sh"; then
+        WIFI_MSG="Wi-Fi configured for external antenna/extender (power-save disabled)."
+    else
+        WIFI_OK=1
+        WIFI_MSG="setup_wifi.sh returned an error code."
+    fi
 else
     log_warning "setup_wifi.sh not found. Skipping Wi-Fi configuration."
     WIFI_OK=1
     WIFI_MSG="Wi-Fi setup script was not found."
+fi
+
+# Verification
+if [ ! -f /etc/netplan/50-cloud-init.yaml ]; then
+    WIFI_OK=1
+    WIFI_MSG="Netplan configuration file /etc/netplan/50-cloud-init.yaml missing."
 fi
 confirm_step "4" "Wi-Fi Auto-Connect & Low Latency" "$WIFI_OK" "$WIFI_MSG"
 
@@ -316,7 +346,27 @@ if [ -f "$BOOT_CONFIG" ]; then
         echo "enable_uart=1" | sudo tee -a "$BOOT_CONFIG"
         echo "dtparam=uart0=on" | sudo tee -a "$BOOT_CONFIG"
     fi
-    BOOT_MSG="Added usb_max_current_enable=1, 400kHz I2C, and UART parameters."
+
+    # Verification assertions
+    BOOT_ERRORS=()
+    if ! grep -q "usb_max_current_enable=1" "$BOOT_CONFIG"; then
+        BOOT_OK=1
+        BOOT_ERRORS+=("usb_max_current_enable missing")
+    fi
+    if ! grep -q "dtparam=i2c_arm" "$BOOT_CONFIG"; then
+        BOOT_OK=1
+        BOOT_ERRORS+=("dtparam=i2c_arm missing")
+    fi
+    if ! grep -q "dtparam=uart0=on" "$BOOT_CONFIG"; then
+        BOOT_OK=1
+        BOOT_ERRORS+=("dtparam=uart0=on missing")
+    fi
+
+    if [ "$BOOT_OK" -eq 0 ]; then
+        BOOT_MSG="Verified usb_max_current_enable=1, 400kHz I2C, and UART parameters in $BOOT_CONFIG."
+    else
+        BOOT_MSG="Boot config issues: ${BOOT_ERRORS[*]}"
+    fi
 else
     log_warning "Boot config $BOOT_CONFIG not found (Non-Pi / Container environment)."
     BOOT_OK=0
@@ -331,8 +381,31 @@ log_section "STEP 6/8: YDLIDAR SDK & DRIVER SETUP"
 LIDAR_OK=0
 if [ -f "${SCRIPT_DIR}/install_ydlidar.sh" ]; then
     log_info "Building YDLidar C++ SDK, udev rules, and applying Jazzy patches..."
-    bash "${SCRIPT_DIR}/install_ydlidar.sh"
-    LIDAR_MSG="YDLidar SDK compiled, /dev/ydlidar rule installed, Jazzy patches applied."
+    if bash "${SCRIPT_DIR}/install_ydlidar.sh"; then
+        # Verification assertions
+        LIDAR_ERRORS=()
+        if [ ! -f /etc/udev/rules.d/ydlidar.rules ]; then
+            LIDAR_OK=1
+            LIDAR_ERRORS+=("/etc/udev/rules.d/ydlidar.rules missing")
+        fi
+        if [ ! -d "${WORKSPACE_DIR}/src/ydlidar_ros2_driver" ]; then
+            LIDAR_OK=1
+            LIDAR_ERRORS+=("src/ydlidar_ros2_driver missing")
+        fi
+        if [ ! -d "${WORKSPACE_DIR}/src/rf2o_laser_odometry" ]; then
+            LIDAR_OK=1
+            LIDAR_ERRORS+=("src/rf2o_laser_odometry missing")
+        fi
+
+        if [ "$LIDAR_OK" -eq 0 ]; then
+            LIDAR_MSG="YDLidar SDK compiled, /dev/ydlidar rule installed, Jazzy drivers compiled."
+        else
+            LIDAR_MSG="Driver verification failed: ${LIDAR_ERRORS[*]}"
+        fi
+    else
+        LIDAR_OK=1
+        LIDAR_MSG="YDLIDAR SDK / driver build script failed. Check build logs above."
+    fi
 else
     log_warning "install_ydlidar.sh not found."
     LIDAR_OK=1
@@ -363,8 +436,27 @@ if [ -f "${WORKSPACE_DIR}/install/setup.bash" ]; then
     add_to_bashrc_if_missing "source ${WORKSPACE_DIR}/install/setup.bash"
 fi
 
+# Verification assertions
 ENV_OK=0
-ENV_MSG="ROS_DOMAIN_ID=42, GPIOZERO_PIN_FACTORY=lgpio, and setup.bash configured in ~/.bashrc."
+ENV_ERRORS=()
+if ! grep -q "ROS_DOMAIN_ID=42" "$BASHRC"; then
+    ENV_OK=1
+    ENV_ERRORS+=("ROS_DOMAIN_ID=42 missing in ~/.bashrc")
+fi
+if ! grep -q "GPIOZERO_PIN_FACTORY=lgpio" "$BASHRC"; then
+    ENV_OK=1
+    ENV_ERRORS+=("GPIOZERO_PIN_FACTORY=lgpio missing in ~/.bashrc")
+fi
+if ! grep -q "source /opt/ros/jazzy/setup.bash" "$BASHRC"; then
+    ENV_OK=1
+    ENV_ERRORS+=("source /opt/ros/jazzy/setup.bash missing in ~/.bashrc")
+fi
+
+if [ "$ENV_OK" -eq 0 ]; then
+    ENV_MSG="ROS_DOMAIN_ID=42, GPIOZERO_PIN_FACTORY=lgpio, and setup.bash verified in ~/.bashrc."
+else
+    ENV_MSG="Environment issues: ${ENV_ERRORS[*]}"
+fi
 confirm_step "7" "Environment Variables (~/.bashrc)" "$ENV_OK" "$ENV_MSG"
 
 # ==============================================================================
@@ -378,11 +470,16 @@ if [ -d "${WORKSPACE_DIR}/src" ]; then
     # shellcheck disable=SC1091
     source /opt/ros/jazzy/setup.bash 2>/dev/null || true
     if colcon build --symlink-install --parallel-workers 2; then
-        BUILD_OK=0
-        BUILD_MSG="Workspace packages compiled successfully."
+        if [ -f "${WORKSPACE_DIR}/install/setup.bash" ]; then
+            BUILD_OK=0
+            BUILD_MSG="Workspace packages compiled and install/setup.bash generated successfully."
+        else
+            BUILD_OK=1
+            BUILD_MSG="colcon finished but install/setup.bash was not found."
+        fi
     else
         BUILD_OK=1
-        BUILD_MSG="Workspace compilation encountered errors. Check output above."
+        BUILD_MSG="Workspace compilation encountered errors. Check colcon output above."
     fi
 else
     BUILD_OK=1
