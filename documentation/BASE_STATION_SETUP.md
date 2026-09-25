@@ -27,7 +27,8 @@ Mount your RTK Base GNSS HAT directly to the Raspberry Pi 5 40-pin GPIO header:
 
 ## 2. Base Pi Initial System Setup
 
-Run these commands once on your **Base Station Pi**:
+### Option A: Raspberry Pi 5 (Ubuntu Server)
+Run these commands once on your **Raspberry Pi 5 Base Station**:
 
 ```bash
 # 1. Enable hardware UART in firmware boot config
@@ -55,6 +56,61 @@ sudo bash ~/github/ConeRobot/scripts/setup_wifi.sh
 # Reboot to apply all firmware & permission changes
 sudo reboot
 ```
+
+---
+
+### Option B: Raspberry Pi Zero (W / Zero 2 W) with Raspberry Pi OS (32-bit / 64-bit)
+
+A **Raspberry Pi Zero W / Zero 2 W** is ideal as a dedicated low-power RTK Base Station (consumes < 1W of power and uses only ~15 MB RAM for the caster).
+
+Run these commands on your **Pi Zero**:
+
+```bash
+# 1. Disable onboard Bluetooth to assign full hardware PL011 UART to GPIO 14/15
+# (Ensures zero dropped RTCM3 correction packets at 115200 baud)
+CONFIG_FILE="/boot/firmware/config.txt"
+[ ! -f "$CONFIG_FILE" ] && CONFIG_FILE="/boot/config.txt"
+
+sudo bash -c "cat << EOF >> $CONFIG_FILE
+enable_uart=1
+dtoverlay=disable-bt
+EOF"
+
+# 2. Disable Bluetooth systemd services (frees CPU and RAM)
+sudo systemctl disable --now hciuart.service 2>/dev/null || true
+sudo systemctl disable --now bluetooth.service 2>/dev/null || true
+
+# 3. Disable Linux Serial Console (so it doesn't corrupt RTCM3 binary data)
+sudo systemctl stop serial-getty@ttyAMA0.service 2>/dev/null || true
+sudo systemctl disable serial-getty@ttyAMA0.service 2>/dev/null || true
+sudo systemctl mask serial-getty@ttyAMA0.service 2>/dev/null || true
+
+CMDLINE_FILE="/boot/firmware/cmdline.txt"
+[ ! -f "$CMDLINE_FILE" ] && CMDLINE_FILE="/boot/cmdline.txt"
+sudo sed -i 's/console=serial0,[0-9]\+ //g; s/console=ttyAMA0,[0-9]\+ //g' "$CMDLINE_FILE"
+
+# 4. Add user to dialout group
+sudo usermod -aG dialout $USER
+
+# 5. Disable Wi-Fi power save (prevents SSH lag and dropped caster streams)
+sudo mkdir -p /etc/NetworkManager/conf.d/
+sudo tee /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf << 'EOF'
+[connection]
+wifi.powersave = 2
+EOF
+
+# 6. Install Python dependencies & clone repository
+sudo apt update && sudo apt install -y python3-pip python3-serial git
+mkdir -p ~/github
+cd ~/github
+git clone https://github.com/Bandiesabme/ConeRobot.git ~/github/ConeRobot
+
+# 7. Reboot to apply changes
+sudo reboot
+```
+
+> [!TIP]
+> On the Pi Zero with `dtoverlay=disable-bt`, the Waveshare LC29H RTK Base HAT is accessed reliably via `/dev/ttyAMA0` or `/dev/serial0`.
 
 ---
 
