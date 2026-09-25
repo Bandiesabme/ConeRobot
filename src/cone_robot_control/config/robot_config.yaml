@@ -28,6 +28,14 @@ bno08x_node:
     use_game_rotation: true    # 6-DOF fused orientation (immune to motor magnetic noise)
     mock_hardware: false       # Set true for simulation / dry-run without I2C hardware
 
+    # --- INA219 Battery Monitor Settings (Shares I2C Bus, 0 MB Extra RAM) ---
+    enable_battery_monitor: true   # Enable 0-RAM battery monitor on shared I2C bus
+    battery_i2c_address: 64        # 0x40 in decimal (default CJMCU-219 / INA219 address)
+    battery_publish_rate_hz: 1.0   # 1 Hz battery update (ultra-low bus load)
+    battery_min_v: 10.5            # 3S LiPo cutoff voltage (3.5V / cell)
+    battery_max_v: 12.6            # 3S LiPo 100% full voltage (4.2V / cell)
+    battery_low_warn_v: 11.1       # 3S LiPo warning threshold (3.7V / cell)
+
 # 3. Waveshare LC29H(DA) GPS/RTK & NTRIP Rover Settings
 lc29h_gps_node:
   ros__parameters:

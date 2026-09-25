@@ -686,7 +686,13 @@ function handleParsedRobotMessage(robotId, topic, data) {
 
   // 7. Battery State (/battery_state)
   if (topic === configuredTopics.battery || topic === '/battery_state') {
-    if (data.voltage !== undefined) r.health.battery_v = `${Number(data.voltage).toFixed(1)}V`;
+    if (data.voltage !== undefined) {
+      const v = Number(data.voltage).toFixed(1);
+      const pct = (data.percentage !== undefined && data.percentage !== null && !isNaN(data.percentage))
+        ? Math.round(Number(data.percentage) * (data.percentage <= 1.0 ? 100 : 1))
+        : null;
+      r.health.battery_v = pct !== null ? `${v}V (${pct}%)` : `${v}V`;
+    }
   }
 
   // 8. Foxglove System Info (/foxglove_bridge/sysinfo)
@@ -790,15 +796,19 @@ function renderUIUpdates() {
 
       const battEl = document.getElementById(`r${i}-battery`);
       if (battEl) {
-        let sysTxt = '--';
-        if (r.health.cpu_temp !== '--' && r.health.cpu_load) {
-          sysTxt = `${r.health.cpu_temp} (${r.health.cpu_load})`;
+        if (r.health.battery_v && r.health.battery_v !== '--') {
+          battEl.innerText = r.health.battery_v;
+          battEl.style.color = '#10b981'; // Green for active battery voltage
+        } else if (r.health.cpu_temp !== '--' && r.health.cpu_load) {
+          battEl.innerText = `${r.health.cpu_temp} (${r.health.cpu_load})`;
+          battEl.style.color = 'var(--text-muted)';
         } else if (r.health.cpu_temp !== '--') {
-          sysTxt = `${r.health.cpu_temp}`;
-        } else if (r.health.cpu_load) {
-          sysTxt = `${r.health.cpu_load}`;
+          battEl.innerText = `${r.health.cpu_temp}`;
+          battEl.style.color = 'var(--text-muted)';
+        } else {
+          battEl.innerText = 'No Sensor';
+          battEl.style.color = 'var(--text-muted)';
         }
-        battEl.innerText = sysTxt;
       }
     } else {
       offlineCount++;
@@ -892,6 +902,12 @@ function updateModalContent(r) {
         tempEl.style.color = num > 80 ? '#ef4444' : (num > 70 ? '#f59e0b' : '#10b981');
       }
     }
+  }
+
+  const battModalEl = document.getElementById('modal-battery');
+  if (battModalEl) {
+    battModalEl.innerText = (r.health.battery_v && r.health.battery_v !== '--') ? r.health.battery_v : 'No Sensor';
+    battModalEl.style.color = (r.health.battery_v && r.health.battery_v !== '--') ? '#10b981' : 'var(--text-muted)';
   }
 
   document.getElementById('modal-lat').innerText = r.gps.lat ? r.gps.lat.toFixed(7) : (r.gps.present ? 'NO FIX' : 'Not Equipped');

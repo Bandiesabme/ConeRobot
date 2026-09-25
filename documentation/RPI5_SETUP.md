@@ -206,6 +206,60 @@ Raspberry Pi 5 Pinout Allocation:
 - Yellow Jumper Cap: **Position B** (connects HAT UART to GPIO 14/15 -> `/dev/ttyAMA0`).
 - For full NTRIP RTK configuration, see [GPS/RTK Setup Guide](GPS_RTK_SETUP.md).
 
+### D. CJMCU-219 / INA219 I2C Battery Voltage Monitor (0-RAM Integration)
+
+The INA219 is used in **pure voltmeter mode** to measure the robot's battery voltage ($0\text{--}26\text{ V}$) without launching an extra process by sharing the I2C bus with the BNO08x IMU in `bno08x_node`.
+
+> [!CAUTION]
+> # ⚠️ CRITICAL DANGER: DO NOT CONNECT `VIN-` TO BATTERY NEGATIVE (–)!
+> **`VIN-` IS NOT GROUND! `VIN-` IS NOT BATTERY NEGATIVE!**
+> 
+> On the CJMCU-219 PCB, **`VIN+` and `VIN-` are directly bridged by an onboard $0.1\,\Omega$ shunt resistor**!
+> * If you connect **`VIN+` to Battery (+)** AND **`VIN-` to Battery (–)**, you create an **INSTANT DEAD SHORT CIRCUIT** across your battery:
+>   $$I = \frac{12\text{ V}}{0.1\ \Omega} = \mathbf{120\text{ Amperes!}}$$
+> * The module will **instantly spark, melt PCB traces, catch fire, or destroy the battery!**
+> 
+> **MANDATORY RULES FOR VOLTMETER MODE:**
+> 1. **`VIN-` MUST REMAIN COMPLETELY EMPTY / DISCONNECTED! NEVER CONNECT A WIRE TO `VIN-`!**
+> 2. **Battery Positive (+)** connects **EXCLUSIVELY to `VIN+`** (using a single thin wire).
+> 3. **Battery Negative (–)** connects **EXCLUSIVELY to `GND`** (Common System Ground with Pi 5).
+
+> [!NOTE]
+> **Pure Voltmeter Mode (No Shunt / No Power Loop Interruption)**:
+> Since the goal is exclusively measuring battery voltage and charge level, **no external shunt is needed** and **no high-power cables are interrupted**.
+> You only connect a single thin voltage sensing wire from the battery positive terminal to the module's `VIN+` pin. The robot's motors and electronics draw current normally through their own heavy wires.
+
+#### 1. Logic & I2C Bus Wiring (RPi 5 Header)
+
+| CJMCU-219 Pin | Raspberry Pi 5 Pin | Function | Notes |
+| :--- | :--- | :--- | :--- |
+| **VCC** | **Pin 1** (or Pin 17) | **3.3V Power** | Always use 3.3V rail to protect RPi 5 3.3V GPIO logic |
+| **GND** | **Pin 9** (or any GND) | **Common Ground** | Shared system ground with robot and battery (Battery Negative connects here!) |
+| **SDA** | **Pin 3** (GPIO 2) | **I2C1 SDA** | Shared line with BNO08x IMU SDA |
+| **SCL** | **Pin 5** (GPIO 3) | **I2C1 SCL** | Shared line with BNO08x IMU SCL |
+
+#### 2. Battery Voltage Sense Connection (Single Thin Wire)
+
+```text
+Raspberry Pi 5 Header                   CJMCU-219 Breakout
+Pin 1 (3.3V) ─────────────────────────► VCC
+Pin 9 (GND)  ──────────────┬──────────► GND
+                           │
+Battery Negative (–) ──────┘ (COMMON GROUND)
+
+Battery Positive (+) ─────────────────► VIN+  (ONLY THIS PIN - 1x thin sense wire)
+
+                                        VIN-  ◄── ⛔ DO NOT CONNECT! LEAVE EMPTY!
+```
+
+> [!TIP]
+> **Verify I2C Connection:** Run `sudo i2cdetect -y 1`. Both `40` (INA219) and `4a` (BNO08x) will appear in the matrix.
+> 
+> **Live ROS 2 Battery Stream:**
+> ```bash
+> ros2 topic echo /battery_state
+> ```
+
 ---
 
 ## 4. Power Stability & Brownout Prevention
