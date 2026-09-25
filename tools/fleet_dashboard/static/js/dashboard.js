@@ -56,11 +56,27 @@ function initMap() {
     zoomControl: true
   });
 
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-    maxZoom: 22,
-    subdomains: 'abcd',
-    attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; OpenStreetMap'
-  }).addTo(map);
+  // 1. Standard OpenStreetMap (100% Free, No API Key needed)
+  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  });
+
+  // 2. High-Resolution Satellite Imagery (Esri World Imagery, 100% Free)
+  const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 19,
+    attribution: 'Tiles &copy; Esri'
+  });
+
+  // Add OSM by default
+  osm.addTo(map);
+
+  // Add Layer Switcher (Street / Satellite) in top right
+  const baseMaps = {
+    "Utcatérkép (OSM)": osm,
+    "Műholdkép (Satellite)": satellite
+  };
+  L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
 
   document.getElementById('btn-fit-map').addEventListener('click', fitAllRobotsInMap);
 }
@@ -497,13 +513,26 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
         if (strLen > 0 && ptr + strLen <= buffer.byteLength) {
           const strBytes = new Uint8Array(buffer, ptr, strLen);
           const str = new TextDecoder('utf-8').decode(strBytes).replace(/\0/g, '').trim();
-          if (str.toUpperCase().includes('RTK FIX') || str.includes('4')) r.gps.mode = 'RTK FIX';
-          else if (str.toUpperCase().includes('FLOAT') || str.includes('5')) r.gps.mode = 'FLOAT';
-          else if (str.toUpperCase().includes('3D') || str.includes('1') || str.includes('2')) r.gps.mode = '3D FIX';
-          else if (str) r.gps.mode = str;
+          const fixMatch = str.match(/Fix:\s*([^|]+)/i);
+          const fixStr = (fixMatch ? fixMatch[1] : str).trim().toUpperCase();
+          if (fixStr.includes('RTK FIX') || fixStr === '4') r.gps.mode = 'RTK FIX';
+          else if (fixStr.includes('FLOAT') || fixStr === '5') r.gps.mode = 'FLOAT';
+          else if (fixStr.includes('DGPS') || fixStr === '2') r.gps.mode = 'DGPS';
+          else if (fixStr.includes('3D') || fixStr === '1') r.gps.mode = '3D FIX';
+          else if (fixStr.includes('NO FIX') || fixStr === '0') r.gps.mode = 'NO FIX';
+          else r.gps.mode = fixStr || '3D FIX';
 
           const satMatch = str.match(/Sats:\s*(\d+)/i) || str.match(/(\d+)\s*sats/i);
           if (satMatch) r.gps.sats = parseInt(satMatch[1]);
+
+          const hdopMatch = str.match(/HDOP:\s*([\d.]+)/i);
+          if (hdopMatch) r.gps.hdop = hdopMatch[1];
+
+          const ntripMatch = str.match(/NTRIP:\s*([^(|]+)(?:\(([^)]+)\))?/i);
+          if (ntripMatch) {
+            r.gps.ntrip = ntripMatch[1].trim();
+            r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
+          }
         }
       }
 
@@ -588,6 +617,33 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
         }
       }
 
+      // 8. sensor_msgs/msg/BatteryState (/battery_state)
+      else if (topic === configuredTopics.battery || topic === '/battery_state' || (topic && topic.endsWith('/battery_state'))) {
+        // Skip Header: sec (4), nsec (4)
+        ptr += 8;
+        const frameLen = view.getUint32(ptr, true);
+        ptr += 4 + frameLen;
+        
+        // Align to 4 bytes for float32 fields
+        ptr = cdrAlign(ptr, 4);
+
+        if (ptr + 28 <= buffer.byteLength) {
+          const voltage = view.getFloat32(ptr, true); ptr += 4;
+          const temp = view.getFloat32(ptr, true); ptr += 4;
+          const curr = view.getFloat32(ptr, true); ptr += 4;
+          const chg = view.getFloat32(ptr, true); ptr += 4;
+          const cap = view.getFloat32(ptr, true); ptr += 4;
+          const dcap = view.getFloat32(ptr, true); ptr += 4;
+          const pct = view.getFloat32(ptr, true); ptr += 4;
+
+          if (!isNaN(voltage) && voltage > 0.0) {
+            const vFormatted = Number(voltage).toFixed(1);
+            const pctVal = (!isNaN(pct) && pct >= 0) ? Math.round(pct <= 1.0 ? pct * 100 : pct) : null;
+            r.health.battery_v = pctVal !== null ? `${vFormatted}V (${pctVal}%)` : `${vFormatted}V`;
+          }
+        }
+      }
+
     } catch (e) {}
   }
 }
@@ -637,15 +693,26 @@ function handleParsedRobotMessage(robotId, topic, data) {
   if (topic === configuredTopics.gps_status || topic === '/gps/status') {
     r.gps.present = true;
     const str = typeof data === 'string' ? data : (data.data || '');
-    if (str) {
-      if (str.toUpperCase().includes('RTK FIX') || str.includes('4')) r.gps.mode = 'RTK FIX';
-      else if (str.toUpperCase().includes('FLOAT') || str.includes('5')) r.gps.mode = 'FLOAT';
-      else if (str.toUpperCase().includes('3D') || str.includes('1') || str.includes('2')) r.gps.mode = '3D FIX';
-      else r.gps.mode = str;
+      const fixMatch = str.match(/Fix:\s*([^|]+)/i);
+      const fixStr = (fixMatch ? fixMatch[1] : str).trim().toUpperCase();
+      if (fixStr.includes('RTK FIX') || fixStr === '4') r.gps.mode = 'RTK FIX';
+      else if (fixStr.includes('FLOAT') || fixStr === '5') r.gps.mode = 'FLOAT';
+      else if (fixStr.includes('DGPS') || fixStr === '2') r.gps.mode = 'DGPS';
+      else if (fixStr.includes('3D') || fixStr === '1') r.gps.mode = '3D FIX';
+      else if (fixStr.includes('NO FIX') || fixStr === '0') r.gps.mode = 'NO FIX';
+      else r.gps.mode = fixStr || '3D FIX';
 
       const satMatch = str.match(/Sats:\s*(\d+)/i) || str.match(/(\d+)\s*sats/i);
       if (satMatch) r.gps.sats = parseInt(satMatch[1]);
-    }
+
+      const hdopMatch = str.match(/HDOP:\s*([\d.]+)/i);
+      if (hdopMatch) r.gps.hdop = hdopMatch[1];
+
+      const ntripMatch = str.match(/NTRIP:\s*([^(|]+)(?:\(([^)]+)\))?/i);
+      if (ntripMatch) {
+        r.gps.ntrip = ntripMatch[1].trim();
+        r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
+      }
   }
 
   // 4. IMU Heading (/imu/heading)
@@ -781,9 +848,24 @@ function renderUIUpdates() {
 
       // GPS Metric
       if (r.gps.present) {
-        let gpsTxt = (r.gps.lat && r.gps.lon) ? `${r.gps.mode} (${r.gps.sats} Sats)` : `${r.gps.mode} (No Lock)`;
+        let gpsTxt = '';
+        if (r.gps.mode === 'RTK FIX') {
+          gpsTxt = `🟢 RTK FIX (${r.gps.sats} Sats)`;
+          gpsEl.className = 'metric-val gps-rtk';
+        } else if (r.gps.mode === 'FLOAT') {
+          gpsTxt = `🟡 RTK FLOAT (${r.gps.sats} Sats)`;
+          gpsEl.className = 'metric-val gps-float';
+        } else if (r.gps.mode === '3D FIX' || (r.gps.mode && r.gps.mode.includes('3D'))) {
+          const isBaseConnected = (r.gps.ntrip && r.gps.ntrip.toLowerCase().includes('connected'));
+          gpsTxt = isBaseConnected 
+            ? `3D FIX (${r.gps.sats} Sats)` 
+            : `3D FIX (No Base Station) [${r.gps.sats} Sats]`;
+          gpsEl.className = 'metric-val gps-none';
+        } else {
+          gpsTxt = `${r.gps.mode} (${r.gps.sats} Sats)`;
+          gpsEl.className = 'metric-val gps-none';
+        }
         gpsEl.innerText = gpsTxt;
-        gpsEl.className = `metric-val ${r.gps.mode === 'RTK FIX' ? 'gps-rtk' : (r.gps.mode === 'FLOAT' ? 'gps-float' : 'gps-none')}`;
       } else {
         gpsEl.innerText = 'Not Equipped';
         gpsEl.className = 'metric-val';
@@ -914,6 +996,17 @@ function updateModalContent(r) {
   document.getElementById('modal-lon').innerText = r.gps.lon ? r.gps.lon.toFixed(7) : (r.gps.present ? 'NO FIX' : 'Not Equipped');
   document.getElementById('modal-alt').innerText = r.gps.alt ? `${r.gps.alt} m` : '--';
   document.getElementById('modal-hdop').innerText = r.gps.hdop || '--';
+
+  const ntripEl = document.getElementById('modal-ntrip');
+  if (ntripEl) {
+    if (r.gps.mode === 'RTK FIX' || (r.gps.ntrip && r.gps.ntrip.toLowerCase().includes('connected'))) {
+      ntripEl.innerText = `🟢 Connected (${r.gps.rtcm || 'Active'})`;
+      ntripEl.style.color = '#10b981';
+    } else {
+      ntripEl.innerText = '🔴 Disconnected (No Base Station Connected)';
+      ntripEl.style.color = '#ef4444';
+    }
+  }
 
   document.getElementById('modal-motion-state').innerText = r.motion.state;
   document.getElementById('modal-speed').innerText = '--';

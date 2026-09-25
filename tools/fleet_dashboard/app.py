@@ -67,7 +67,28 @@ def get_primary_subnet():
         parts = local_ip.split(".")
         return f"{parts[0]}.{parts[1]}.{parts[2]}"
     except Exception:
-        return "192.168.0"
+        return "192.168.1"
+
+def get_all_subnets():
+    subnets = set()
+    primary = get_primary_subnet()
+    if primary:
+        subnets.add(primary)
+
+    # 2. Windows Mobile Hotspot default subnet (192.168.137.X)
+    subnets.add("192.168.137")
+
+    # 3. All local IP interfaces on this machine
+    try:
+        hostname = socket.gethostname()
+        for ip in socket.gethostbyname_ex(hostname)[2]:
+            if not ip.startswith("127.") and "." in ip:
+                parts = ip.split(".")
+                subnets.add(f"{parts[0]}.{parts[1]}.{parts[2]}")
+    except Exception:
+        pass
+
+    return list(subnets)
 
 def check_robot_host(host_or_ip, port=8765, timeout=0.5):
     try:
@@ -130,11 +151,13 @@ def scan_network_job():
                         "online": True
                     }
 
-        # 2. Local subnet sweep
-        subnet_prefix = get_primary_subnet()
-        ips_to_check = [f"{subnet_prefix}.{i}" for i in range(1, 255)]
-        
-        with ThreadPoolExecutor(max_workers=30) as executor:
+        # 2. Local subnet sweep (Scans primary Wi-Fi AND Windows Mobile Hotspot 192.168.137.X)
+        all_subnets = get_all_subnets()
+        ips_to_check = []
+        for subnet in all_subnets:
+            ips_to_check.extend([f"{subnet}.{i}" for i in range(1, 255)])
+
+        with ThreadPoolExecutor(max_workers=50) as executor:
             ip_futures = {executor.submit(check_robot_host, ip, robot_port, 0.2): ip for ip in ips_to_check}
             for fut in ip_futures:
                 res_ip = fut.result()
