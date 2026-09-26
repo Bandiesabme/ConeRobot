@@ -550,18 +550,38 @@ class PrimitiveMotionController(Node):
             self._set_state(ControllerState.STUCK)
             return
 
-        # 4. Completion Check
+        # 4. Completion & Feedback Control
         dist_remaining = abs(self.target_dist_m) - abs(actual_dist)
-        yaw_remaining = abs(self.target_yaw_rad) - abs(actual_yaw)
+        yaw_error_to_target = abs(shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw))
 
+        # --- SPECIALIZED LOGIC FOR IN-PLACE ROTATION ---
+        if self.active_motion_type == "ROTATE":
+            error_yaw = shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw)
+            turn_duration = now - self.motion_start_time
+
+            # Complete immediately if within tolerance OR if close (<= 3.5 deg) and duration > 0.8s
+            if abs(error_yaw) <= self.yaw_tolerance_rad or (turn_duration > 0.8 and abs(error_yaw) <= math.radians(3.5)):
+                self._publish_cmd_vel(0.0, 0.0)
+                self._set_state(ControllerState.COMPLETED)
+                self.get_logger().info(
+                    f"[ROTATE COMPLETED] Final Yaw: {math.degrees(actual_yaw):.1f}° (Error: {math.degrees(error_yaw):+.1f}°)"
+                )
+                return
+
+            # Assertive turning speed so tracks never stall or whine against floor friction
+            sign = 1.0 if error_yaw >= 0 else -1.0
+            raw_w = max(abs(omega_ref), abs(self.yaw_kp * error_yaw))
+            cmd_omega = sign * max(self.min_angular_speed, min(self.max_angular_speed, raw_w))
+            self._publish_cmd_vel(0.0, cmd_omega)
+            return
+
+        # --- LOGIC FOR STRAIGHT DRIVE & DRIVE ARC ---
         motion_complete = False
         if self.active_motion_type == "STRAIGHT":
             motion_complete = profiler_finished and (dist_remaining <= self.distance_tolerance_m)
-        elif self.active_motion_type == "ROTATE":
-            motion_complete = profiler_finished and (yaw_remaining <= self.yaw_tolerance_rad)
         elif self.active_motion_type == "ARC":
             motion_complete = profiler_finished and (
-                dist_remaining <= self.distance_tolerance_m or yaw_remaining <= self.yaw_tolerance_rad
+                dist_remaining <= self.distance_tolerance_m or abs(yaw_error_to_target) <= self.yaw_tolerance_rad
             )
 
         if motion_complete:
@@ -572,26 +592,22 @@ class PrimitiveMotionController(Node):
             )
             return
 
-        # 5. Dual-Rate Feedback Controller
-        # Angular loop: 50 Hz closed-loop heading correction
+        # Dual-Rate Feedback Controller for Straight & Arc
         yaw_error = shortest_angular_diff_rad(yaw_ref, actual_yaw)
         dt = 1.0 / self.control_rate_hz
         self.yaw_integral = max(-1.0, min(1.0, self.yaw_integral + yaw_error * dt))
 
         p_yaw = self.yaw_kp * yaw_error
         i_yaw = self.yaw_ki * self.yaw_integral
-        omega_correction = p_yaw + i_yaw
+        # Clamp steering trim authority to +/- 0.40 rad/s to prevent track chatter
+        yaw_trim = max(-0.40, min(0.40, p_yaw + i_yaw))
 
-        # Linear speed: keep feedforward profile
         cmd_v = v_ref
-        cmd_omega = omega_ref + omega_correction
+        cmd_omega = omega_ref + yaw_trim
 
-        # Enforce minimum speed thresholds to prevent motor friction deadband
+        # Enforce minimum linear speed only so vehicle doesn't stall during forward cruise
         if abs(cmd_v) > 1e-4 and abs(cmd_v) < self.min_linear_speed:
             cmd_v = math.copysign(self.min_linear_speed, cmd_v)
-
-        if abs(cmd_omega) > 1e-4 and abs(cmd_omega) < self.min_angular_speed:
-            cmd_omega = math.copysign(self.min_angular_speed, cmd_omega)
 
         self._publish_cmd_vel(cmd_v, cmd_omega)
 
@@ -650,6 +666,11 @@ class PrimitiveMotionController(Node):
             msg = String()
             msg.data = json.dumps(diag)
             self.diag_pub.publish(msg)
+
+            # Periodic status heartbeat
+            status_msg = String()
+            status_msg.data = self.state
+            self.status_pub.publish(status_msg)
         except Exception:
             pass
 
