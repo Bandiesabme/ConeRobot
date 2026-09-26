@@ -114,7 +114,8 @@ primitive_motion_controller:
     turn_settle_time_s: 0.15          # Standstill settle duration (seconds)
     distance_tolerance_m: 0.03        # Distance completion tolerance (3 cm)
     stuck_detect_time_s: 1.5          # Stall watchdog abort timeout (seconds)
-    distance_source: "auto"           # Multi-sensor distance tracking ('auto', 'odom', 'time')
+    distance_source: "auto"           # Multi-sensor distance tracking ('auto', 'odom', 'gps', 'time')
+    gps_require_rtk: true             # Require RTK Fix/Float to use GPS distance (GPS robot)
 
 # 6. Teleop Keyboard Settings (Laptop)
 teleop_keyboard:

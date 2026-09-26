@@ -101,6 +101,20 @@ def shortest_angular_diff_deg(target_deg: float, current_deg: float) -> float:
     return diff
 
 
+def gps_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Compute flat-Earth metric distance in meters between two WGS84 GPS coordinates.
+    Accurate for local ranges (< 1 km).
+    """
+    earth_radius_m = 6371000.0
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    lat_avg = math.radians((lat1 + lat2) / 2.0)
+    x = d_lon * math.cos(lat_avg)
+    y = d_lat
+    return math.sqrt(x * x + y * y) * earth_radius_m
+
+
 class ControllerState:
     IDLE = "IDLE"
     EXECUTING = "EXECUTING"
@@ -150,6 +164,7 @@ class PrimitiveMotionController(Node):
         # Stuck & Safety Watchdog
         self.declare_parameter('stuck_detect_time_s', 1.5)      # Time threshold to trigger stuck abort (1.5s)
         self.declare_parameter('distance_source', 'auto')       # 'auto', 'odom', 'gps', 'time'
+        self.declare_parameter('gps_require_rtk', True)         # Only use GPS if RTK Fix/Float is active
 
         # Read Parameters
         self.control_rate_hz = float(self.get_parameter('control_rate_hz').value)
@@ -170,6 +185,7 @@ class PrimitiveMotionController(Node):
         self.distance_tolerance_m = float(self.get_parameter('distance_tolerance_m').value)
         self.stuck_detect_time_s = float(self.get_parameter('stuck_detect_time_s').value)
         self.distance_source = self.get_parameter('distance_source').value
+        self.gps_require_rtk = bool(self.get_parameter('gps_require_rtk').value)
 
         # ----------------------------------------------------------------------
         # Profiler & Trajectory Engine
@@ -494,8 +510,23 @@ class PrimitiveMotionController(Node):
 
         # Baseline capture
         self.start_heading_rad = self.current_heading_rad if self.current_heading_rad is not None else 0.0
-        self.start_odom_pos = self.current_odom_pos
-        self.start_gps_coords = self.current_gps_coords
+        self.start_odom_pos = self.current_odom_pos if (self.current_odom_pos and (time.time() - self.last_odom_time < 0.6)) else None
+
+        # Capture GPS baseline if recent (< 1.0s) and RTK mode condition is satisfied
+        if self.current_gps_coords and (time.time() - self.last_gps_time < 1.0):
+            if not self.gps_require_rtk or self.gps_status in [NavSatStatus.STATUS_GBAS_FIX, NavSatStatus.STATUS_SBAS_FIX]:
+                self.start_gps_coords = self.current_gps_coords
+            else:
+                self.start_gps_coords = None
+        else:
+            self.start_gps_coords = None
+
+        # Determine active distance tracking method for logging
+        active_source = "TIME_FALLBACK"
+        if (self.distance_source in ['auto', 'odom']) and self.start_odom_pos:
+            active_source = "ODOM (LiDAR / rf2o)"
+        elif (self.distance_source in ['auto', 'gps']) and self.start_gps_coords:
+            active_source = "RTK_GPS (Waveshare LC29H)"
 
         # Stuck detection baseline
         self.last_moved_time = time.time()
@@ -512,7 +543,7 @@ class PrimitiveMotionController(Node):
 
         self._set_state(ControllerState.EXECUTING)
         self.get_logger().info(
-            f"[PRIMITIVE START] Type: {motion_type}, Dist: {dist_m:+.2f}m, Yaw: {math.degrees(yaw_rad):+.1f}°"
+            f"[PRIMITIVE START] Type: {motion_type}, Dist: {dist_m:+.2f}m, Yaw: {math.degrees(yaw_rad):+.1f}°, Distance Source: [{active_source}]"
         )
 
     def _stop_motion(self) -> None:
@@ -664,7 +695,7 @@ class PrimitiveMotionController(Node):
 
     def _get_measured_distance_m(self) -> float:
         """Returns distance traveled in meters from active sensor source."""
-        # 1. 2D Laser Odometry (rf2o)
+        # 1. 2D Laser Odometry (rf2o) - LiDAR Robot
         if (
             (self.distance_source in ['auto', 'odom'])
             and self.start_odom_pos
@@ -675,7 +706,19 @@ class PrimitiveMotionController(Node):
             dy = self.current_odom_pos[1] - self.start_odom_pos[1]
             return math.sqrt(dx * dx + dy * dy)
 
-        # 2. Time-integration fallback
+        # 2. RTK GNSS (Waveshare LC29H) - GPS Robot
+        if (
+            (self.distance_source in ['auto', 'gps'])
+            and self.start_gps_coords
+            and self.current_gps_coords
+            and (time.time() - self.last_gps_time < 1.0)
+        ):
+            return gps_distance_m(
+                self.start_gps_coords[0], self.start_gps_coords[1],
+                self.current_gps_coords[0], self.current_gps_coords[1]
+            )
+
+        # 3. Universal Time-integration fallback
         if self.motion_start_time is not None:
             elapsed = time.time() - self.motion_start_time
             return elapsed * self.default_linear_speed
