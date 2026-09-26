@@ -87,7 +87,35 @@ step_motion_controller:
     gps_require_rtk: true             # Require RTK Fix/Float to use GPS distance
     mock_mode: false
 
-# 5. Teleop Keyboard Settings (Laptop)
+# 5. High-Level Primitive Motion Controller (Straight, Turn, Arc)
+primitive_motion_controller:
+  ros__parameters:
+    control_rate_hz: 50.0             # Control loop execution frequency (synced with IMU)
+    feedback_rate_hz: 10.0            # Action feedback publication frequency
+    
+    # --- Velocity Limits & Acceleration Profiles ---
+    default_linear_speed: 0.20        # Cruising linear speed (m/s)
+    default_angular_speed: 0.80       # Cruising turning speed (rad/s)
+    max_linear_speed: 0.50            # Absolute maximum linear speed (m/s)
+    max_angular_speed: 1.80           # Absolute maximum angular speed (rad/s)
+    max_linear_accel: 0.35            # Maximum linear acceleration (m/s^2)
+    max_angular_accel: 1.00           # Maximum angular acceleration (rad/s^2)
+    min_linear_speed: 0.08            # Minimum linear speed to overcome track friction
+    min_angular_speed: 0.25           # Minimum turn speed to overcome track friction
+
+    # --- Skid-Steering Calibration ---
+    wheel_track_geometric: 0.290      # Measured physical chassis track width (m)
+    wheel_track_effective: 0.380      # Calibrated effective track width L_eff for lateral shear (m)
+
+    # --- Feedback Control & Tolerances ---
+    yaw_kp: 1.2                       # Fast 50 Hz IMU heading correction gain
+    yaw_ki: 0.15                      # Integral error accumulator gain
+    yaw_tolerance_rad: 0.026          # Angle completion tolerance (~1.5 deg)
+    distance_tolerance_m: 0.03        # Distance completion tolerance (3 cm)
+    stuck_detect_time_s: 0.6          # Stall watchdog abort timeout (seconds)
+    distance_source: "auto"           # Multi-sensor distance tracking ('auto', 'odom', 'time')
+
+# 6. Teleop Keyboard Settings (Laptop)
 teleop_keyboard:
   ros__parameters:
     default_linear_speed: 0.2

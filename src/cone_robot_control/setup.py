@@ -28,6 +28,7 @@ setup(
             'bno08x_node = cone_robot_control.bno08x_node:main',
             'lc29h_gps_node = cone_robot_control.lc29h_gps_node:main',
             'step_motion_controller = cone_robot_control.step_motion_controller:main',
+            'primitive_motion_controller = cone_robot_control.primitive_motion_controller:main',
             'teleop_keyboard = cone_robot_control.teleop_keyboard:main',
             'simple_publisher = cone_robot_control.simple_publisher:main',
         ],

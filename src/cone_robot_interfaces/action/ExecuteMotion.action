@@ -1,0 +1,44 @@
+# ==============================================================================
+# Action: ExecuteMotion (High-Level Motion Primitive Interface)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Goal Definition
+# ------------------------------------------------------------------------------
+uint8 TYPE_DRIVE_STRAIGHT  = 0
+uint8 TYPE_ROTATE_IN_PLACE = 1
+uint8 TYPE_DRIVE_ARC       = 2
+uint8 TYPE_STOP            = 3
+
+uint8 motion_type           # Motion primitive type (constants above)
+float32 distance            # Path distance in meters (+ forward, - reverse)
+float32 delta_yaw           # Heading change in radians (+ CCW/left, - CW/right)
+float32 max_velocity        # Linear speed limit in m/s (0.0 = use parameter default)
+float32 max_yaw_rate        # Angular speed limit in rad/s (0.0 = use parameter default)
+
+---
+# ------------------------------------------------------------------------------
+# Result Definition
+# ------------------------------------------------------------------------------
+bool success
+
+uint8 ERROR_NONE          = 0
+uint8 ERROR_STUCK         = 1
+uint8 ERROR_CANCELED      = 2
+uint8 ERROR_TIMEOUT       = 3
+uint8 ERROR_INVALID_GOAL  = 4
+
+uint8 error_code            # Diagnostic error code
+string message              # Human-readable result status
+float32 actual_distance     # Total measured distance traveled in meters
+float32 actual_yaw          # Total measured heading change in radians
+
+---
+# ------------------------------------------------------------------------------
+# Feedback Definition
+# ------------------------------------------------------------------------------
+float32 progress_ratio      # 0.0 to 1.0 progress through active primitive
+float32 distance_remaining  # Remaining distance to target in meters
+float32 yaw_remaining       # Remaining heading to target in radians
+float32 current_velocity    # Current measured linear speed in m/s
+float32 current_yaw_rate    # Current measured angular velocity in rad/s

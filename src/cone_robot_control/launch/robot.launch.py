@@ -19,6 +19,7 @@ def launch_setup(context, *args, **kwargs):
     launch_imu_val = LaunchConfiguration('launch_imu').perform(context).lower() == 'true'
     launch_foxglove_val = LaunchConfiguration('launch_foxglove').perform(context).lower() == 'true'
     launch_motion_val = LaunchConfiguration('launch_motion_controller').perform(context).lower() == 'true'
+    motion_type_val = LaunchConfiguration('motion_controller_type').perform(context).lower()
 
     # Resolve active hardware based on robot_type preset
     if robot_type_val == 'gps':
@@ -67,13 +68,15 @@ def launch_setup(context, *args, **kwargs):
             )
         )
 
-    # 3. Step Motion Controller Node (Turn X° and Drive Y cm)
+    # 3. Motion Controller Node (Primitive Action or Legacy Step)
     if launch_motion_val:
+        motion_exec = 'primitive_motion_controller' if motion_type_val == 'primitive' else 'step_motion_controller'
+        motion_node_name = 'primitive_motion_controller' if motion_type_val == 'primitive' else 'step_motion_controller'
         nodes_to_launch.append(
             Node(
                 package='cone_robot_control',
-                executable='step_motion_controller',
-                name='step_motion_controller',
+                executable=motion_exec,
+                name=motion_node_name,
                 output='screen',
                 parameters=[config_file]
             )
@@ -186,7 +189,13 @@ def generate_launch_description():
     declare_launch_motion_cmd = DeclareLaunchArgument(
         'launch_motion_controller',
         default_value='true',
-        description='Whether to launch Step Motion Controller node'
+        description='Whether to launch motion controller node'
+    )
+
+    declare_motion_controller_type_cmd = DeclareLaunchArgument(
+        'motion_controller_type',
+        default_value='primitive',
+        description='Motion controller implementation: "primitive" (Action-based S-curve) or "step" (discrete turn/drive)'
     )
 
     declare_launch_foxglove_cmd = DeclareLaunchArgument(
@@ -201,6 +210,7 @@ def generate_launch_description():
         declare_launch_gps_cmd,
         declare_launch_imu_cmd,
         declare_launch_motion_cmd,
+        declare_motion_controller_type_cmd,
         declare_launch_foxglove_cmd,
         OpaqueFunction(function=launch_setup)
     ])
