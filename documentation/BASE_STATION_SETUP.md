@@ -6,19 +6,7 @@ The Pi Zero hosts both:
 1. **Local NTRIP Caster** (port `2101`) to broadcast live centimeter-accuracy RTCM3 differential corrections to your Cone Robot over Wi-Fi.
 2. **Real-Time Web Dashboard** (port `8080`) accessible on any phone, tablet, or laptop browser to monitor Survey-In progress, accuracy standard deviation, satellite lock, and connected rovers.
 
----
 
-## ⚡ Why Raspberry Pi Zero for the RTK Base Station?
-
-| Metric | Raspberry Pi 5 (Robot) | Raspberry Pi Zero W / Zero 2 W (Base Station) |
-| :--- | :--- | :--- |
-| **Primary Role** | Robot Hardware Gateway (ROS 2, LiDAR, Motors) | Dedicated Standalone NTRIP Caster |
-| **Power Consumption** | 4.0 W – 8.0 W | **~0.6 W – 0.9 W** |
-| **Runtime on 1× 18650 (3400 mAh)** | ~1.5 – 2 hours (insufficient) | **12 – 18+ hours** (full day in the field!) |
-| **RAM Footprint** | ~500 MB (Ubuntu + ROS 2) | **~15 MB** (Pure Python 3, zero ROS 2) |
-| **Form Factor & Weight** | Large, requires cooling fan | Ultra-compact, featherweight, silent |
-
----
 
 ## 1. Hardware Pinout & Header Setup
 
@@ -105,8 +93,8 @@ Configure the Base Station to automatically start on boot so it runs headless in
 sudo tee /etc/systemd/system/ntrip-base.service << 'EOF'
 [Unit]
 Description=RTK Base Station NTRIP Caster & Web Dashboard
-After=network-online.target
-Wants=network-online.target
+After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
@@ -133,35 +121,9 @@ To view live background logs at any time:
 journalctl -u ntrip-base.service -f
 ```
 
----
 
-## 6. Battery Power & Field Deployment (18650 Cell)
 
-The Pi Zero base station can be powered entirely by a single standard **18650 Li-ion battery** (e.g. Samsung INR18650-35E, 3.7V 3400 mAh):
-
-```text
-[ 18650 Li-ion Cell ] ---> [ 5V Step-Up Booster / Battery HAT ] ---> [ Pi Zero 5V / GND ]
-      (3.7V nominal)               (90% efficiency)                  + [ LC29H Base HAT ]
-```
-
-### Power Consumption & Expected Runtime Breakdown:
-| Component | Voltage / Current | Power |
-| :--- | :--- | :--- |
-| **Raspberry Pi Zero W** (CPU idle, Wi-Fi connected) | 5.0 V @ ~120 mA | 0.60 W |
-| **Waveshare LC29H GNSS HAT** (Active tracking) | 5.0 V @ ~45 mA | 0.22 W |
-| **Total System Load** | **5.0 V @ ~165 mA** | **~0.82 W** |
-
-$$\text{Battery Capacity} = 3.7\text{ V} \times 3.4\text{ Ah} = 12.58\text{ Wh}$$
-
-$$\text{Effective Usable Energy (at 88% boost efficiency)} = 12.58\text{ Wh} \times 0.88 = 11.07\text{ Wh}$$
-
-$$\text{Continuous Field Runtime} = \frac{11.07\text{ Wh}}{0.82\text{ W}} \approx \mathbf{13.5\text{ to } 16\text{ Hours!}}$$
-
-A single 18650 cell comfortably powers the base station for an entire day of outdoor testing.
-
----
-
-## 7. Connecting the Cone Robot (Rover) to the Base Station
+## 6. Connecting the Cone Robot (Rover) to the Base Station
 
 On your **Robot Raspberry Pi 5**, edit `src/cone_robot_control/config/robot_config.yaml`:
 

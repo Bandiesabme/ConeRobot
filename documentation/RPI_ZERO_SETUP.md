@@ -111,4 +111,4 @@ ls -l /dev/ttyAMA0
 crw-rw---- 1 root dialout 204, 64 ... /dev/ttyAMA0
 ```
 
-Your Raspberry Pi Zero is now fully prepared to run the **[RTK Base Station NTRIP Caster & Web Dashboard](BASE_STATION_SETUP.md)**.
+Your Raspberry Pi Zero is now fully prepared. Continue with the **[RTK Base Station Setup Guide](BASE_STATION_SETUP.md)** to test the caster and configure it to **[Auto-Start on Boot](BASE_STATION_SETUP.md#5-auto-start-on-boot-systemd-background-service)** whenever the Pi receives power.
