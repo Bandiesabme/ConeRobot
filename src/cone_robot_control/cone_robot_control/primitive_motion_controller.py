@@ -143,7 +143,9 @@ class PrimitiveMotionController(Node):
         # Closed-Loop Feedback Gains
         self.declare_parameter('yaw_kp', 1.2)                   # Proportional gain for heading correction
         self.declare_parameter('yaw_ki', 0.15)                  # Integral gain for heading trimming
-        self.declare_parameter('yaw_tolerance_rad', math.radians(1.15)) # Target yaw tolerance (~1.15 deg)
+        self.declare_parameter('yaw_tolerance_rad', math.radians(1.25)) # Target yaw tolerance (~1.25 deg)
+        self.declare_parameter('turn_brake_lead_deg', 4.5)      # Inertia coast lead angle in degrees (cuts power early)
+        self.declare_parameter('turn_settle_time_s', 0.25)      # Standstill settle duration (seconds)
         self.declare_parameter('distance_tolerance_m', 0.03)    # Distance tolerance (3 cm)
 
         # Stuck & Safety Watchdog
@@ -165,6 +167,8 @@ class PrimitiveMotionController(Node):
         self.yaw_kp = float(self.get_parameter('yaw_kp').value)
         self.yaw_ki = float(self.get_parameter('yaw_ki').value)
         self.yaw_tolerance_rad = float(self.get_parameter('yaw_tolerance_rad').value)
+        self.turn_brake_lead_rad = math.radians(float(self.get_parameter('turn_brake_lead_deg').value))
+        self.turn_settle_time_s = float(self.get_parameter('turn_settle_time_s').value)
         self.distance_tolerance_m = float(self.get_parameter('distance_tolerance_m').value)
         self.stuck_detect_time_s = float(self.get_parameter('stuck_detect_time_s').value)
         self.distance_source = self.get_parameter('distance_source').value
@@ -265,6 +269,7 @@ class PrimitiveMotionController(Node):
         self.start_heading_rad: float = 0.0
         self.motion_start_time: Optional[float] = None
         self.yaw_integral: float = 0.0
+        self.turn_settle_start: Optional[float] = None
 
         # Stuck Detection Variables
         self.stuck_check_start: Optional[float] = None
@@ -478,6 +483,7 @@ class PrimitiveMotionController(Node):
         self.target_yaw_rad = yaw_rad
         self.motion_start_time = time.time()
         self.yaw_integral = 0.0
+        self.turn_settle_start = None
 
         # Baseline capture
         self.start_heading_rad = self.current_heading_rad if self.current_heading_rad is not None else 0.0
@@ -557,23 +563,58 @@ class PrimitiveMotionController(Node):
         # --- SPECIALIZED LOGIC FOR IN-PLACE ROTATION ---
         if self.active_motion_type == "ROTATE":
             error_yaw = shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw)
+            abs_err = abs(error_yaw)
 
-            # Complete cleanly as soon as true target tolerance is reached
-            if abs(error_yaw) <= self.yaw_tolerance_rad:
+            # Determine whether robot is still rotating towards the target angle
+            is_approaching = (self.target_yaw_rad * error_yaw) > 0 if abs(self.target_yaw_rad) > 1e-4 else False
+
+            # 1. Inertia Coast Lead Trigger:
+            # While approaching, cut motor power early (turn_brake_lead_rad) so coasting momentum
+            # glides the tracks right onto the target without overshooting!
+            if is_approaching and abs_err <= self.turn_brake_lead_rad:
                 self._publish_cmd_vel(0.0, 0.0)
-                self._set_state(ControllerState.COMPLETED)
-                self.get_logger().info(
-                    f"[ROTATE COMPLETED] Target: {math.degrees(self.target_yaw_rad):.1f}°, "
-                    f"Final: {math.degrees(actual_yaw):.1f}° (Error: {math.degrees(error_yaw):+.2f}°)"
-                )
+                if self.turn_settle_start is None:
+                    self.turn_settle_start = now
+
+                # Verify chassis has physically settled to a standstill
+                is_stationary = abs(self.current_yaw_rate) < 0.08  # < 4.5 deg/s
+                settle_elapsed = now - self.turn_settle_start
+
+                if settle_elapsed >= self.turn_settle_time_s and is_stationary:
+                    # Once stationary, if within tolerance, complete!
+                    if abs_err <= self.yaw_tolerance_rad:
+                        self._set_state(ControllerState.COMPLETED)
+                        self.get_logger().info(
+                            f"[ROTATE COMPLETED] Target: {math.degrees(self.target_yaw_rad):.1f}°, "
+                            f"Settled: {math.degrees(actual_yaw):.1f}° (Final Error: {math.degrees(error_yaw):+.2f}°)"
+                        )
+                        return
+                    # If settled outside tolerance (undershot or overshot), reset settle timer and correct
+                    self.turn_settle_start = None
+                else:
+                    return
+
+            # 2. Standstill at Target Check (Already within tolerance):
+            if abs_err <= self.yaw_tolerance_rad:
+                self._publish_cmd_vel(0.0, 0.0)
+                if self.turn_settle_start is None:
+                    self.turn_settle_start = now
+
+                is_stationary = abs(self.current_yaw_rate) < 0.08
+                if (now - self.turn_settle_start) >= self.turn_settle_time_s and is_stationary:
+                    self._set_state(ControllerState.COMPLETED)
+                    self.get_logger().info(
+                        f"[ROTATE COMPLETED] Target: {math.degrees(self.target_yaw_rad):.1f}°, "
+                        f"Settled: {math.degrees(actual_yaw):.1f}° (Final Error: {math.degrees(error_yaw):+.2f}°)"
+                    )
+                    return
                 return
 
+            # 3. Driving / Correcting towards Target:
+            self.turn_settle_start = None
             sign = 1.0 if error_yaw >= 0 else -1.0
             # Smooth proportional deceleration into target:
-            # - Cruise fast when error > 15 deg
-            # - Ramp smoothly down towards min_angular_speed as it approaches target
-            # - Never drop below min_angular_speed so tracks never stall or whine
-            speed_factor = min(1.0, abs(error_yaw) / math.radians(15.0))
+            speed_factor = min(1.0, abs_err / math.radians(20.0))
             target_w = self.min_angular_speed + (self.max_angular_speed - self.min_angular_speed) * speed_factor
             cmd_omega = sign * target_w
 
