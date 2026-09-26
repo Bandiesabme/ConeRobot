@@ -219,16 +219,18 @@ class PrimitiveMotionController(Node):
         # ----------------------------------------------------------------------
         self.action_server = None
         if HAS_ACTION_MSGS:
-            self.action_server = ActionServer(
-                self,
-                ExecuteMotion,
-                'execute_motion',
-                execute_callback=self._execute_action_callback,
-                goal_callback=self._goal_action_callback,
-                cancel_callback=self._cancel_action_callback,
-                callback_group=self.cb_group,
-            )
-            self.get_logger().info("Action Server [execute_motion] initialized successfully.")
+            try:
+                self.action_server = ActionServer(
+                    self,
+                    ExecuteMotion,
+                    'execute_motion',
+                    execute_callback=self._execute_action_callback,
+                    cancel_callback=self._cancel_action_callback,
+                    callback_group=self.cb_group,
+                )
+                self.get_logger().info("Action Server [execute_motion] initialized successfully.")
+            except Exception as e:
+                self.get_logger().error(f"Failed to initialize Action Server: {e}")
         else:
             self.get_logger().warn(
                 f"cone_robot_interfaces action not available ({_ACTION_IMPORT_ERROR})! Running in topic-only mode (/cmd_step, /cmd_primitive)."
@@ -435,7 +437,7 @@ class PrimitiveMotionController(Node):
             feedback.current_yaw_rate = float(self.current_yaw_rate)
             goal_handle.publish_feedback(feedback)
 
-            time.sleep(1.0 / self.feedback_rate_hz)
+            rate.sleep()
 
         # Evaluate final outcome
         result = ExecuteMotion.Result()
