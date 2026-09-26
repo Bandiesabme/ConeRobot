@@ -564,7 +564,13 @@ class PrimitiveMotionController(Node):
             self.last_yaw_rad = actual_yaw
 
         # Stall trigger: commanded to drive for > stuck_detect_time_s with ZERO physical motion
-        if is_commanding_movement and (now - self.last_moved_time > self.stuck_detect_time_s):
+        # (Ignore stall watchdog when within 4.0 deg of target to prevent false aborts during final trim/settle)
+        is_near_target = (
+            (self.active_motion_type == "ROTATE" and abs(shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw)) <= math.radians(4.0))
+            or (self.active_motion_type == "STRAIGHT" and (abs(self.target_dist_m) - abs(actual_dist)) <= 0.05)
+        )
+
+        if is_commanding_movement and not is_near_target and (now - self.last_moved_time > self.stuck_detect_time_s):
             self.get_logger().error(
                 f"[STALL DETECTED] Zero motion detected for {self.stuck_detect_time_s:.2f}s while driving! Aborting for safety."
             )
