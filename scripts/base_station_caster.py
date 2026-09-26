@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ==============================================================================
-Raspberry Pi 5 RTK Base Station NTRIP Caster & Live Web Dashboard
+Raspberry Pi RTK Base Station NTRIP Caster & Live Web Dashboard
 ==============================================================================
 Description:
     Pure Standalone Python 3 application (Zero ROS dependencies).
@@ -232,7 +232,7 @@ class NTRIPBaseCaster:
     def start(self) -> None:
         """Starts NTRIP Caster, Web Dashboard, and Serial Reader threads."""
         print("=" * 75)
-        print("  📡 RASPBERRY PI 5 RTK BASE STATION & WEB DASHBOARD")
+        print("  📡 RASPBERRY PI RTK BASE STATION & WEB DASHBOARD")
         print("=" * 75)
         print(f"  • Base Station IP   : {self.local_ip}")
         print(f"  • Serial Port       : {self.serial_port} @ {self.baud_rate} baud")

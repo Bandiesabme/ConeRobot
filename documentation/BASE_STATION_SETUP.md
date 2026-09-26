@@ -1,168 +1,107 @@
-# 📡 Raspberry Pi 5 RTK Base Station Setup & Live Web Dashboard Guide
+# 📡 Raspberry Pi Zero RTK Base Station Setup & Live Web Dashboard Guide
 
-This guide details how to configure a second **Raspberry Pi 5** equipped with an RTK Base GNSS module (such as the **Waveshare LC29H(BS)** or **LC29H(EA)**) as a dedicated **Local RTK Base Station**.
+This guide details how to configure a dedicated **Raspberry Pi Zero (W / Zero 2 W)** equipped with an RTK Base GNSS module (such as the **Waveshare LC29H(BS)** or **LC29H(EA)**) as an ultra-low-power, standalone **Field RTK Base Station**.
 
-It hosts both:
-1. **Local NTRIP Caster** (port `2101`) to broadcast live centimeter-accuracy RTCM3 corrections to your Cone Robot over Wi-Fi.
-2. **Real-Time Web Dashboard** (port `8080`) accessible on any phone or laptop browser to monitor Survey-In progress, accuracy standard deviation, satellite lock, and connected rovers.
+The Pi Zero hosts both:
+1. **Local NTRIP Caster** (port `2101`) to broadcast live centimeter-accuracy RTCM3 differential corrections to your Cone Robot over Wi-Fi.
+2. **Real-Time Web Dashboard** (port `8080`) accessible on any phone, tablet, or laptop browser to monitor Survey-In progress, accuracy standard deviation, satellite lock, and connected rovers.
+
+---
+
+## ⚡ Why Raspberry Pi Zero for the RTK Base Station?
+
+| Metric | Raspberry Pi 5 (Robot) | Raspberry Pi Zero W / Zero 2 W (Base Station) |
+| :--- | :--- | :--- |
+| **Primary Role** | Robot Hardware Gateway (ROS 2, LiDAR, Motors) | Dedicated Standalone NTRIP Caster |
+| **Power Consumption** | 4.0 W – 8.0 W | **~0.6 W – 0.9 W** |
+| **Runtime on 1× 18650 (3400 mAh)** | ~1.5 – 2 hours (insufficient) | **12 – 18+ hours** (full day in the field!) |
+| **RAM Footprint** | ~500 MB (Ubuntu + ROS 2) | **~15 MB** (Pure Python 3, zero ROS 2) |
+| **Form Factor & Weight** | Large, requires cooling fan | Ultra-compact, featherweight, silent |
 
 ---
 
 ## 1. Hardware Pinout & Header Setup
 
-Mount your RTK Base GNSS HAT directly to the Raspberry Pi 5 40-pin GPIO header:
+Mount your RTK Base GNSS HAT directly to the Raspberry Pi Zero 40-pin GPIO header:
 
-| Pin Function | RPi 5 Physical Pin | GPIO Number | Notes |
+| Pin Function | Pi Zero Physical Pin | GPIO Number | Notes |
 | :--- | :--- | :--- | :--- |
-| **UART TX** (HAT RX) | Pin 8 | GPIO 14 (TXD0) | Routes through RP1 controller |
-| **UART RX** (HAT TX) | Pin 10 | GPIO 15 (RXD0) | Routes through RP1 controller |
-| **Power (5V / 3.3V)** | Pins 2, 4 (5V) / Pin 1 (3.3V) | - | Clean power rail |
-| **Ground** | Pins 6, 9, 14, 20, 25, 30 | GND | Common Ground |
+| **UART TX** (HAT RX) | Pin 8 | GPIO 14 (TXD0) | High-speed PL011 UART transmit |
+| **UART RX** (HAT TX) | Pin 10 | GPIO 15 (RXD0) | High-speed PL011 UART receive |
+| **Power (5V)** | Pin 2 or 4 | 5V | Powers LC29H module (~50 mA) |
+| **Ground** | Pin 6, 9, 14, 20, 25, 30 | GND | Common Ground |
 
 > [!IMPORTANT]
-> - **Yellow Jumper Cap**: Set to **Position B** (connects HAT UART to GPIO 14/15 -> `/dev/ttyAMA0`).
-> - **Base Antenna Placement**: Mount the external GNSS antenna outdoors with an unobstructed 360° view of the open sky on top of a metallic ground plane (e.g., a 10–15 cm metal plate/disc) for maximum satellite signal purity.
+> - **Yellow Jumper Cap on HAT**: Set to **Position B** (routes GNSS UART directly to 40-pin GPIO header pins 14/15 -> `/dev/ttyAMA0`).
+> - **Base Antenna Placement**: Mount the external multi-band GNSS antenna outdoors with an unobstructed 360° view of the open sky. Place it on top of a metallic ground plane (e.g., a 10–15 cm metal disc or tin lid) to reject ground-bounce multipath signals and maximize carrier-to-noise ratio ($C/N_0$).
 
 ---
 
-## 2. Base Pi Initial System Setup
+## 2. System Prerequisites
 
-### Option A: Raspberry Pi 5 (Ubuntu Server)
-Run these commands once on your **Raspberry Pi 5 Base Station**:
-
-```bash
-# 1. Enable hardware UART in firmware boot config
-sudo bash -c 'cat << EOF >> /boot/firmware/config.txt
-enable_uart=1
-dtparam=uart0=on
-EOF'
-
-# 2. Add user to dialout group for UART access
-sudo usermod -aG dialout $USER
-
-# 3. Disable & permanently mask Linux serial login console
-sudo systemctl stop serial-getty@ttyAMA0.service
-sudo systemctl disable serial-getty@ttyAMA0.service
-sudo systemctl mask serial-getty@ttyAMA0.service
-
-# 4. Install Python dependencies & clone repository
-sudo apt update && sudo apt install -y python3-pip python3-serial git
-cd ~
-git clone https://github.com/Bandiesabme/ConeRobot.git ~/github/ConeRobot
-
-# 5. Apply Wi-Fi auto-connect to router
-sudo bash ~/github/ConeRobot/scripts/setup_wifi.sh
-
-# Reboot to apply all firmware & permission changes
-sudo reboot
-```
+Before launching the base station software, ensure your Raspberry Pi Zero has been prepared following the dedicated **[Raspberry Pi Zero Setup Guide](RPI_ZERO_SETUP.md)**:
+- [x] Base packages installed (`git`, `python3`, `python3-serial`).
+- [x] Hardware PL011 UART enabled (`/dev/ttyAMA0` configured via `dtoverlay=disable-bt`).
+- [x] Serial login console disabled and user added to `dialout` group.
+- [x] Wi-Fi configured and power saving disabled (`wifi.powersave = 2`).
+- [x] Repository cloned to `~/github/ConeRobot`.
 
 ---
 
-### Option B: Raspberry Pi Zero (W / Zero 2 W) with Raspberry Pi OS (32-bit / 64-bit)
+## 3. Testing the Base Station Caster & Web Dashboard
 
-A **Raspberry Pi Zero W / Zero 2 W** is ideal as a dedicated low-power RTK Base Station (consumes < 1W of power and uses only ~15 MB RAM for the caster).
+### Manual Test Run
+Run the caster script directly in your terminal:
 
-Run these commands on your **Pi Zero**:
-
-```bash
-# 1. Disable onboard Bluetooth to assign full hardware PL011 UART to GPIO 14/15
-# (Ensures zero dropped RTCM3 correction packets at 115200 baud)
-CONFIG_FILE="/boot/firmware/config.txt"
-[ ! -f "$CONFIG_FILE" ] && CONFIG_FILE="/boot/config.txt"
-
-sudo bash -c "cat << EOF >> $CONFIG_FILE
-enable_uart=1
-dtoverlay=disable-bt
-EOF"
-
-# 2. Disable Bluetooth systemd services (frees CPU and RAM)
-sudo systemctl disable --now hciuart.service 2>/dev/null || true
-sudo systemctl disable --now bluetooth.service 2>/dev/null || true
-
-# 3. Disable Linux Serial Console (so it doesn't corrupt RTCM3 binary data)
-sudo systemctl stop serial-getty@ttyAMA0.service 2>/dev/null || true
-sudo systemctl disable serial-getty@ttyAMA0.service 2>/dev/null || true
-sudo systemctl mask serial-getty@ttyAMA0.service 2>/dev/null || true
-
-CMDLINE_FILE="/boot/firmware/cmdline.txt"
-[ ! -f "$CMDLINE_FILE" ] && CMDLINE_FILE="/boot/cmdline.txt"
-sudo sed -i 's/console=serial0,[0-9]\+ //g; s/console=ttyAMA0,[0-9]\+ //g' "$CMDLINE_FILE"
-
-# 4. Add user to dialout group
-sudo usermod -aG dialout $USER
-
-# 5. Disable Wi-Fi power save (prevents SSH lag and dropped caster streams)
-sudo mkdir -p /etc/NetworkManager/conf.d/
-sudo tee /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf << 'EOF'
-[connection]
-wifi.powersave = 2
-EOF
-
-# 6. Install Python dependencies & clone repository
-sudo apt update && sudo apt install -y python3-pip python3-serial git
-mkdir -p ~/github
-cd ~/github
-git clone https://github.com/Bandiesabme/ConeRobot.git ~/github/ConeRobot
-
-# 7. Reboot to apply changes
-sudo reboot
-```
-
-> [!TIP]
-> On the Pi Zero with `dtoverlay=disable-bt`, the Waveshare LC29H RTK Base HAT is accessed reliably via `/dev/ttyAMA0` or `/dev/serial0`.
-
----
-
-## 3. Launching the Local Base Station Caster & Web Dashboard
-
-### Option A: Manual Terminal Launch
-
-In your Base Pi terminal:
 ```bash
 python3 ~/github/ConeRobot/scripts/base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE
 ```
 
-*Expected output:*
+*Expected Terminal Output:*
 ```text
-======================================================================
-  📡 RASPBERRY PI 5 RTK BASE STATION & WEB DASHBOARD
-======================================================================
-  • Base Station IP   : 192.168.0.20
+===========================================================================
+  📡 RASPBERRY PI RTK BASE STATION & WEB DASHBOARD
+===========================================================================
+  • Base Station IP   : 192.168.137.105 (or 192.168.0.x)
   • Serial Port       : /dev/ttyAMA0 @ 115200 baud
   • NTRIP Server Port : 2101 (Mountpoint: /BASE)
-  • 🌐 Web Dashboard  : http://192.168.0.20:8080
-======================================================================
+  • 🌐 Web Dashboard  : http://192.168.137.105:8080
+  • Mode              : ⏳ Auto-Calibrating (3600s Target)
+===========================================================================
 
 [NTRIP Server] Listening for rovers on port 2101...
-[Serial] Opening Base GNSS UART: /dev/ttyAMA0 @ 115200 baud...
+[Serial] Opening Serial Port: /dev/ttyAMA0 @ 115200 baud...
 ✅ [Serial] Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...
 ```
 
+Press `Ctrl+C` to stop the test once verified.
+
 ---
 
-## 4. Viewing the Real-Time Web Dashboard (Browser)
+## 4. Live Browser Web Dashboard
 
-Open your phone or laptop browser and navigate to:
+Open any web browser on your phone, tablet, or laptop connected to the same Wi-Fi network:
 ```text
-http://<BASE_PI_IP>:8080
+http://<BASE_PI_ZERO_IP>:8080
 ```
-*(Or `http://gpsBaseStation.local:8080`)*
+*(Example: `http://192.168.137.105:8080` or `http://conerobotBaseStation.local:8080`)*
 
-### Features on the Web Dashboard:
-- 🎯 **Survey-In Calibration Meter**: Live progress bar (`0%` $\rightarrow$ `100%`), elapsed duration (`185s / 300s`), and real-time accuracy standard deviation (`0.75 m`).
-- 🛰️ **GNSS Satellite Quality**: Total locked satellites (35+ Sats) and HDOP signal health.
-- 📍 **Fixed Reference Coordinates**: Absolute latitude, longitude, and elevation with a direct **Google Maps** link.
-- 📡 **Active Connected Rovers**: Live table of all rovers receiving RTCM3 corrections and data transferred.
-- 📋 **Rover Configuration Snippet**: Ready-to-copy YAML snippet containing the Base Station's live IP address.
+### Dashboard Features:
+- 🎯 **Survey-In Progress Bar**: Real-time calibration countdown (`0%` $\rightarrow$ `100%`), elapsed duration, and standard deviation accuracy (`0.35 m`).
+- 🛰️ **Tracked Satellite Constellations**: Real-time count of GPS, GLONASS, Galileo, and BeiDou satellites.
+- 📍 **Fixed Reference Coordinates**: Absolute Latitude, Longitude, and Ellipsoidal Height with a direct **Google Maps** link.
+- 🔒 **"Lock Now" & "Use Saved Position"**: Allows locking current averaged position or restoring previous survey coordinates instantly (0 mm drift).
+- 📡 **Active Connected Rovers**: Live table of all robots receiving RTCM3 corrections and byte throughput.
+- 📋 **Rover Config Snippet**: Instant copyable YAML parameters formatted for `robot_config.yaml`.
 
 ---
 
 ## 5. Auto-Start on Boot (Systemd Background Service)
 
-To make the Base Station Caster and Web Dashboard start automatically on boot in the field:
+Configure the Base Station to automatically start on boot so it runs headless in the field:
 
 ```bash
+# Create systemd service unit
 sudo tee /etc/systemd/system/ntrip-base.service << 'EOF'
 [Unit]
 Description=RTK Base Station NTRIP Caster & Web Dashboard
@@ -181,19 +120,50 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-# Enable and start service
+# Reload systemd, enable service on boot, and start it immediately
 sudo systemctl daemon-reload
 sudo systemctl enable --now ntrip-base.service
 
-# Check service status
+# Verify service is active and running
 sudo systemctl status ntrip-base.service
+```
+
+To view live background logs at any time:
+```bash
+journalctl -u ntrip-base.service -f
 ```
 
 ---
 
-## 6. Connecting Your Cone Robot Rover to the Base Station
+## 6. Battery Power & Field Deployment (18650 Cell)
 
-On your **Robot Pi**, configure `src/cone_robot_control/config/robot_config.yaml`:
+The Pi Zero base station can be powered entirely by a single standard **18650 Li-ion battery** (e.g. Samsung INR18650-35E, 3.7V 3400 mAh):
+
+```text
+[ 18650 Li-ion Cell ] ---> [ 5V Step-Up Booster / Battery HAT ] ---> [ Pi Zero 5V / GND ]
+      (3.7V nominal)               (90% efficiency)                  + [ LC29H Base HAT ]
+```
+
+### Power Consumption & Expected Runtime Breakdown:
+| Component | Voltage / Current | Power |
+| :--- | :--- | :--- |
+| **Raspberry Pi Zero W** (CPU idle, Wi-Fi connected) | 5.0 V @ ~120 mA | 0.60 W |
+| **Waveshare LC29H GNSS HAT** (Active tracking) | 5.0 V @ ~45 mA | 0.22 W |
+| **Total System Load** | **5.0 V @ ~165 mA** | **~0.82 W** |
+
+$$\text{Battery Capacity} = 3.7\text{ V} \times 3.4\text{ Ah} = 12.58\text{ Wh}$$
+
+$$\text{Effective Usable Energy (at 88% boost efficiency)} = 12.58\text{ Wh} \times 0.88 = 11.07\text{ Wh}$$
+
+$$\text{Continuous Field Runtime} = \frac{11.07\text{ Wh}}{0.82\text{ W}} \approx \mathbf{13.5\text{ to } 16\text{ Hours!}}$$
+
+A single 18650 cell comfortably powers the base station for an entire day of outdoor testing.
+
+---
+
+## 7. Connecting the Cone Robot (Rover) to the Base Station
+
+On your **Robot Raspberry Pi 5**, edit `src/cone_robot_control/config/robot_config.yaml`:
 
 ```yaml
 lc29h_gps_node:
@@ -202,19 +172,23 @@ lc29h_gps_node:
     baud_rate: 115200
     frame_id: "gps_link"
     
-    # --- Connect to Your Local Base Station ---
+    # --- Local Base Station NTRIP Configuration ---
     ntrip_enable: true
-    ntrip_caster: "192.168.0.20"       # Replace with your Base Pi's IP address
+    ntrip_caster: "conerobotBaseStation.local"  # Auto-resolves Pi Zero on ANY router or hotspot via mDNS
     ntrip_port: 2101
     ntrip_mountpoint: "BASE"
     ntrip_user: "conerobot"
     ntrip_password: "none"
 ```
 
-Then launch the robot stack:
+Then start the robot software stack:
 ```bash
 ros2 launch cone_robot_control robot.launch.py
 ```
 
-### Result:
-Your robot will connect to your local base station over the Wi-Fi router and achieve **instant `RTK FIX` (< 1 cm error)** with zero internet dependency!
+### Expected Result:
+1. `lc29h_gps_node` connects to the Pi Zero NTRIP caster (`192.168.137.105:2101/BASE`).
+2. Differential RTCM3 correction frames stream into the robot at 1 Hz.
+3. The robot GNSS status transitions from `3D FIX` $\rightarrow$ `RTK FLOAT` $\rightarrow$ **`RTK FIX (14+ Sats, < 1 cm Error)`**!
+4. The Base Station web dashboard (`http://<BASE_IP>:8080`) lists your Cone Robot under **Connected Rovers** in real time.
+

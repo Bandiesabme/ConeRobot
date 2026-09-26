@@ -48,8 +48,8 @@ lc29h_gps_node:
     # --- NTRIP RTK Correction Stream Configuration ---
     ntrip_enable: true
 
-    # Option A: Local Base Station Pi (Default - Ultra-precise < 1 cm)
-    ntrip_caster: "192.168.0.102"      # Base Station Pi IP (or "gpsBaseStation.local")
+    # Option A: Local Base Station Pi (Auto-resolves across any router/hotspot via mDNS)
+    ntrip_caster: "conerobotBaseStation.local"  # Resolves automatically (or use direct IP if mDNS is disabled)
     ntrip_port: 2101                  # Base Station NTRIP port
     ntrip_mountpoint: "BASE"          # Base Station mountpoint
     ntrip_user: "conerobot"           # Local username
