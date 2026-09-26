@@ -110,11 +110,10 @@ primitive_motion_controller:
     # --- Feedback Control & Tolerances ---
     yaw_kp: 1.2                       # Fast 50 Hz IMU heading correction gain
     yaw_ki: 0.15                      # Integral error accumulator gain
-    yaw_tolerance_rad: 0.022          # Angle completion tolerance (~1.25 deg)
-    turn_brake_lead_deg: 4.5          # Inertia coast lead angle (cuts power 4.5° early so tracks coast onto target)
-    turn_settle_time_s: 0.25          # Standstill settle duration (ensures physical rest before finish)
+    yaw_tolerance_rad: 0.031          # Angle completion tolerance (~1.8 deg)
+    turn_settle_time_s: 0.15          # Standstill settle duration (seconds)
     distance_tolerance_m: 0.03        # Distance completion tolerance (3 cm)
-    stuck_detect_time_s: 0.6          # Stall watchdog abort timeout (seconds)
+    stuck_detect_time_s: 1.5          # Stall watchdog abort timeout (seconds)
     distance_source: "auto"           # Multi-sensor distance tracking ('auto', 'odom', 'time')
 
 # 6. Teleop Keyboard Settings (Laptop)
