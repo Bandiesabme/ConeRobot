@@ -134,7 +134,7 @@ class PrimitiveMotionController(Node):
 
         # Minimum Speeds (to overcome static track friction)
         self.declare_parameter('min_linear_speed', 0.08)        # Minimum speed to prevent track stall
-        self.declare_parameter('min_angular_speed', 0.25)       # Minimum turn speed
+        self.declare_parameter('min_angular_speed', 0.70)       # Assertive turn speed (matches step controller)
 
         # Skid-Steering Kinematic Parameters
         self.declare_parameter('wheel_track_geometric', 0.290)  # Physical track width in meters
@@ -143,7 +143,7 @@ class PrimitiveMotionController(Node):
         # Closed-Loop Feedback Gains
         self.declare_parameter('yaw_kp', 1.2)                   # Proportional gain for heading correction
         self.declare_parameter('yaw_ki', 0.15)                  # Integral gain for heading trimming
-        self.declare_parameter('yaw_tolerance_rad', math.radians(1.5)) # Target yaw tolerance
+        self.declare_parameter('yaw_tolerance_rad', math.radians(1.15)) # Target yaw tolerance (~1.15 deg)
         self.declare_parameter('distance_tolerance_m', 0.03)    # Distance tolerance (3 cm)
 
         # Stuck & Safety Watchdog
@@ -557,21 +557,26 @@ class PrimitiveMotionController(Node):
         # --- SPECIALIZED LOGIC FOR IN-PLACE ROTATION ---
         if self.active_motion_type == "ROTATE":
             error_yaw = shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw)
-            turn_duration = now - self.motion_start_time
 
-            # Complete immediately if within tolerance OR if close (<= 3.5 deg) and duration > 0.8s
-            if abs(error_yaw) <= self.yaw_tolerance_rad or (turn_duration > 0.8 and abs(error_yaw) <= math.radians(3.5)):
+            # Complete cleanly as soon as true target tolerance is reached
+            if abs(error_yaw) <= self.yaw_tolerance_rad:
                 self._publish_cmd_vel(0.0, 0.0)
                 self._set_state(ControllerState.COMPLETED)
                 self.get_logger().info(
-                    f"[ROTATE COMPLETED] Final Yaw: {math.degrees(actual_yaw):.1f}° (Error: {math.degrees(error_yaw):+.1f}°)"
+                    f"[ROTATE COMPLETED] Target: {math.degrees(self.target_yaw_rad):.1f}°, "
+                    f"Final: {math.degrees(actual_yaw):.1f}° (Error: {math.degrees(error_yaw):+.2f}°)"
                 )
                 return
 
-            # Assertive turning speed so tracks never stall or whine against floor friction
             sign = 1.0 if error_yaw >= 0 else -1.0
-            raw_w = max(abs(omega_ref), abs(self.yaw_kp * error_yaw))
-            cmd_omega = sign * max(self.min_angular_speed, min(self.max_angular_speed, raw_w))
+            # Smooth proportional deceleration into target:
+            # - Cruise fast when error > 15 deg
+            # - Ramp smoothly down towards min_angular_speed as it approaches target
+            # - Never drop below min_angular_speed so tracks never stall or whine
+            speed_factor = min(1.0, abs(error_yaw) / math.radians(15.0))
+            target_w = self.min_angular_speed + (self.max_angular_speed - self.min_angular_speed) * speed_factor
+            cmd_omega = sign * target_w
+
             self._publish_cmd_vel(0.0, cmd_omega)
             return
 
