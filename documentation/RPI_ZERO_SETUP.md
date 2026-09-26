@@ -29,12 +29,9 @@ Applying `dtoverlay=disable-bt` permanently assigns the rock-solid hardware PL01
 
 ### Step 2.1: Enable UART & Assign Hardware PL011 to GPIO 14/15
 ```bash
-CONFIG_FILE="/boot/firmware/config.txt"
-[ ! -f "$CONFIG_FILE" ] && CONFIG_FILE="/boot/config.txt"
+sudo bash -c "cat << 'EOF' >> /boot/firmware/config.txt
 
-sudo bash -c "cat << 'EOF' >> $CONFIG_FILE
-
-# Enable hardware UART for RTK GNSS HAT (PL011 on GPIO 14/15)
+[all]
 enable_uart=1
 dtoverlay=disable-bt
 EOF"

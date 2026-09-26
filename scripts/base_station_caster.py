@@ -85,8 +85,10 @@ class NTRIPBaseCaster:
         self.is_static_fixed = False
         self.locked_timestamp = ""
 
-        # Persistence file path
+        # Persistence file paths
         self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_station_fixed_coords.json")
+        self.locations_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_station_locations.json")
+        self.active_location: Optional[str] = None
 
         # Coordinate sample history (for averaging)
         self.coord_samples: List[Tuple[float, float, float]] = []
@@ -98,17 +100,136 @@ class NTRIPBaseCaster:
         self.hdop = 1.0
         self.local_ip = self._get_local_ip()
 
-        # Check manual coordinates or explicit use_saved flag (does NOT auto-lock without user intent)
+        # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
             self._apply_fixed_coords(fixed_lat, fixed_lon, fixed_alt or 0.0, "Command-Line Arguments")
-        elif use_saved and not recalibrate:
-            self._load_saved_coords()
-
-        saved = self._get_saved_coords_info()
-        if saved and not self.is_static_fixed:
-            self._add_log(f"💡 Saved coordinates found from {saved.get('timestamp', 'past session')}. Click 'Use Saved Position' on dashboard or use --use-saved to apply.")
+        elif not recalibrate:
+            store = self._load_locations_store()
+            act = store.get("active_location")
+            if act and act in store.get("locations", {}):
+                self.load_named_location(act)
+                self._add_log(f"🚀 Auto-loaded active preset '{act}'. Base station ready with 0 mm drift!")
+            elif self._load_saved_coords():
+                self._add_log("🚀 Auto-loaded saved static coordinates from previous session. Base station ready with 0 mm drift!")
+            else:
+                self._add_log("⏳ No saved coordinates found (or recalibrate requested). Starting Survey-In calibration...")
+        else:
+            self._add_log("🔄 Recalibrate requested. Starting fresh Survey-In calibration...")
 
         self._add_log(f"Base Station initialized. Serial: {self.serial_port}, Web: http://{self.local_ip}:{self.web_port}")
+
+    def _load_locations_store(self) -> dict:
+        """Loads all named location profiles from JSON with migration from legacy format."""
+        if os.path.exists(self.locations_file):
+            try:
+                with open(self.locations_file, "r") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "locations" in data:
+                    return data
+            except Exception:
+                pass
+
+        # Migration from legacy single-config file if exists
+        store = {"active_location": None, "locations": {}}
+        legacy = self._get_saved_coords_info()
+        if legacy:
+            name = "Default Benchmark"
+            store["active_location"] = name
+            store["locations"][name] = {
+                "lat": legacy["lat"],
+                "lon": legacy["lon"],
+                "alt": legacy.get("alt", 0.0),
+                "timestamp": legacy.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            }
+            self._save_locations_store(store)
+        return store
+
+    def _save_locations_store(self, store: dict) -> None:
+        """Persists location profiles to disk."""
+        try:
+            with open(self.locations_file, "w") as f:
+                json.dump(store, f, indent=2)
+        except Exception as e:
+            self._add_log(f"Failed to save locations: {e}", "ERROR")
+
+    def save_named_location(self, name: str) -> bool:
+        """Saves current surveyed or fixed coordinates under a custom preset name."""
+        if not name or not name.strip():
+            return False
+        name = name.strip()
+
+        lat, lon, alt = self.survey_lat, self.survey_lon, self.survey_alt
+        if (lat == 0.0 or lon == 0.0) and self.coord_samples:
+            lats = [s[0] for s in self.coord_samples]
+            lons = [s[1] for s in self.coord_samples]
+            alts = [s[2] for s in self.coord_samples]
+            lat = sum(lats) / len(lats)
+            lon = sum(lons) / len(lons)
+            alt = sum(alts) / len(alts)
+
+        if lat == 0.0 or lon == 0.0:
+            self._add_log("Cannot save preset: No valid GNSS coordinates available yet!", "WARN")
+            return False
+
+        store = self._load_locations_store()
+        store["locations"][name] = {
+            "lat": round(lat, 8),
+            "lon": round(lon, 8),
+            "alt": round(alt, 2),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        store["active_location"] = name
+        self.active_location = name
+        self._save_locations_store(store)
+
+        # Also write legacy single config for backward compatibility
+        try:
+            with open(self.config_file, "w") as f:
+                json.dump({
+                    "is_locked": True,
+                    "lat": round(lat, 8),
+                    "lon": round(lon, 8),
+                    "alt": round(alt, 2),
+                    "samples": len(self.coord_samples) or 100,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                }, f, indent=2)
+        except Exception:
+            pass
+
+        self._apply_fixed_coords(lat, lon, alt, f"Preset '{name}'")
+        self._add_log(f"💾 Saved & locked location preset '{name}': ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m)")
+        return True
+
+    def load_named_location(self, name: str) -> bool:
+        """Applies a previously saved location profile by name with 0 mm drift."""
+        store = self._load_locations_store()
+        loc = store.get("locations", {}).get(name)
+        if not loc:
+            self._add_log(f"Preset '{name}' not found!", "WARN")
+            return False
+
+        lat = float(loc["lat"])
+        lon = float(loc["lon"])
+        alt = float(loc.get("alt", 0.0))
+        self._apply_fixed_coords(lat, lon, alt, f"Preset '{name}'")
+        self.active_location = name
+        store["active_location"] = name
+        self._save_locations_store(store)
+        self._add_log(f"🎯 Switched to preset '{name}': ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m) [0 mm Drift]")
+        return True
+
+    def delete_named_location(self, name: str) -> bool:
+        """Deletes a saved location profile by name."""
+        store = self._load_locations_store()
+        if name in store.get("locations", {}):
+            del store["locations"][name]
+            if store.get("active_location") == name:
+                store["active_location"] = None
+                self.active_location = None
+            self._save_locations_store(store)
+            self._add_log(f"🗑️ Deleted location preset '{name}'")
+            return True
+        return False
 
     def _get_saved_coords_info(self) -> Optional[dict]:
         """Returns saved coordinates dictionary if present on disk."""
@@ -206,6 +327,18 @@ class NTRIPBaseCaster:
                     "timestamp": self.locked_timestamp
                 }, f, indent=2)
             self._add_log(f"💾 Saved permanent static coordinates to {os.path.basename(self.config_file)}")
+
+            # Also update locations store active position
+            store = self._load_locations_store()
+            store["active_location"] = "Last Surveyed Position"
+            store["locations"]["Last Surveyed Position"] = {
+                "lat": round(mean_lat, 8),
+                "lon": round(mean_lon, 8),
+                "alt": round(mean_alt, 2),
+                "timestamp": self.locked_timestamp
+            }
+            self._save_locations_store(store)
+            self.active_location = "Last Surveyed Position"
             return True
         except Exception as e:
             self._add_log(f"Failed to save coordinates: {e}", "ERROR")
@@ -216,6 +349,10 @@ class NTRIPBaseCaster:
         try:
             if os.path.exists(self.config_file):
                 os.remove(self.config_file)
+            store = self._load_locations_store()
+            store["active_location"] = None
+            self._save_locations_store(store)
+            self.active_location = None
         except Exception:
             pass
 
@@ -663,6 +800,7 @@ class NTRIPBaseCaster:
 
         remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
         remaining_str = f"{remaining_sec // 60}m {remaining_sec % 60:02d}s"
+        loc_store = self._load_locations_store()
 
         return {
             "survey_status": "STATIC_FIXED" if self.is_static_fixed else self.survey_status,
@@ -670,6 +808,8 @@ class NTRIPBaseCaster:
             "is_static_fixed": self.is_static_fixed,
             "locked_timestamp": self.locked_timestamp,
             "saved_coords": self._get_saved_coords_info(),
+            "saved_locations": loc_store.get("locations", {}),
+            "active_location": loc_store.get("active_location") or self.active_location,
             "cpu_temp": self._get_cpu_temp(),
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
@@ -730,6 +870,54 @@ class NTRIPBaseCaster:
                     success = caster_instance.recalibrate()
                     resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
                     self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(resp)
+                elif self.path == '/api/locations/save':
+                    content_len = int(self.headers.get('Content-Length', 0))
+                    post_data = self.rfile.read(content_len).decode('utf-8') if content_len > 0 else "{}"
+                    try:
+                        name = json.loads(post_data).get("name", "").strip()
+                    except Exception:
+                        name = ""
+                    success = caster_instance.save_named_location(name)
+                    resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
+                    self.send_response(200 if success else 400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(resp)
+                elif self.path == '/api/locations/load':
+                    content_len = int(self.headers.get('Content-Length', 0))
+                    post_data = self.rfile.read(content_len).decode('utf-8') if content_len > 0 else "{}"
+                    try:
+                        name = json.loads(post_data).get("name", "").strip()
+                    except Exception:
+                        name = ""
+                    success = caster_instance.load_named_location(name)
+                    resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
+                    self.send_response(200 if success else 400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(resp)
+                elif self.path == '/api/locations/delete':
+                    content_len = int(self.headers.get('Content-Length', 0))
+                    post_data = self.rfile.read(content_len).decode('utf-8') if content_len > 0 else "{}"
+                    try:
+                        name = json.loads(post_data).get("name", "").strip()
+                    except Exception:
+                        name = ""
+                    success = caster_instance.delete_named_location(name)
+                    resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
+                    self.send_response(200 if success else 400)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Content-Length', str(len(resp)))
                     self.send_header('Access-Control-Allow-Origin', '*')
@@ -942,7 +1130,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="brand-icon">📡</div>
         <div>
           <div class="brand-title">RTK Base Station</div>
-          <div class="brand-subtitle">Raspberry Pi 5 Local Caster & Auto-Lock</div>
+          <div class="brand-subtitle">Raspberry Pi Local Caster & Auto-Lock</div>
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 12px;">
@@ -1059,6 +1247,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="grid">
       <div class="card" style="grid-column: 1 / -1;">
         <div class="card-title">
+          <span>📍 Saved Benchmark Locations (Instant 0 mm Profiles)</span>
+          <span id="activePresetBadge" class="data-val" style="color: var(--accent); font-size: 13px;">No Preset Active</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 8px;">
+          <div style="flex: 1; min-width: 280px;">
+            <label class="data-label" style="display: block; margin-bottom: 6px;">Select Saved Base Spot:</label>
+            <select id="locationsSelect" style="width: 100%; padding: 9px 12px; background: rgba(0,0,0,0.6); border: 1px solid var(--card-border); border-radius: 8px; color: #fff; font-size: 13px; font-family: ui-monospace, monospace;">
+              <option value="">-- No Saved Locations --</option>
+            </select>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: flex-end; margin-top: 18px;">
+            <button onclick="loadSelectedLocation()" class="btn" style="background: #0284c7;">📌 Load Selected Spot</button>
+            <button onclick="saveCurrentLocationPrompt()" class="btn btn-warning">💾 Save Current Spot As...</button>
+            <button onclick="deleteSelectedLocation()" class="btn btn-secondary" style="color: #f87171;">🗑️ Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card" style="grid-column: 1 / -1;">
+        <div class="card-title">
           <span>🖥️ Live Base Station Console & NMEA Logs</span>
           <span class="data-val" style="font-size: 11px; opacity: 0.7;">Auto-refreshing</span>
         </div>
@@ -1075,6 +1285,78 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     term.addEventListener('scroll', () => {
       userScrolled = (term.scrollHeight - term.scrollTop - term.clientHeight) > 20;
     });
+
+    async function loadSelectedLocation() {
+      const select = document.getElementById('locationsSelect');
+      const name = select.value;
+      if (!name) {
+        alert('Please select a saved location first.');
+        return;
+      }
+      if (confirm(`Instantly switch to saved benchmark '${name}' (0 mm drift)?`)) {
+        try {
+          const res = await fetch('/api/locations/load', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          const json = await res.json();
+          if (json.status === 'ok') {
+            updateDashboard();
+          } else {
+            alert('Failed to load location.');
+          }
+        } catch (e) {
+          alert('Error: ' + e);
+        }
+      }
+    }
+
+    async function saveCurrentLocationPrompt() {
+      const name = prompt('Enter a name for this benchmark position (e.g. Home Yard, University Rooftop, Test Track Spot A):');
+      if (!name || !name.trim()) return;
+      try {
+        const res = await fetch('/api/locations/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() })
+        });
+        const json = await res.json();
+        if (json.status === 'ok') {
+          updateDashboard();
+        } else {
+          alert('Failed to save location.');
+        }
+      } catch (e) {
+        alert('Error: ' + e);
+      }
+    }
+
+    async function deleteSelectedLocation() {
+      const select = document.getElementById('locationsSelect');
+      const name = select.value;
+      if (!name) {
+        alert('Please select a saved location to delete.');
+        return;
+      }
+      if (confirm(`Are you sure you want to delete preset '${name}'?`)) {
+        try {
+          const res = await fetch('/api/locations/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          const json = await res.json();
+          if (json.status === 'ok') {
+            updateDashboard();
+          } else {
+            alert('Failed to delete location.');
+          }
+        } catch (e) {
+          alert('Error: ' + e);
+        }
+      }
+    }
 
     async function lockPositionNow() {
       if (confirm('Lock the current averaged position as the permanent static base coordinate (0 mm drift)?')) {
@@ -1209,6 +1491,44 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 ntrip_port: ${data.ntrip_port}
 ntrip_mountpoint: "${data.mountpoint}"`;
 
+        // Populate Saved Benchmark Locations dropdown
+        const locSelect = document.getElementById('locationsSelect');
+        const activeBadge = document.getElementById('activePresetBadge');
+        if (locSelect && activeBadge) {
+          const savedLocs = data.saved_locations || {};
+          const locKeys = Object.keys(savedLocs);
+
+          if (data.active_location) {
+            activeBadge.textContent = `🎯 Active Benchmark: ${data.active_location}`;
+            activeBadge.style.color = 'var(--success)';
+          } else {
+            activeBadge.textContent = 'No Preset Active (Calibrating)';
+            activeBadge.style.color = 'var(--text-muted)';
+          }
+
+          const prevKeys = Array.from(locSelect.options).map(o => o.value).filter(v => v !== '');
+          const keysMatch = prevKeys.length === locKeys.length && prevKeys.every((v, i) => v === locKeys[i]);
+
+          if (!keysMatch || locSelect.options.length === 0) {
+            const currentVal = locSelect.value;
+            locSelect.innerHTML = '';
+            if (locKeys.length === 0) {
+              locSelect.innerHTML = '<option value="">-- No Saved Locations Yet --</option>';
+            } else {
+              locKeys.forEach(k => {
+                const loc = savedLocs[k];
+                const opt = document.createElement('option');
+                opt.value = k;
+                opt.textContent = `${k} [${loc.lat.toFixed(6)}°, ${loc.lon.toFixed(6)}° | ${loc.alt}m]`;
+                if (k === (data.active_location || currentVal)) {
+                  opt.selected = true;
+                }
+                locSelect.appendChild(opt);
+              });
+            }
+          }
+        }
+
         if (data.logs && data.logs.length > 0) {
           term.innerHTML = data.logs.map(l => {
             const cls = l.level === 'ERROR' ? 'error' : (l.level === 'WARN' ? 'warn' : '');
@@ -1233,7 +1553,7 @@ ntrip_mountpoint: "${data.mountpoint}"`;
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Raspberry Pi 5 RTK Base Station NTRIP Caster & Web Dashboard")
+    parser = argparse.ArgumentParser(description="Raspberry Pi RTK Base Station NTRIP Caster & Web Dashboard")
     parser.add_argument('--serial', type=str, default='/dev/ttyAMA0', help="Base GNSS UART port (default: /dev/ttyAMA0)")
     parser.add_argument('--baud', type=int, default=115200, help="Baud rate (default: 115200)")
     parser.add_argument('--port', type=int, default=2101, help="NTRIP server port (default: 2101)")

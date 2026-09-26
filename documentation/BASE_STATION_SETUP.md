@@ -78,7 +78,8 @@ http://<BASE_PI_ZERO_IP>:8080
 - 🎯 **Survey-In Progress Bar**: Real-time calibration countdown (`0%` $\rightarrow$ `100%`), elapsed duration, and standard deviation accuracy (`0.35 m`).
 - 🛰️ **Tracked Satellite Constellations**: Real-time count of GPS, GLONASS, Galileo, and BeiDou satellites.
 - 📍 **Fixed Reference Coordinates**: Absolute Latitude, Longitude, and Ellipsoidal Height with a direct **Google Maps** link.
-- 🔒 **"Lock Now" & "Use Saved Position"**: Allows locking current averaged position or restoring previous survey coordinates instantly (0 mm drift).
+- 🔒 **"Lock Now" & Auto-Restore**: Locks current averaged position or automatically restores previous survey coordinates on boot (0 mm drift).
+- 📍 **Saved Location Profiles (Presets)**: Save multiple physical benchmark spots (e.g. "Home Yard", "University Roof", "Spot A"). Switch between them with 1 click from the dropdown without recalibrating!
 - 📡 **Active Connected Rovers**: Live table of all robots receiving RTCM3 corrections and byte throughput.
 - 📋 **Rover Config Snippet**: Instant copyable YAML parameters formatted for `robot_config.yaml`.
 
