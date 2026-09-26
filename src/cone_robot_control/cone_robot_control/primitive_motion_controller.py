@@ -46,12 +46,14 @@ from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus, BatteryState
 from std_msgs.msg import Float32, String
 
 # Try importing action interfaces
+_ACTION_IMPORT_ERROR = None
 try:
     from rclpy.action import ActionServer, CancelResponse, GoalResponse
     from cone_robot_interfaces.action import ExecuteMotion
     HAS_ACTION_MSGS = True
-except ImportError:
+except ImportError as e:
     HAS_ACTION_MSGS = False
+    _ACTION_IMPORT_ERROR = str(e)
 
 # Try importing nav_msgs
 try:
@@ -61,7 +63,14 @@ except ImportError:
     NAV_MSGS_AVAILABLE = False
     Odometry = None
 
-from .motion_profiler import MotionPrimitiveProfiler
+try:
+    from .motion_profiler import MotionPrimitiveProfiler
+except (ImportError, ValueError):
+    try:
+        from cone_robot_control.motion_profiler import MotionPrimitiveProfiler
+    except ImportError:
+        import motion_profiler
+        MotionPrimitiveProfiler = motion_profiler.MotionPrimitiveProfiler
 
 
 def normalize_angle_rad(rad: float) -> float:
@@ -213,16 +222,16 @@ class PrimitiveMotionController(Node):
             self.action_server = ActionServer(
                 self,
                 ExecuteMotion,
-                '/execute_motion',
+                'execute_motion',
                 execute_callback=self._execute_action_callback,
                 goal_callback=self._goal_action_callback,
                 cancel_callback=self._cancel_action_callback,
                 callback_group=self.cb_group,
             )
-            self.get_logger().info("Action Server [/execute_motion] initialized successfully.")
+            self.get_logger().info("Action Server [execute_motion] initialized successfully.")
         else:
             self.get_logger().warn(
-                "cone_robot_interfaces package not detected! Running in topic-only mode (/cmd_step, /cmd_primitive)."
+                f"cone_robot_interfaces action not available ({_ACTION_IMPORT_ERROR})! Running in topic-only mode (/cmd_step, /cmd_primitive)."
             )
 
         # ----------------------------------------------------------------------
@@ -353,7 +362,7 @@ class PrimitiveMotionController(Node):
         self._cancel_requested = True
         return CancelResponse.ACCEPT
 
-    async def _execute_action_callback(self, goal_handle):
+    def _execute_action_callback(self, goal_handle):
         self._current_goal_handle = goal_handle
         self._cancel_requested = False
         goal = goal_handle.request
