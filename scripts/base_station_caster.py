@@ -255,15 +255,57 @@ class NTRIPBaseCaster:
             self.logs.append(entry)
 
     def _get_local_ip(self) -> str:
-        """Helper to get primary network IP address."""
+        """Helper to get primary network IP address across any router, hotspot, or offline network."""
+        for target in ["8.8.8.8", "192.168.0.1", "192.168.1.1", "192.168.137.1", "10.0.0.1", "1.1.1.1"]:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect((target, 80))
+                ip = s.getsockname()[0]
+                s.close()
+                if ip and not ip.startswith("127."):
+                    return ip
+            except Exception:
+                pass
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
+            import subprocess
+            out = subprocess.check_output(["hostname", "-I"], timeout=1.0).decode('ascii').strip()
+            ips = [i for i in out.split() if not i.startswith("127.")]
+            if ips:
+                return ips[0]
         except Exception:
-            return "127.0.0.1"
+            pass
+        try:
+            host_ip = socket.gethostbyname(socket.gethostname())
+            if host_ip and not host_ip.startswith("127."):
+                return host_ip
+        except Exception:
+            pass
+        return "127.0.0.1"
+
+    def _udp_beacon_loop(self) -> None:
+        """Broadcasts a periodic UDP discovery beacon every 1 second on port 2102 for zero-config rover pairing."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        beacon_port = 2102
+
+        while self.is_running:
+            try:
+                current_ip = self._get_local_ip()
+                if current_ip and not current_ip.startswith("127."):
+                    payload = json.dumps({
+                        "service": "conerobot-rtk-base",
+                        "ip": current_ip,
+                        "port": self.server_port,
+                        "web_port": self.web_port,
+                        "mountpoint": self.mountpoint,
+                        "status": "LOCKED" if self.is_static_fixed else "CALIBRATING",
+                        "sats": self.satellites_tracked
+                    }).encode('utf-8')
+                    sock.sendto(payload, ("255.255.255.255", beacon_port))
+            except Exception:
+                pass
+            time.sleep(1.0)
 
     def _load_saved_coords(self) -> bool:
         """Loads previously locked static base coordinates if available."""
@@ -394,7 +436,11 @@ class NTRIPBaseCaster:
         diag_thread = threading.Thread(target=self._diagnostic_logger_loop, daemon=True)
         diag_thread.start()
 
-        # 4. Run serial reader in main thread
+        # 4. Start background UDP discovery beacon broadcaster (for zero-config auto-discovery)
+        beacon_thread = threading.Thread(target=self._udp_beacon_loop, daemon=True)
+        beacon_thread.start()
+
+        # 5. Run serial reader in main thread
         self._serial_reader_loop()
 
     def _tcp_server_loop(self) -> None:

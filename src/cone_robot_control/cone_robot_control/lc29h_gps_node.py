@@ -22,11 +22,13 @@ License: MIT
 """
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import json
 import math
 import socket
 import threading
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -94,6 +96,7 @@ class LC29HGPSNode(Node):
         self.latest_gga_raw = ""
         self.ntrip_connected = False
         self.rtcm_bytes_received = 0
+        self._cached_base_ip: Optional[str] = None
 
         self.current_lat = 0.0
         self.current_lon = 0.0
@@ -293,6 +296,180 @@ class LC29HGPSNode(Node):
 
         self.fix_pub.publish(msg)
 
+    def _get_local_subnets(self) -> List[str]:
+        """
+        Discovers all local /24 subnet prefixes (e.g. ['192.168.0.', '192.168.137.'])
+        across all active network interfaces (Wi-Fi, Ethernet, Hotspots).
+        """
+        subnets = set()
+
+        # 1. Linux 'hostname -I' command (reads all active IP assignments)
+        try:
+            import subprocess
+            out = subprocess.check_output(["hostname", "-I"], timeout=1.0).decode('ascii').strip()
+            for ip in out.split():
+                parts = ip.strip().split('.')
+                if len(parts) == 4 and not ip.startswith('127.'):
+                    subnets.add(f"{parts[0]}.{parts[1]}.{parts[2]}.")
+        except Exception:
+            pass
+
+        # 2. Socket routing probe to common gateways
+        for test_target in ["8.8.8.8", "192.168.0.1", "192.168.1.1", "192.168.137.1", "10.0.0.1"]:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect((test_target, 80))
+                    ip = s.getsockname()[0]
+                    if ip and not ip.startswith("127."):
+                        parts = ip.split('.')
+                        if len(parts) == 4:
+                            subnets.add(f"{parts[0]}.{parts[1]}.{parts[2]}.")
+            except Exception:
+                pass
+
+        # 3. Hostname fallback
+        try:
+            host_ip = socket.gethostbyname(socket.gethostname())
+            if host_ip and not host_ip.startswith("127."):
+                parts = host_ip.split('.')
+                if len(parts) == 4:
+                    subnets.add(f"{parts[0]}.{parts[1]}.{parts[2]}.")
+        except Exception:
+            pass
+
+        return list(subnets)
+
+    def _listen_for_udp_beacon(self, timeout_sec: float = 0.8) -> Optional[str]:
+        """
+        Listens on UDP port 2102 for RTK Base Station broadcast beacon.
+        Instant pairing (< 0.8s) without scanning when Base is broadcasting.
+        """
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(timeout_sec)
+            sock.bind(('', 2102))
+
+            data, addr = sock.recvfrom(2048)
+            payload = json.loads(data.decode('utf-8'))
+            if payload.get("service") == "conerobot-rtk-base":
+                base_ip = payload.get("ip") or addr[0]
+                with socket.create_connection((base_ip, self.ntrip_port), timeout=0.3):
+                    return base_ip
+        except Exception:
+            pass
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        return None
+
+    def _scan_local_subnet_for_base(self) -> Optional[str]:
+        """
+        Fast parallel TCP port scanner to automatically locate the Base Station
+        across all local subnets (e.g. 192.168.0.x, 192.168.137.x).
+        Scans all hosts concurrently using 80 threads.
+        """
+        subnets = self._get_local_subnets()
+        if not subnets:
+            return None
+
+        found_ip = None
+
+        def probe(target_ip: str):
+            nonlocal found_ip
+            if found_ip is not None:
+                return
+            try:
+                with socket.create_connection((target_ip, self.ntrip_port), timeout=0.35):
+                    found_ip = target_ip
+            except Exception:
+                pass
+
+        all_targets = []
+        for prefix in subnets:
+            for host_num in range(1, 255):
+                all_targets.append(f"{prefix}{host_num}")
+
+        with ThreadPoolExecutor(max_workers=80) as executor:
+            executor.map(probe, all_targets)
+
+        return found_ip
+
+    def _resolve_caster_host(self) -> Optional[str]:
+        """
+        Dynamically discovers and resolves the NTRIP Caster IP address.
+        Supports:
+          1. Explicit static IP (e.g. '192.168.0.105')
+          2. Public domains (e.g. 'rtk2go.com')
+          3. Cached Base Station IP if still alive
+          4. Zero-Config Layer 1: UDP Broadcast Beacon Listener (< 0.8s)
+          5. Zero-Config Layer 2: Fast Parallel Subnet TCP Port Probe
+          6. Fallback: mDNS local hostname (e.g. 'conerobotBaseStation.local')
+        """
+        caster_str = self.ntrip_caster.strip()
+
+        # 1. If explicitly set to an IP address, use directly
+        try:
+            socket.inet_aton(caster_str)
+            return caster_str
+        except (socket.error, ValueError):
+            pass
+
+        # 2. Public domains (e.g. 'rtk2go.com')
+        if caster_str.lower() != "auto" and not caster_str.endswith(".local"):
+            try:
+                ip = socket.gethostbyname(caster_str)
+                return ip
+            except socket.gaierror:
+                pass
+
+        # 3. Check if cached Base Station IP is still reachable
+        if self._cached_base_ip:
+            try:
+                with socket.create_connection((self._cached_base_ip, self.ntrip_port), timeout=0.25):
+                    return self._cached_base_ip
+            except Exception:
+                self._cached_base_ip = None
+
+        # 4. Zero-Config Layer 1: UDP Broadcast Beacon Listener (0.8s)
+        beacon_ip = self._listen_for_udp_beacon(timeout_sec=0.8)
+        if beacon_ip:
+            self._cached_base_ip = beacon_ip
+            self.get_logger().info(
+                f"[NTRIP Discovery] ✨ Discovered RTK Base Station via UDP beacon at: {beacon_ip}:{self.ntrip_port}!"
+            )
+            return beacon_ip
+
+        # 5. Zero-Config Layer 2: Fast Parallel Subnet TCP Port Probe
+        self.get_logger().info(
+            f"[NTRIP Discovery] Probing local network for RTK Base Station (Port {self.ntrip_port})..."
+        )
+        scanned_ip = self._scan_local_subnet_for_base()
+        if scanned_ip:
+            self._cached_base_ip = scanned_ip
+            self.get_logger().info(
+                f"[NTRIP Discovery] ✨ Found RTK Base Station automatically at: {scanned_ip}:{self.ntrip_port}!"
+            )
+            return scanned_ip
+
+        # 6. Fallback: Try mDNS if hostname was provided and not 'auto'
+        if caster_str.lower() != "auto":
+            try:
+                ip = socket.gethostbyname(caster_str)
+                return ip
+            except socket.gaierror:
+                pass
+
+        # Not found yet
+        self.get_logger().warn(
+            f"[NTRIP Discovery] 🔍 RTK Base Station not detected on local network. Ensure Base Pi Zero is powered on and connected to Wi-Fi. Retrying..."
+        )
+        return None
+
     def _ntrip_client_loop(self) -> None:
         """
         Background NTRIP Rover client loop with auto-reconnect.
@@ -311,12 +488,17 @@ class LC29HGPSNode(Node):
                 if not (rclpy.ok() and self.is_running):
                     break
 
+                target_host = self._resolve_caster_host()
+                if not target_host:
+                    time.sleep(3.0)
+                    continue
+
                 self.get_logger().info(
-                    f"[NTRIP] Connecting to {self.ntrip_caster}:{self.ntrip_port}/{self.ntrip_mountpoint}..."
+                    f"[NTRIP] Connecting to {target_host}:{self.ntrip_port}/{self.ntrip_mountpoint}..."
                 )
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(6.0)
-                sock.connect((self.ntrip_caster, self.ntrip_port))
+                sock.connect((target_host, self.ntrip_port))
 
                 # Build standard NTRIP Request Header
                 auth_str = f"{self.ntrip_user}:{self.ntrip_password}"
