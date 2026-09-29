@@ -612,6 +612,10 @@ class NTRIPBaseCaster:
         if self.is_static_fixed:
             return
 
+        # Ignore invalid zero coordinates
+        if abs(lat) < 1.0 or abs(lon) < 1.0:
+            return
+
         now = time.time()
         if self.survey_start_time is None:
             self.survey_start_time = now
@@ -620,29 +624,47 @@ class NTRIPBaseCaster:
         self.survey_duration = int(now - self.survey_start_time)
         self.coord_samples.append((lat, lon, alt))
 
+        # Keep a rolling window of recent samples (last 300 samples)
+        # to ensure old cold-start / satellite acquisition jumps don't corrupt accuracy
+        if len(self.coord_samples) > 500:
+            self.coord_samples = self.coord_samples[-300:]
+
         if len(self.coord_samples) >= 5:
             lats = [s[0] for s in self.coord_samples]
             lons = [s[1] for s in self.coord_samples]
-            mean_lat = sum(lats) / len(lats)
-            mean_lon = sum(lons) / len(lons)
+
+            # Use median to filter out wild initial startup outliers (> 30 meters from median)
+            median_lat = sorted(lats)[len(lats) // 2]
+            median_lon = sorted(lons)[len(lons) // 2]
 
             lat_m = 111132.0
-            lon_m = 111412.0 * math.cos(math.radians(mean_lat))
+            lon_m = 111412.0 * math.cos(math.radians(median_lat))
 
-            dx = [(ln - mean_lon) * lon_m for ln in lons]
-            dy = [(lt - mean_lat) * lat_m for lt in lats]
-            sigma_2d = math.sqrt((sum(x**2 for x in dx) + sum(y**2 for y in dy)) / len(dx))
-            self.survey_accuracy = sigma_2d
-            self.survey_lat = mean_lat
-            self.survey_lon = mean_lon
-            self.survey_alt = sum(s[2] for s in self.coord_samples) / len(self.coord_samples)
+            valid_samples = [
+                s for s in self.coord_samples
+                if math.sqrt(((s[1] - median_lon) * lon_m)**2 + ((s[0] - median_lat) * lat_m)**2) < 30.0
+            ]
 
-            # Auto-Lock condition reached
-            if (self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy) or (self.survey_duration >= self.survey_target_duration * 1.5):
-                self._add_log(f"🎯 Auto-Calibration COMPLETE! (Duration: {self.survey_duration}s, Acc: {self.survey_accuracy:.2f}m)")
-                self.lock_now()
-            else:
-                self.survey_status = "CALIBRATING"
+            if len(valid_samples) >= 5:
+                v_lats = [s[0] for s in valid_samples]
+                v_lons = [s[1] for s in valid_samples]
+                mean_lat = sum(v_lats) / len(v_lats)
+                mean_lon = sum(v_lons) / len(v_lons)
+
+                dx = [(ln - mean_lon) * lon_m for ln in v_lons]
+                dy = [(lt - mean_lat) * lat_m for lt in v_lats]
+                sigma_2d = math.sqrt((sum(x**2 for x in dx) + sum(y**2 for y in dy)) / len(dx))
+                self.survey_accuracy = round(sigma_2d, 2)
+                self.survey_lat = mean_lat
+                self.survey_lon = mean_lon
+                self.survey_alt = sum(s[2] for s in valid_samples) / len(valid_samples)
+
+                # Auto-Lock condition reached
+                if (self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy) or (self.survey_duration >= self.survey_target_duration * 1.5):
+                    self._add_log(f"🎯 Auto-Calibration COMPLETE! (Duration: {self.survey_duration}s, Acc: {self.survey_accuracy:.2f}m)")
+                    self.lock_now()
+                else:
+                    self.survey_status = "CALIBRATING"
 
     @staticmethod
     def _ecef_to_lla(x: float, y: float, z: float) -> Tuple[float, float, float]:
@@ -719,8 +741,6 @@ class NTRIPBaseCaster:
                 total_sats = sum(self.msm_sats.values())
                 if total_sats > 0:
                     self.satellites_tracked = total_sats
-                    if self.survey_lat != 0.0 and not self.is_static_fixed:
-                        self._update_survey_statistics(self.survey_lat, self.survey_lon, self.survey_alt)
         except Exception:
             pass
 
