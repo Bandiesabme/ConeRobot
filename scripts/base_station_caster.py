@@ -99,6 +99,9 @@ class NTRIPBaseCaster:
         self.msm_sats: Dict[int, int] = {}
         self.hdop = 1.0
         self.local_ip = self._get_local_ip()
+        self.ser = None
+        self.ser_lock = threading.Lock()
+        self.rtcm_1005_count = 0
 
         # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
@@ -321,6 +324,74 @@ class NTRIPBaseCaster:
                 self._add_log(f"Failed to read saved coords: {e}", "WARN")
         return False
 
+    @staticmethod
+    def _nmea_checksum(sentence: str) -> str:
+        """Calculates 2-digit uppercase hex NMEA checksum."""
+        clean = sentence.strip().lstrip('$').split('*')[0]
+        cs = 0
+        for char in clean:
+            cs ^= ord(char)
+        return f"{cs:02X}"
+
+    @staticmethod
+    def _lla_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> Tuple[float, float, float]:
+        """Converts WGS-84 LLA coordinates to ECEF coordinates (meters)."""
+        lat = math.radians(lat_deg)
+        lon = math.radians(lon_deg)
+        a = 6378137.0
+        f = 1.0 / 298.257223563
+        e2 = f * (2.0 - f)
+        n = a / math.sqrt(1.0 - e2 * (math.sin(lat) ** 2))
+        x = (n + alt_m) * math.cos(lat) * math.cos(lon)
+        y = (n + alt_m) * math.cos(lat) * math.sin(lon)
+        z = (n * (1.0 - e2) + alt_m) * math.sin(lat)
+        return x, y, z
+
+    def _send_gnss_cmd(self, cmd_body: str) -> None:
+        """Sends an NMEA / PAIR / PQTM command to the base station GNSS module."""
+        cs = self._nmea_checksum(cmd_body)
+        clean = cmd_body.strip().lstrip('$').split('*')[0]
+        sentence = f"${clean}*{cs}\r\n".encode('ascii')
+        with self.ser_lock:
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.write(sentence)
+                    self.ser.flush()
+                    self._add_log(f"GNSS Command Sent: ${clean}*{cs}")
+                except Exception as e:
+                    self._add_log(f"Failed to write GNSS command: {e}", "WARN")
+
+    def _init_base_gnss_hardware(self) -> None:
+        """Initializes the Waveshare LC29H(BS) HAT with proper RTK Base mode & RTCM outputs."""
+        self._add_log("🔧 Configuring LC29H(BS) Hardware: Enabling Base Mode & RTCM 1005/MSM7...")
+        # 1. Set receiver mode to Base Station (2)
+        self._send_gnss_cmd("PQTMCFGRCVRMODE,W,2")
+        time.sleep(0.05)
+        # 2. Enable RTCM 1005 (Station Coordinates at 1 Hz)
+        self._send_gnss_cmd("PAIR434,1")
+        time.sleep(0.05)
+        # 3. Enable RTCM MSM7 multi-constellation observations
+        self._send_gnss_cmd("PAIR432,1")
+        time.sleep(0.05)
+        # 4. If static coordinates are locked, send fixed position to hardware
+        if self.is_static_fixed and self.survey_lat != 0.0 and self.survey_lon != 0.0:
+            self._send_hardware_fixed_coords(self.survey_lat, self.survey_lon, self.survey_alt)
+        else:
+            # Start Survey-In in hardware (300s target, 1.5m accuracy)
+            self._send_gnss_cmd("PQTMCFGSVIN,W,1,300,1.5,0,0,0")
+        time.sleep(0.05)
+        self._send_gnss_cmd("PQTMSAVEPAR")
+
+    def _send_hardware_fixed_coords(self, lat: float, lon: float, alt: float) -> None:
+        """Sends fixed ECEF coordinates to LC29H(BS) HAT to broadcast in RTCM Message 1005."""
+        if lat == 0.0 or lon == 0.0:
+            return
+        x, y, z = self._lla_to_ecef(lat, lon, alt)
+        self._send_gnss_cmd(f"PQTMCFGSVIN,W,2,0,0,{x:.4f},{y:.4f},{z:.4f}")
+        time.sleep(0.05)
+        self._send_gnss_cmd("PQTMSAVEPAR")
+        self._add_log(f"🎯 LC29H Hardware Locked to ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m) [ECEF: {x:.2f}, {y:.2f}, {z:.2f}]")
+
     def _apply_fixed_coords(self, lat: float, lon: float, alt: float, source: str) -> None:
         """Locks base station into permanent static fixed mode (0 mm drift)."""
         self.survey_lat = lat
@@ -332,6 +403,7 @@ class NTRIPBaseCaster:
         self.survey_accuracy = 0.00
         self.locked_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._add_log(f"🎯 LOCKED STATIC BASE ({source}): ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m) [0 mm Drift]")
+        self._send_hardware_fixed_coords(lat, lon, alt)
 
     def lock_now(self) -> bool:
         """Immediately locks current accumulated average position and writes to disk."""
@@ -623,6 +695,7 @@ class NTRIPBaseCaster:
         try:
             # 1. Message 1005 / 1006: Base Station Antenna Reference Point (ARP)
             if msg_id in (1005, 1006) and len(payload) >= 19:
+                self.rtcm_1005_count += 1
                 raw_x = self._get_signed_bits(payload, 34, 38)
                 raw_y = self._get_signed_bits(payload, 74, 38)
                 raw_z = self._get_signed_bits(payload, 114, 38)
@@ -692,6 +765,9 @@ class NTRIPBaseCaster:
                 self._add_log(f"Opening Serial Port: {self.serial_port} @ {self.baud_rate} baud")
                 ser = serial.Serial(self.serial_port, self.baud_rate, timeout=0.1)
                 ser.reset_input_buffer()
+                with self.ser_lock:
+                    self.ser = ser
+                self._init_base_gnss_hardware()
                 self._add_log("Base GNSS UART active! Monitoring Survey-In & streaming RTCM3...")
 
                 raw_byte_stream = bytearray()
@@ -712,66 +788,89 @@ class NTRIPBaseCaster:
                         time.sleep(0.01)
                         continue
 
-                    self.total_rtcm_bytes_read += len(chunk)
-                    self.rtcm_packet_count += 1
-
                     raw_byte_stream.extend(chunk)
-                    if len(raw_byte_stream) > 16384:
-                        raw_byte_stream = raw_byte_stream[-8192:]
+                    if len(raw_byte_stream) > 32768:
+                        raw_byte_stream = raw_byte_stream[-16384:]
 
-                    # 1. Parse RTCM3 binary frames (0xD3)
-                    idx = 0
-                    while idx < len(raw_byte_stream):
-                        if raw_byte_stream[idx] == 0xD3:
-                            if idx + 3 <= len(raw_byte_stream):
-                                msg_len = ((raw_byte_stream[idx + 1] & 0x03) << 8) | raw_byte_stream[idx + 2]
-                                frame_len = msg_len + 6
-                                if idx + frame_len <= len(raw_byte_stream):
-                                    frame_payload = raw_byte_stream[idx + 3 : idx + 3 + msg_len]
-                                    if len(frame_payload) >= 2:
-                                        msg_id = (frame_payload[0] << 4) | (frame_payload[1] >> 4)
-                                        self._parse_rtcm3_payload(msg_id, frame_payload)
-                                    idx += frame_len
-                                    continue
-                        idx += 1
+                    rtcm_frames_to_send = []
 
-                    # 2. Parse NMEA ASCII sentences if present
-                    if b'$' in raw_byte_stream:
-                        while b'\n' in raw_byte_stream:
-                            line_bytes, _, remaining = raw_byte_stream.partition(b'\n')
-                            raw_byte_stream = remaining
-                            if b'$' in line_bytes:
-                                dollar_idx = line_bytes.find(b'$')
-                                clean_str = line_bytes[dollar_idx:].decode('ascii', errors='ignore').strip()
-                                if clean_str:
-                                    self._parse_survey_line(clean_str)
+                    # Demultiplex raw byte stream: extract clean RTCM3 packets & NMEA sentences
+                    while len(raw_byte_stream) > 0:
+                        # 1. RTCM3 binary frame starting with preamble 0xD3
+                        if raw_byte_stream[0] == 0xD3:
+                            if len(raw_byte_stream) < 3:
+                                break  # Incomplete header; wait for next serial read
+                            # The 6 reserved bits in byte 1 must be 0 for valid RTCM3
+                            if (raw_byte_stream[1] & 0xFC) != 0:
+                                del raw_byte_stream[0]
+                                continue
+                            msg_len = ((raw_byte_stream[1] & 0x03) << 8) | raw_byte_stream[2]
+                            frame_len = msg_len + 6
+                            if len(raw_byte_stream) < frame_len:
+                                break  # Full frame hasn't arrived yet; wait for remaining bytes
 
-                    # Multicast complete RTCM chunks to all active rover sockets (without holding lock)
-                    with self.clients_lock:
-                        client_items = list(self.clients_map.items())
+                            frame = bytes(raw_byte_stream[:frame_len])
+                            del raw_byte_stream[:frame_len]
 
-                    dead_socks = []
-                    for client, meta in client_items:
-                        try:
-                            client.sendall(chunk)
-                            meta["bytes_sent"] += len(chunk)
-                        except (socket.error, socket.timeout):
-                            dead_socks.append(client)
+                            self.total_rtcm_bytes_read += len(frame)
+                            self.rtcm_packet_count += 1
 
-                    if dead_socks:
+                            frame_payload = frame[3 : 3 + msg_len]
+                            if len(frame_payload) >= 2:
+                                msg_id = (frame_payload[0] << 4) | (frame_payload[1] >> 4)
+                                self._parse_rtcm3_payload(msg_id, frame_payload)
+
+                            rtcm_frames_to_send.append(frame)
+                            continue
+
+                        # 2. NMEA ASCII sentence starting with '$'
+                        elif raw_byte_stream[0] == 0x24:  # ord('$')
+                            nl_idx = raw_byte_stream.find(b'\n')
+                            if nl_idx == -1:
+                                if len(raw_byte_stream) > 256:
+                                    del raw_byte_stream[0]
+                                break
+                            nmea_bytes = bytes(raw_byte_stream[:nl_idx + 1])
+                            del raw_byte_stream[:nl_idx + 1]
+                            clean_str = nmea_bytes.decode('ascii', errors='ignore').strip()
+                            if clean_str:
+                                self._parse_survey_line(clean_str)
+                            continue
+
+                        # 3. Discard extraneous bytes (CR, LF, noise) outside frames
+                        else:
+                            del raw_byte_stream[0]
+
+                    # Multicast ONLY valid, clean RTCM3 packets to all active rover clients (never raw NMEA)
+                    if rtcm_frames_to_send:
+                        outgoing_data = b"".join(rtcm_frames_to_send)
                         with self.clients_lock:
-                            for dead in dead_socks:
-                                if dead in self.clients_map:
-                                    del self.clients_map[dead]
-                                try:
-                                    dead.close()
-                                except Exception:
-                                    pass
+                            client_items = list(self.clients_map.items())
+
+                        dead_socks = []
+                        for client, meta in client_items:
+                            try:
+                                client.sendall(outgoing_data)
+                                meta["bytes_sent"] += len(outgoing_data)
+                            except (socket.error, socket.timeout):
+                                dead_socks.append(client)
+
+                        if dead_socks:
+                            with self.clients_lock:
+                                for dead in dead_socks:
+                                    if dead in self.clients_map:
+                                        del self.clients_map[dead]
+                                    try:
+                                        dead.close()
+                                    except Exception:
+                                        pass
 
             except Exception as e:
                 self._add_log(f"Serial Error: {e}. Retrying in 2 seconds...", "ERROR")
                 time.sleep(2.0)
             finally:
+                with self.ser_lock:
+                    self.ser = None
                 if ser and ser.is_open:
                     try:
                         ser.close()
@@ -788,14 +887,14 @@ class NTRIPBaseCaster:
             rtcm_kb = self.total_rtcm_bytes_read / 1024.0
 
             if self.is_static_fixed:
-                msg = f"🎯 [STATIC FIXED BASE] Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}, {self.survey_alt:.1f}m) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB [0 mm Drift]"
+                msg = f"🎯 [STATIC FIXED BASE] Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}, {self.survey_alt:.1f}m) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB (Msg 1005: {self.rtcm_1005_count}) [0 mm Drift]"
             elif self.survey_valid:
-                msg = f"🎯 [BASE READY] Status: LOCKED (Accuracy: < {self.survey_accuracy:.2f}m) | Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB"
+                msg = f"🎯 [BASE READY] Status: LOCKED (Accuracy: < {self.survey_accuracy:.2f}m) | Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB (Msg 1005: {self.rtcm_1005_count})"
             else:
                 rem = max(0, self.survey_target_duration - self.survey_duration)
                 mins = rem // 60
                 secs = rem % 60
-                msg = f"⏳ [CALIBRATING] {self.survey_duration}s/{self.survey_target_duration}s ({mins}m {secs}s left) | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked} | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB"
+                msg = f"⏳ [CALIBRATING] {self.survey_duration}s/{self.survey_target_duration}s ({mins}m {secs}s left) | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked} | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB (Msg 1005: {self.rtcm_1005_count})"
 
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 

@@ -145,6 +145,13 @@ class LC29HGPSNode(Node):
             self.serial_conn.reset_input_buffer()
             self.serial_conn.reset_output_buffer()
             self.get_logger().info(f"Successfully opened serial port: {self.serial_port_name}")
+
+            # Explicitly ensure LC29H(DA) is configured in Rover RTK mode
+            try:
+                with self.serial_lock:
+                    self.serial_conn.write(b"$PQTMCFGRCVRMODE,W,1*2A\r\n")
+            except Exception:
+                pass
         except Exception as e:
             self.get_logger().error(f"Failed to open serial port {self.serial_port_name}: {e}")
             self.get_logger().error("Ensure user is in dialout group and port permissions are set.")
@@ -511,16 +518,12 @@ class LC29HGPSNode(Node):
                     f"Authorization: Basic {auth_b64}",
                 ]
                 
-                if self.latest_gga_raw:
+                if self.ntrip_send_gga and self.latest_gga_raw:
                     headers.append(f"Ntrip-GGA: {self.latest_gga_raw.strip()}")
                 
                 headers.append("Connection: close\r\n\r\n")
                 http_req = "\r\n".join(headers)
                 sock.sendall(http_req.encode('ascii'))
-
-                # Also send raw GGA sentence immediately on socket stream
-                if self.latest_gga_raw:
-                    sock.sendall((self.latest_gga_raw.strip() + "\r\n").encode('ascii'))
 
                 # Read response headers (support both standard \r\n\r\n and Shoutcast/ICY \r\n)
                 header_data = b""
