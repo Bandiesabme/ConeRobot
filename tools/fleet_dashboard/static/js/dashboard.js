@@ -320,22 +320,33 @@ function connectToRobotWebSocket(robotId, ip, port) {
 
           const seen = new Set();
           msg.channels.forEach(ch => {
-            const topic = ch.topic;
-            if (topic === configuredTopics.scan || topic === '/scan') hasLidarTopic = true;
-            if (topic === configuredTopics.gps_fix || topic === '/fix') hasGpsTopic = true;
+            const rawTopic = ch.topic || '';
+            const topic = rawTopic.startsWith('/') ? rawTopic : '/' + rawTopic;
+            const schema = ch.schemaName || '';
 
+            const isScan = topic === configuredTopics.scan || topic === '/scan' || topic.endsWith('/scan');
+            const isGpsFix = topic === configuredTopics.gps_fix || topic === '/fix' || topic.endsWith('/fix');
+            const isGpsStatus = topic === configuredTopics.gps_status || topic === '/gps/status' || topic.endsWith('/gps/status');
+            const isHeading = topic === configuredTopics.heading || topic === '/imu/heading' || topic.endsWith('/heading');
+            const isImuData = topic === configuredTopics.imu_data || topic === '/imu/data' || topic.endsWith('/imu/data');
+            const isStep = topic === configuredTopics.step_status || topic === '/step_status' || topic.endsWith('/step_status');
+            const isDiag = topic === '/robot/diagnostics' || topic.endsWith('/robot/diagnostics');
+            const isSysinfo = topic === '/foxglove_bridge/sysinfo' || topic.includes('sysinfo');
             const isBattery = topic === configuredTopics.battery ||
                               topic === '/battery_state' ||
-                              (topic && (topic.includes('battery') || topic.endsWith('/battery_state'))) ||
-                              (ch.schemaName && ch.schemaName.includes('BatteryState'));
+                              topic.includes('battery') ||
+                              schema.includes('BatteryState');
 
-            const isTarget = targetTopics.includes(topic) || Object.values(configuredTopics).includes(topic) || isBattery;
+            if (isScan) hasLidarTopic = true;
+            if (isGpsFix) hasGpsTopic = true;
 
-            if (isTarget && !seen.has(topic)) {
-              seen.add(topic);
+            const isTarget = isScan || isGpsFix || isGpsStatus || isHeading || isImuData || isStep || isDiag || isSysinfo || isBattery || targetTopics.includes(topic) || Object.values(configuredTopics).includes(topic);
+
+            if (isTarget && !seen.has(rawTopic)) {
+              seen.add(rawTopic);
               const subId = subIdCounter++;
-              channelMap[subId] = topic;
-              channelMap[ch.id] = topic;
+              channelMap[subId] = rawTopic;
+              channelMap[ch.id] = rawTopic;
               subscriptions.push({
                 id: subId,
                 channelId: ch.id
@@ -458,8 +469,10 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
       // CDR 4-byte header is at 13..16. Data starts at byte 17.
       let ptr = 17;
 
+      const normTopic = topic.startsWith('/') ? topic : '/' + topic;
+
       // 1. sensor_msgs/msg/LaserScan (/scan)
-      if (topic === configuredTopics.scan || topic === '/scan') {
+      if (normTopic === configuredTopics.scan || normTopic === '/scan' || normTopic.endsWith('/scan')) {
         r.lidar.present = true;
         const now = Date.now();
         if (r.lidar.last_scan_time > 0) {
@@ -470,7 +483,7 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
       }
 
       // 2. sensor_msgs/msg/NavSatFix (/fix)
-      else if (topic === configuredTopics.gps_fix || topic === '/fix') {
+      else if (normTopic === configuredTopics.gps_fix || normTopic === '/fix' || normTopic.endsWith('/fix')) {
         r.gps.present = true;
         // Skip ROS 2 Header
         ptr += 8;
@@ -492,14 +505,27 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
           r.gps.lon = Number(lon.toFixed(7));
           r.gps.alt = Number(alt.toFixed(1));
 
-          if (r.gps.mode === 'NO FIX' && Math.abs(lat) > 0.0001) {
+          // Set GPS mode from NavSatStatus (STATUS_GBAS_FIX=2 is RTK, STATUS_SBAS_FIX=1 is DGPS, STATUS_FIX=0 is 3D)
+          if (statusInt === 2) {
+            if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') {
+              r.gps.mode = 'RTK FIX';
+            }
+          } else if (statusInt === 1) {
+            if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') {
+              r.gps.mode = 'DGPS';
+            }
+          } else if (statusInt === 0) {
+            if (r.gps.mode === 'NO FIX') {
+              r.gps.mode = '3D FIX';
+            }
+          } else if (r.gps.mode === 'NO FIX' && Math.abs(lat) > 0.0001) {
             r.gps.mode = '3D FIX';
           }
         }
       }
 
       // 3. std_msgs/msg/Float32 (/imu/heading)
-      else if (topic === configuredTopics.heading || topic === '/imu/heading') {
+      else if (normTopic === configuredTopics.heading || normTopic === '/imu/heading' || normTopic.endsWith('/heading')) {
         if (ptr + 4 <= buffer.byteLength) {
           let val = view.getFloat32(ptr, true);
           val = ((val % 360) + 360) % 360;
@@ -511,13 +537,34 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
         }
       }
 
-      // 4. std_msgs/msg/String (/gps/status, /step_status)
-      else if (topic === configuredTopics.gps_status || topic === '/gps/status') {
+      // 4. std_msgs/msg/String (/gps/status)
+      else if (normTopic === configuredTopics.gps_status || normTopic === '/gps/status' || normTopic.endsWith('/gps/status')) {
         r.gps.present = true;
-        const strLen = view.getUint32(ptr, true); ptr += 4;
-        if (strLen > 0 && ptr + strLen <= buffer.byteLength) {
-          const strBytes = new Uint8Array(buffer, ptr, strLen);
-          const str = new TextDecoder('utf-8').decode(strBytes).replace(/\0/g, '').trim();
+        let str = '';
+
+        // Pass 1: Standard ROS 2 CDR string decoding (offset 17 has uint32 length)
+        if (ptr + 4 <= buffer.byteLength) {
+          const strLen = view.getUint32(ptr, true);
+          if (strLen > 0 && strLen < 10000 && ptr + 4 < buffer.byteLength) {
+            const actualLen = Math.min(strLen, buffer.byteLength - (ptr + 4));
+            const strBytes = new Uint8Array(buffer, ptr + 4, actualLen);
+            str = new TextDecoder('utf-8', { fatal: false }).decode(strBytes).replace(/\0/g, '').trim();
+          }
+        }
+
+        // Pass 2: Resilient full-payload scan (from byte 13 onwards)
+        if (!str || !str.includes('Fix:')) {
+          try {
+            const payloadBytes = new Uint8Array(buffer, 13);
+            const rawPayload = new TextDecoder('utf-8', { fatal: false }).decode(payloadBytes);
+            const fixIdx = rawPayload.indexOf('Fix:');
+            if (fixIdx !== -1) {
+              str = rawPayload.substring(fixIdx).replace(/\0/g, '').trim();
+            }
+          } catch(e) {}
+        }
+
+        if (str) {
           const fixMatch = str.match(/Fix:\s*([^|]+)/i);
           const fixStr = (fixMatch ? fixMatch[1] : str).trim().toUpperCase();
           if (fixStr.includes('RTK FIX') || fixStr === '4') r.gps.mode = 'RTK FIX';
@@ -538,14 +585,29 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
             r.gps.ntrip = ntripMatch[1].trim();
             r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
           }
+
+          logDebug(`🛰️ [Robot ${robotId}] GPS Status: ${r.gps.mode} (${r.gps.sats} Sats, HDOP ${r.gps.hdop}) | Base: ${r.gps.ntrip}`, 'topic');
         }
       }
 
-      else if (topic === configuredTopics.step_status || topic === '/step_status') {
-        const strLen = view.getUint32(ptr, true); ptr += 4;
-        if (strLen > 0 && ptr + strLen <= buffer.byteLength) {
-          const strBytes = new Uint8Array(buffer, ptr, strLen);
-          const str = new TextDecoder('utf-8').decode(strBytes).replace(/\0/g, '').trim();
+      // 5. std_msgs/msg/String (/step_status)
+      else if (normTopic === configuredTopics.step_status || normTopic === '/step_status' || normTopic.endsWith('/step_status')) {
+        let str = '';
+        if (ptr + 4 <= buffer.byteLength) {
+          const strLen = view.getUint32(ptr, true);
+          if (strLen > 0 && strLen < 10000 && ptr + 4 < buffer.byteLength) {
+            const actualLen = Math.min(strLen, buffer.byteLength - (ptr + 4));
+            const strBytes = new Uint8Array(buffer, ptr + 4, actualLen);
+            str = new TextDecoder('utf-8', { fatal: false }).decode(strBytes).replace(/\0/g, '').trim();
+          }
+        }
+        if (!str) {
+          try {
+            const payloadBytes = new Uint8Array(buffer, 13);
+            str = new TextDecoder('utf-8', { fatal: false }).decode(payloadBytes).replace(/\0/g, '').trim();
+          } catch(e) {}
+        }
+        if (str) {
           r.motion.step_progress = str;
           r.motion.state = str.includes('Driving') || str.includes('Turning') ? 'Moving' : 'Standby';
         }
@@ -721,22 +783,31 @@ function handleParsedRobotMessage(robotId, topic, data) {
     }
   }
 
+  const normTopic = topic ? (topic.startsWith('/') ? topic : '/' + topic) : '';
+
   // 2. GPS Fix (/fix)
-  if (topic === configuredTopics.gps_fix || topic === '/fix') {
+  if (normTopic === configuredTopics.gps_fix || normTopic === '/fix' || normTopic.endsWith('/fix')) {
     r.gps.present = true;
     if (data.latitude !== undefined && data.longitude !== undefined) {
       r.gps.lat = Number(data.latitude);
       r.gps.lon = Number(data.longitude);
       r.gps.alt = data.altitude ? Number(data.altitude).toFixed(1) : '--';
       const statusInt = data.status?.status ?? data.status;
-      if (statusInt >= 0 && r.gps.mode === 'NO FIX') r.gps.mode = '3D FIX';
+      if (statusInt === 2) {
+        if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'RTK FIX';
+      } else if (statusInt === 1) {
+        if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'DGPS';
+      } else if (statusInt >= 0 && r.gps.mode === 'NO FIX') {
+        r.gps.mode = '3D FIX';
+      }
     }
   }
 
   // 3. GPS Status (/gps/status)
-  if (topic === configuredTopics.gps_status || topic === '/gps/status') {
+  if (normTopic === configuredTopics.gps_status || normTopic === '/gps/status' || normTopic.endsWith('/gps/status')) {
     r.gps.present = true;
     const str = typeof data === 'string' ? data : (data.data || '');
+    if (str) {
       const fixMatch = str.match(/Fix:\s*([^|]+)/i);
       const fixStr = (fixMatch ? fixMatch[1] : str).trim().toUpperCase();
       if (fixStr.includes('RTK FIX') || fixStr === '4') r.gps.mode = 'RTK FIX';
@@ -757,6 +828,7 @@ function handleParsedRobotMessage(robotId, topic, data) {
         r.gps.ntrip = ntripMatch[1].trim();
         r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
       }
+    }
   }
 
   // 4. IMU Heading (/imu/heading)
@@ -1047,7 +1119,7 @@ function updateModalContent(r) {
 
   const ntripEl = document.getElementById('modal-ntrip');
   if (ntripEl) {
-    if (r.gps.mode === 'RTK FIX' || (r.gps.ntrip && r.gps.ntrip.toLowerCase().includes('connected'))) {
+    if (r.gps.mode === 'RTK FIX' || r.gps.mode === 'FLOAT' || (r.gps.ntrip && r.gps.ntrip.toLowerCase().includes('connected'))) {
       ntripEl.innerText = `🟢 Connected (${r.gps.rtcm || 'Active'})`;
       ntripEl.style.color = '#10b981';
     } else {

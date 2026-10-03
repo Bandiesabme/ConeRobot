@@ -105,6 +105,8 @@ class LC29HGPSNode(Node):
         self.current_num_sats = 0
         self.current_hdop = 99.99
         self.last_fix_time = 0.0
+        self._last_diag_log_time = 0.0
+        self._last_logged_fix_quality = -1
 
         self.get_logger().info("==================================================")
         self.get_logger().info(" Waveshare LC29H(DA) Dual-Band GPS/RTK Driver")
@@ -130,8 +132,8 @@ class LC29HGPSNode(Node):
             self.get_logger().warn("Mock hardware enabled: generating simulated RTK GPS fix data.")
             self.mock_timer = self.create_timer(1.0 / self.publish_rate_hz, self._publish_mock_data)
 
-        # Periodic status logger timer (every 5 seconds)
-        self.status_timer = self.create_timer(5.0, self._publish_diagnostic_status)
+        # Periodic status publisher timer (1 Hz for real-time dashboard telemetry)
+        self.status_timer = self.create_timer(1.0, self._publish_diagnostic_status)
 
     def _init_serial(self) -> None:
         """Initialize serial connection to Raspberry Pi 5 UART."""
@@ -610,12 +612,18 @@ class LC29HGPSNode(Node):
         status_msg.data = status_text
         self.status_pub.publish(status_msg)
 
-        if self.current_fix_quality in [4, 5]:
-            self.get_logger().info(f"[RTK ACTIVE] {status_text} | Pos: ({self.current_lat:.7f}, {self.current_lon:.7f})")
-        elif self.current_fix_quality > 0:
-            self.get_logger().info(f"[GNSS 3D] {status_text} | Pos: ({self.current_lat:.7f}, {self.current_lon:.7f})")
-        else:
-            self.get_logger().warn(f"[SEARCHING SATELLITES] {status_text}")
+        # Console log throttled to every 5 seconds (or immediately if fix quality changes)
+        now = time.time()
+        should_log = (now - self._last_diag_log_time >= 5.0) or (self.current_fix_quality != self._last_logged_fix_quality)
+        if should_log:
+            self._last_diag_log_time = now
+            self._last_logged_fix_quality = self.current_fix_quality
+            if self.current_fix_quality in [4, 5]:
+                self.get_logger().info(f"[RTK ACTIVE] {status_text} | Pos: ({self.current_lat:.7f}, {self.current_lon:.7f})")
+            elif self.current_fix_quality > 0:
+                self.get_logger().info(f"[GNSS 3D] {status_text} | Pos: ({self.current_lat:.7f}, {self.current_lon:.7f})")
+            else:
+                self.get_logger().warn(f"[SEARCHING SATELLITES] {status_text}")
 
     def _publish_mock_data(self) -> None:
         """Simulate realistic RTK Float / RTK Fix data in mock mode."""
