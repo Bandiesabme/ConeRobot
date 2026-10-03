@@ -324,7 +324,12 @@ function connectToRobotWebSocket(robotId, ip, port) {
             if (topic === configuredTopics.scan || topic === '/scan') hasLidarTopic = true;
             if (topic === configuredTopics.gps_fix || topic === '/fix') hasGpsTopic = true;
 
-            const isTarget = targetTopics.includes(topic) || Object.values(configuredTopics).includes(topic);
+            const isBattery = topic === configuredTopics.battery ||
+                              topic === '/battery_state' ||
+                              (topic && (topic.includes('battery') || topic.endsWith('/battery_state'))) ||
+                              (ch.schemaName && ch.schemaName.includes('BatteryState'));
+
+            const isTarget = targetTopics.includes(topic) || Object.values(configuredTopics).includes(topic) || isBattery;
 
             if (isTarget && !seen.has(topic)) {
               seen.add(topic);
@@ -618,28 +623,67 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
       }
 
       // 8. sensor_msgs/msg/BatteryState (/battery_state)
-      else if (topic === configuredTopics.battery || topic === '/battery_state' || (topic && topic.endsWith('/battery_state'))) {
-        // Skip Header: sec (4), nsec (4)
-        ptr += 8;
-        const frameLen = view.getUint32(ptr, true);
-        ptr += 4 + frameLen;
-        
-        // Align to 4 bytes for float32 fields
-        ptr = cdrAlign(ptr, 4);
+      else if (topic === configuredTopics.battery || topic === '/battery_state' || (topic && (topic.includes('battery') || topic.endsWith('/battery_state')))) {
+        let volt = null;
+        let pct = null;
 
-        if (ptr + 28 <= buffer.byteLength) {
-          const voltage = view.getFloat32(ptr, true); ptr += 4;
-          const temp = view.getFloat32(ptr, true); ptr += 4;
-          const curr = view.getFloat32(ptr, true); ptr += 4;
-          const chg = view.getFloat32(ptr, true); ptr += 4;
-          const cap = view.getFloat32(ptr, true); ptr += 4;
-          const dcap = view.getFloat32(ptr, true); ptr += 4;
-          const pct = view.getFloat32(ptr, true); ptr += 4;
+        // Pass 1: Standard ROS 2 CDR Header Skip
+        let bPtr = ptr + 8; // skip stamp (sec: 4, nsec: 4)
+        if (bPtr + 4 <= buffer.byteLength) {
+          const frameLen = view.getUint32(bPtr, true);
+          if (frameLen < 128 && bPtr + 4 + frameLen <= buffer.byteLength) {
+            bPtr += 4 + frameLen;
+            bPtr = cdrAlign(bPtr, 4);
 
-          if (!isNaN(voltage) && voltage > 0.0) {
-            const vFormatted = Number(voltage).toFixed(1);
-            const pctVal = (!isNaN(pct) && pct >= 0) ? Math.round(pct <= 1.0 ? pct * 100 : pct) : null;
-            r.health.battery_v = pctVal !== null ? `${vFormatted}V (${pctVal}%)` : `${vFormatted}V`;
+            if (bPtr + 28 <= buffer.byteLength) {
+              const vCand = view.getFloat32(bPtr, true);
+              if (!isNaN(vCand) && vCand >= 3.0 && vCand <= 36.0) {
+                volt = vCand;
+                const pCand = view.getFloat32(bPtr + 24, true);
+                if (!isNaN(pCand) && pCand >= 0.0 && pCand <= 100.0) {
+                  pct = pCand;
+                }
+              }
+            }
+          }
+        }
+
+        // Pass 2: Resilient CDR float scanner (matches 3S/4S LiPo voltage: 5.0V to 30.0V)
+        if (volt === null) {
+          for (let offset = 17; offset <= buffer.byteLength - 28; offset += 4) {
+            const vCand = view.getFloat32(offset, true);
+            if (!isNaN(vCand) && vCand >= 5.0 && vCand <= 30.0) {
+              volt = vCand;
+              const pCand = view.getFloat32(offset + 24, true);
+              if (!isNaN(pCand) && pCand >= 0.0 && pCand <= 100.0) {
+                pct = pCand;
+              }
+              break;
+            }
+          }
+        }
+
+        // Pass 3: 2-byte aligned scan fallback
+        if (volt === null) {
+          for (let offset = 17; offset <= buffer.byteLength - 4; offset += 2) {
+            const vCand = view.getFloat32(offset, true);
+            if (!isNaN(vCand) && vCand >= 5.0 && vCand <= 30.0) {
+              volt = vCand;
+              break;
+            }
+          }
+        }
+
+        if (volt !== null && volt > 0.0) {
+          const vFormatted = Number(volt).toFixed(1);
+          let pctVal = null;
+          if (pct !== null && !isNaN(pct) && pct >= 0) {
+            pctVal = Math.round(pct <= 1.0 ? pct * 100 : pct);
+          }
+          const prevBatt = r.health.battery_v;
+          r.health.battery_v = pctVal !== null ? `${vFormatted}V (${pctVal}%)` : `${vFormatted}V`;
+          if (prevBatt !== r.health.battery_v) {
+            logDebug(`🔋 [Robot ${robotId}] Battery: ${r.health.battery_v}`, 'topic');
           }
         }
       }
@@ -752,13 +796,17 @@ function handleParsedRobotMessage(robotId, topic, data) {
   }
 
   // 7. Battery State (/battery_state)
-  if (topic === configuredTopics.battery || topic === '/battery_state') {
+  if (topic === configuredTopics.battery || topic === '/battery_state' || (topic && (topic.includes('battery') || topic.endsWith('/battery_state')))) {
     if (data.voltage !== undefined) {
       const v = Number(data.voltage).toFixed(1);
       const pct = (data.percentage !== undefined && data.percentage !== null && !isNaN(data.percentage))
         ? Math.round(Number(data.percentage) * (data.percentage <= 1.0 ? 100 : 1))
         : null;
+      const prevBatt = r.health.battery_v;
       r.health.battery_v = pct !== null ? `${v}V (${pct}%)` : `${v}V`;
+      if (prevBatt !== r.health.battery_v) {
+        logDebug(`🔋 [Robot ${robotId}] Battery (JSON): ${r.health.battery_v}`, 'topic');
+      }
     }
   }
 

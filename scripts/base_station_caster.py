@@ -102,6 +102,7 @@ class NTRIPBaseCaster:
         self.ser = None
         self.ser_lock = threading.Lock()
         self.rtcm_1005_count = 0
+        self.last_serial_time: Optional[float] = None
 
         # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
@@ -372,6 +373,9 @@ class NTRIPBaseCaster:
         time.sleep(0.05)
         # 3. Enable RTCM MSM7 multi-constellation observations
         self._send_gnss_cmd("PAIR432,1")
+        time.sleep(0.05)
+        # 4. Enable NMEA GGA sentence output (1 Hz) for live telemetry
+        self._send_gnss_cmd("PAIR062,0,1")
         time.sleep(0.05)
         # 4. If static coordinates are locked, send fixed position to hardware
         if self.is_static_fixed and self.survey_lat != 0.0 and self.survey_lon != 0.0:
@@ -808,6 +812,7 @@ class NTRIPBaseCaster:
                         time.sleep(0.01)
                         continue
 
+                    self.last_serial_time = time.time()
                     raw_byte_stream.extend(chunk)
                     if len(raw_byte_stream) > 32768:
                         raw_byte_stream = raw_byte_stream[-16384:]
@@ -947,7 +952,7 @@ class NTRIPBaseCaster:
             pass
         return None
 
-    def get_status_json(self) -> dict:
+    def get_status_json(self, client_host: Optional[str] = None) -> dict:
         """Generates real-time telemetry dictionary for HTTP dashboard."""
         with self.clients_lock:
             active_rovers = [
@@ -966,6 +971,11 @@ class NTRIPBaseCaster:
         remaining_sec = max(0, self.survey_target_duration - self.survey_duration)
         remaining_str = f"{remaining_sec // 60}m {remaining_sec % 60:02d}s"
         loc_store = self._load_locations_store()
+
+        time_since_serial = round(time.time() - self.last_serial_time, 1) if self.last_serial_time else None
+        is_serial_live = time_since_serial is not None and time_since_serial < 2.5
+        current_ip = self._get_local_ip()
+        display_ip = client_host if (client_host and not client_host.startswith("127.") and not client_host.endswith(".local")) else (current_ip if (current_ip and not current_ip.startswith("127.")) else self.local_ip)
 
         return {
             "survey_status": "STATIC_FIXED" if self.is_static_fixed else self.survey_status,
@@ -989,11 +999,14 @@ class NTRIPBaseCaster:
             "hdop": round(self.hdop, 2),
             "rtcm_ingested_kb": round(self.total_rtcm_bytes_read / 1024.0, 1),
             "rtcm_broadcasted_kb": round(self.total_bytes_sent / 1024.0, 1),
+            "rtcm_1005_count": self.rtcm_1005_count,
+            "is_serial_alive": is_serial_live,
+            "last_serial_ago_sec": time_since_serial,
             "active_rovers_count": len(active_rovers),
             "active_rovers": active_rovers,
             "mountpoint": self.mountpoint,
             "ntrip_port": self.server_port,
-            "local_ip": self.local_ip,
+            "local_ip": display_ip,
             "logs": log_list
         }
 
@@ -1095,7 +1108,8 @@ class NTRIPBaseCaster:
 
             def do_GET(self):
                 if self.path.startswith('/api/status'):
-                    payload = json.dumps(caster_instance.get_status_json()).encode('utf-8')
+                    client_host = self.headers.get('Host', '').split(':')[0]
+                    payload = json.dumps(caster_instance.get_status_json(client_host)).encode('utf-8')
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Content-Length', str(len(payload)))
