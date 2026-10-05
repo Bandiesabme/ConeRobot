@@ -90,36 +90,36 @@ http://<BASE_PI_ZERO_IP>:8080
 Configure the Base Station to automatically start on boot so it runs headless in the field:
 
 ```bash
-# Create systemd service unit
-sudo tee /etc/systemd/system/ntrip-base.service << 'EOF'
-[Unit]
-Description=RTK Base Station NTRIP Caster & Web Dashboard
-After=network.target
-Wants=network.target
+  # Create systemd service unit
+  sudo tee /etc/systemd/system/ntrip-base.service << 'EOF'
+  [Unit]
+  Description=RTK Base Station NTRIP Caster & Web Dashboard
+  After=network.target
+  Wants=network.target
 
-[Service]
-Type=simple
-User=conerobot
-WorkingDirectory=/home/conerobot/github/ConeRobot
-ExecStart=/usr/bin/python3 /home/conerobot/github/ConeRobot/scripts/base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE
-Restart=always
-RestartSec=3
+  [Service]
+  Type=simple
+  User=conerobot
+  WorkingDirectory=/home/conerobot/github/ConeRobot
+  ExecStart=/usr/bin/python3 /home/conerobot/github/ConeRobot/scripts/base_station_caster.py --port 2101 --web-port 8080 --mountpoint BASE
+  Restart=always
+  RestartSec=3
 
-[Install]
-WantedBy=multi-user.target
-EOF
+  [Install]
+  WantedBy=multi-user.target
+  EOF
 
-# Reload systemd, enable service on boot, and start it immediately
-sudo systemctl daemon-reload
-sudo systemctl enable --now ntrip-base.service
+  # Reload systemd, enable service on boot, and start it immediately
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now ntrip-base.service
 
-# Verify service is active and running
-sudo systemctl status ntrip-base.service
-```
+  # Verify service is active and running
+  sudo systemctl status ntrip-base.service
+  ```
 
-To view live background logs at any time:
-```bash
-journalctl -u ntrip-base.service -f
+  To view live background logs at any time:
+  ```bash
+  journalctl -u ntrip-base.service -f
 ```
 
 

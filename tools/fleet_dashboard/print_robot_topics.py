@@ -3,6 +3,7 @@
 Inspect all advertised Foxglove Bridge channels and message formats on Robot 1
 """
 
+import sys
 import socket
 import json
 import time
@@ -10,8 +11,8 @@ import base64
 import os
 import struct
 
-ROBOT_IP = "192.168.0.100"
-ROBOT_PORT = 8765
+ROBOT_IP = sys.argv[1] if len(sys.argv) > 1 else "192.168.137.217"
+ROBOT_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
 
 print(f"Connecting to {ROBOT_IP}:{ROBOT_PORT} to inspect published ROS 2 topics...")
 

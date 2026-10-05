@@ -385,6 +385,7 @@ class PrimitiveMotionController(Node):
     def _cancel_action_callback(self, goal_handle):
         self.get_logger().info("[ACTION] Preemption / Cancel requested by client.")
         self._cancel_requested = True
+        self._stop_motion()
         return CancelResponse.ACCEPT
 
     def _execute_action_callback(self, goal_handle):

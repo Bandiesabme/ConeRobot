@@ -202,15 +202,27 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             
             robots_list = {}
+            cfg = load_config()
+            cfg_robots = {r["id"]: r for r in cfg.get("robots", []) if "id" in r}
+            robot_port = cfg.get("server", {}).get("robot_port", 8765)
             for r_id in range(1, 14):
                 if r_id in discovered_cache:
                     robots_list[r_id] = discovered_cache[r_id]
+                elif r_id in cfg_robots and cfg_robots[r_id].get("ip"):
+                    robots_list[r_id] = {
+                        "id": r_id,
+                        "name": cfg_robots[r_id].get("name", f"ConeRobot {r_id:02d}"),
+                        "host": cfg_robots[r_id].get("host", f"conerobot{r_id:02d}.local"),
+                        "ip": cfg_robots[r_id].get("ip", ""),
+                        "port": robot_port,
+                        "online": True
+                    }
                 else:
                     robots_list[r_id] = {"id": r_id, "name": f"ConeRobot {r_id:02d}", "online": False}
 
             response_data = {
                 "discovered_count": len(discovered_cache),
-                "topics": load_config().get("topics", {}),
+                "topics": cfg.get("topics", {}),
                 "robots": robots_list
             }
             self.wfile.write(json.dumps(response_data).encode("utf-8"))

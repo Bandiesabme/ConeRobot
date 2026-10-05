@@ -17,7 +17,7 @@
     "battery": "/battery_state"
   },
   "robots": [
-    { "id": 1, "name": "ConeRobot 01", "host": "conerobot01.local", "ip": "" },
+    { "id": 1, "name": "ConeRobot 01", "host": "conerobot01.local", "ip": "192.168.137.217" },
     { "id": 2, "name": "ConeRobot 02", "host": "conerobot02.local", "ip": "" },
     { "id": 3, "name": "ConeRobot 03", "host": "conerobot03.local", "ip": "" },
     { "id": 4, "name": "ConeRobot 04", "host": "conerobot04.local", "ip": "" },

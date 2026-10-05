@@ -79,6 +79,7 @@ function initMap() {
   L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
 
   document.getElementById('btn-fit-map').addEventListener('click', fitAllRobotsInMap);
+  setTimeout(() => { if (map) map.invalidateSize(); }, 300);
 }
 
 function createRobotIcon(robotId, headingDeg, gpsMode, isLidarOnly) {
@@ -107,9 +108,12 @@ function createRobotIcon(robotId, headingDeg, gpsMode, isLidarOnly) {
   });
 }
 
+let hasAutoCentered = false;
+
 function updateMapMarkers() {
   if (!map) return;
   const activeValidIds = new Set();
+  let primaryCoordText = null;
 
   Object.keys(realTelemetry).forEach(id => {
     const r = realTelemetry[id];
@@ -124,18 +128,43 @@ function updateMapMarkers() {
     if (lat && lon && Math.abs(lat) > 0.0001 && Math.abs(lon) > 0.0001) {
       activeValidIds.add(String(id));
       const icon = createRobotIcon(id, heading, gpsMode, isLidarOnly);
+      const rNum = String(id).padStart(2, '0');
+
+      if (!primaryCoordText) {
+        primaryCoordText = `R${rNum}: ${lat.toFixed(7)}° N, ${lon.toFixed(7)}° E (${gpsMode})`;
+      }
+
+      const tooltipContent = `<b>ConeRobot ${rNum}</b> [${gpsMode}]<br>📍 ${lat.toFixed(7)}, ${lon.toFixed(7)}<br>Alt: ${r.gps?.alt ? r.gps.alt + ' m' : '--'} | Sats: ${r.gps?.sats || 0}`;
 
       if (robotMarkers[id]) {
         robotMarkers[id].setLatLng([lat, lon]);
         robotMarkers[id].setIcon(icon);
+        if (robotMarkers[id].getTooltip()) {
+          robotMarkers[id].setTooltipContent(tooltipContent);
+        }
       } else {
         const marker = L.marker([lat, lon], { icon: icon }).addTo(map);
+        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -18], className: 'robot-map-tooltip' });
         marker.on('click', () => openRobotDetailModal(id));
         robotMarkers[id] = marker;
+      }
+
+      // Auto-center map viewport on first valid GPS fix
+      if (!hasAutoCentered) {
         map.setView([lat, lon], 19);
+        hasAutoCentered = true;
       }
     }
   });
+
+  const coordsTextEl = document.getElementById('map-coords-text');
+  if (coordsTextEl) {
+    if (primaryCoordText) {
+      coordsTextEl.innerText = primaryCoordText;
+    } else {
+      coordsTextEl.innerText = 'Searching GPS...';
+    }
+  }
 
   Object.keys(robotMarkers).forEach(id => {
     if (!activeValidIds.has(String(id))) {
@@ -148,9 +177,11 @@ function updateMapMarkers() {
 function fitAllRobotsInMap() {
   const coords = [];
   Object.values(robotMarkers).forEach(m => coords.push(m.getLatLng()));
-  if (coords.length > 0) {
+  if (coords.length === 1) {
+    map.setView(coords[0], 19);
+  } else if (coords.length > 1) {
     const bounds = L.latLngBounds(coords);
-    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 20 });
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 19 });
   }
 }
 
@@ -278,7 +309,8 @@ function connectToRobotWebSocket(robotId, ip, port) {
   activeWebSockets[robotId] = ws;
   ws.binaryType = "arraybuffer";
 
-  let channelMap = {};
+  const subIdToTopic = {};
+  const channelIdToTopic = {};
   let subIdCounter = 1;
 
   ws.onopen = () => {
@@ -345,8 +377,8 @@ function connectToRobotWebSocket(robotId, ip, port) {
             if (isTarget && !seen.has(rawTopic)) {
               seen.add(rawTopic);
               const subId = subIdCounter++;
-              channelMap[subId] = rawTopic;
-              channelMap[ch.id] = rawTopic;
+              subIdToTopic[subId] = rawTopic;
+              channelIdToTopic[ch.id] = rawTopic;
               subscriptions.push({
                 id: subId,
                 channelId: ch.id
@@ -354,10 +386,10 @@ function connectToRobotWebSocket(robotId, ip, port) {
             }
           });
 
-          realTelemetry[robotId].lidar.present = hasLidarTopic;
-          realTelemetry[robotId].gps.present = hasGpsTopic;
+          if (hasLidarTopic) realTelemetry[robotId].lidar.present = true;
+          if (hasGpsTopic) realTelemetry[robotId].gps.present = true;
 
-          const topicNames = subscriptions.map(s => channelMap[s.id]).join(', ');
+          const topicNames = subscriptions.map(s => subIdToTopic[s.id]).join(', ');
           logDebug(`🛰️ [Robot ${robotId}] Subscribed to ${subscriptions.length} topics: ${topicNames}`, 'topic');
 
           if (subscriptions.length > 0) {
@@ -366,12 +398,12 @@ function connectToRobotWebSocket(robotId, ip, port) {
         }
         // 2. Message Data
         else if (msg.op === "message" && msg.data) {
-          const topic = channelMap[msg.subscriptionId] || channelMap[msg.channelId] || channelMap[msg.id];
+          const topic = subIdToTopic[msg.subscriptionId] || channelIdToTopic[msg.channelId] || subIdToTopic[msg.id] || channelIdToTopic[msg.id];
           handleParsedRobotMessage(robotId, topic, msg.data);
         }
       } catch (e) {}
     } else if (event.data instanceof ArrayBuffer) {
-      handleBinaryFoxgloveMessage(robotId, event.data, channelMap);
+      handleBinaryFoxgloveMessage(robotId, event.data, subIdToTopic, channelIdToTopic);
     }
   };
 
@@ -425,12 +457,14 @@ function handleSysInfoData(r, sys) {
 }
 
 function cdrAlign(ptr, alignment) {
-  const rel = ptr - 17;
-  const alignedRel = (rel + (alignment - 1)) & ~(alignment - 1);
-  return 17 + alignedRel;
+  // CDR stream starts at byte 13 (after 13-byte Foxglove header: op:1, subId:4, stamp:8).
+  // All CDR primitive alignments are calculated relative to byte 13.
+  const cdrOffset = ptr - 13;
+  const alignedCdrOffset = (cdrOffset + (alignment - 1)) & ~(alignment - 1);
+  return 13 + alignedCdrOffset;
 }
 
-function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
+function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToTopic) {
   const view = new DataView(buffer);
   if (buffer.byteLength < 17) return;
   const op = view.getUint8(0);
@@ -438,7 +472,7 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
   // Opcode 1 = Message Data
   if (op === 1) {
     const subId = view.getUint32(1, true);
-    const topic = channelMap[subId];
+    const topic = (subIdToTopic && subIdToTopic[subId]) || (channelIdToTopic && channelIdToTopic[subId]);
     if (!topic) {
       return; // Skip messages for unmapped or unsubscribed channels
     }
@@ -485,42 +519,91 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
       // 2. sensor_msgs/msg/NavSatFix (/fix)
       else if (normTopic === configuredTopics.gps_fix || normTopic === '/fix' || normTopic.endsWith('/fix')) {
         r.gps.present = true;
-        // Skip ROS 2 Header
-        ptr += 8;
-        const frameLen = view.getUint32(ptr, true);
-        ptr += 4 + frameLen;
+        const isLE = buffer.byteLength > 14 ? (view.getUint8(14) === 1) : true;
+        let lat = null, lon = null, alt = null;
 
-        // NavSatStatus: status (int8), service (uint16)
-        const statusInt = view.getInt8(ptr); ptr += 1;
-        ptr = cdrAlign(ptr, 2);
-        ptr += 2;             // service
-        ptr = cdrAlign(ptr, 8); // align 8 for float64
+        // Pass 1: Standard ROS 2 CDR Header Skip & Sequential Read
+        // Payload starts at byte 17.
+        // stamp: sec(4) + nsec(4) = 8 bytes -> fPtr = 25.
+        let fPtr = ptr + 8;
+        if (fPtr + 4 <= buffer.byteLength) {
+          const frameLen = view.getUint32(fPtr, isLE);
+          if (frameLen < 256 && fPtr + 4 + frameLen <= buffer.byteLength) {
+            fPtr += 4 + frameLen;
+            const statusInt = view.getInt8(fPtr); fPtr += 1;
+            fPtr = cdrAlign(fPtr, 2);
+            fPtr += 2;             // service (uint16)
+            fPtr = cdrAlign(fPtr, 8); // align 8 relative to CDR stream (latitude)
 
-        if (ptr + 24 <= buffer.byteLength) {
-          const lat = view.getFloat64(ptr, true); ptr += 8;
-          const lon = view.getFloat64(ptr, true); ptr += 8;
-          const alt = view.getFloat64(ptr, true); ptr += 8;
+            if (fPtr + 24 <= buffer.byteLength) {
+              const cLat = view.getFloat64(fPtr, isLE);
+              const cLon = view.getFloat64(fPtr + 8, isLE);
+              const cAlt = view.getFloat64(fPtr + 16, isLE);
+              if (!isNaN(cLat) && !isNaN(cLon) && isFinite(cLat) && isFinite(cLon) &&
+                  Math.abs(cLat) <= 90.0 && Math.abs(cLon) <= 180.0 &&
+                  (Math.abs(cLat) > 0.0001 || Math.abs(cLon) > 0.0001)) {
+                lat = cLat;
+                lon = cLon;
+                if (!isNaN(cAlt) && isFinite(cAlt) && Math.abs(cAlt) < 100000.0) alt = cAlt;
+              }
+            }
 
+            if (statusInt === 2) {
+              if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'RTK FIX';
+            } else if (statusInt === 1) {
+              if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'DGPS';
+            } else if (statusInt === 0) {
+              if (r.gps.mode === 'NO FIX') r.gps.mode = '3D FIX';
+            }
+          }
+        }
+
+        // Pass 2: Resilient byte-by-byte scan across entire CDR buffer (LE & BE)
+        // Skip timestamp (start at offset 25) to avoid false matches
+        if (lat === null) {
+          for (let offset = 25; offset <= buffer.byteLength - 16; offset++) {
+            // Little Endian
+            let sLat = view.getFloat64(offset, true);
+            let sLon = view.getFloat64(offset + 8, true);
+            if (!isNaN(sLat) && !isNaN(sLon) && isFinite(sLat) && isFinite(sLon) &&
+                Math.abs(sLat) <= 90.0 && Math.abs(sLon) <= 180.0 &&
+                (Math.abs(sLat) > 0.0001 || Math.abs(sLon) > 0.0001) &&
+                (Math.abs(sLat) >= 0.01 && Math.abs(sLon) >= 0.01)) {
+              lat = sLat;
+              lon = sLon;
+              if (offset + 24 <= buffer.byteLength) {
+                const sAlt = view.getFloat64(offset + 16, true);
+                if (!isNaN(sAlt) && isFinite(sAlt) && Math.abs(sAlt) < 100000.0) alt = sAlt;
+              }
+              break;
+            }
+            // Big Endian fallback
+            sLat = view.getFloat64(offset, false);
+            sLon = view.getFloat64(offset + 8, false);
+            if (!isNaN(sLat) && !isNaN(sLon) && isFinite(sLat) && isFinite(sLon) &&
+                Math.abs(sLat) <= 90.0 && Math.abs(sLon) <= 180.0 &&
+                (Math.abs(sLat) > 0.0001 || Math.abs(sLon) > 0.0001) &&
+                (Math.abs(sLat) >= 0.01 && Math.abs(sLon) >= 0.01)) {
+              lat = sLat;
+              lon = sLon;
+              if (offset + 24 <= buffer.byteLength) {
+                const sAlt = view.getFloat64(offset + 16, false);
+                if (!isNaN(sAlt) && isFinite(sAlt) && Math.abs(sAlt) < 100000.0) alt = sAlt;
+              }
+              break;
+            }
+          }
+        }
+
+        if (lat !== null && lon !== null) {
           r.gps.lat = Number(lat.toFixed(7));
           r.gps.lon = Number(lon.toFixed(7));
-          r.gps.alt = Number(alt.toFixed(1));
-
-          // Set GPS mode from NavSatStatus (STATUS_GBAS_FIX=2 is RTK, STATUS_SBAS_FIX=1 is DGPS, STATUS_FIX=0 is 3D)
-          if (statusInt === 2) {
-            if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') {
-              r.gps.mode = 'RTK FIX';
-            }
-          } else if (statusInt === 1) {
-            if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') {
-              r.gps.mode = 'DGPS';
-            }
-          } else if (statusInt === 0) {
-            if (r.gps.mode === 'NO FIX') {
-              r.gps.mode = '3D FIX';
-            }
-          } else if (r.gps.mode === 'NO FIX' && Math.abs(lat) > 0.0001) {
-            r.gps.mode = '3D FIX';
-          }
+          if (alt !== null && !isNaN(alt) && isFinite(alt)) r.gps.alt = Number(alt.toFixed(1));
+          if (r.gps.mode === 'NO FIX') r.gps.mode = '3D FIX';
+          console.log(`[NavSatFix] Extracted coords: ${r.gps.lat}, ${r.gps.lon} (Alt: ${r.gps.alt}m)`);
+          logDebug(`📍 [Robot ${robotId}] GPS Fix: ${r.gps.lat}, ${r.gps.lon} (Alt: ${r.gps.alt !== null ? r.gps.alt + 'm' : '--'})`, 'topic');
+        } else {
+          console.warn(`[NavSatFix] Could not find coords in buffer (${buffer.byteLength} bytes)`);
         }
       }
 
@@ -584,6 +667,40 @@ function handleBinaryFoxgloveMessage(robotId, buffer, channelMap) {
           if (ntripMatch) {
             r.gps.ntrip = ntripMatch[1].trim();
             r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
+          }
+
+          // Resilient Coordinate extraction from /gps/status
+          let pMatch = str.match(/Pos:\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?\s*\)/i);
+          if (!pMatch) {
+            const latM = str.match(/Lat(?:itude)?:\s*([-\d.]+)/i);
+            const lonM = str.match(/Lon(?:gitude)?:\s*([-\d.]+)/i);
+            if (latM && lonM) {
+              const altM = str.match(/Alt(?:itude)?:\s*([-\d.]+)/i);
+              pMatch = [null, latM[1], lonM[1], altM ? altM[1] : null];
+            }
+          }
+          if (!pMatch) {
+            pMatch = str.match(/Pos:\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?/i);
+          }
+          if (!pMatch) {
+            const decM = str.match(/\b([0-8]?\d\.\d{4,9})\s*,\s*([0-1]?\d{1,2}\.\d{4,9})\b/);
+            if (decM) {
+              pMatch = [null, decM[1], decM[2], null];
+            }
+          }
+          if (pMatch) {
+            const pLat = parseFloat(pMatch[1]);
+            const pLon = parseFloat(pMatch[2]);
+            if (!isNaN(pLat) && !isNaN(pLon) && isFinite(pLat) && isFinite(pLon) &&
+                Math.abs(pLat) <= 90.0 && Math.abs(pLon) <= 180.0 &&
+                (Math.abs(pLat) > 0.0001 || Math.abs(pLon) > 0.0001)) {
+              r.gps.lat = Number(pLat.toFixed(7));
+              r.gps.lon = Number(pLon.toFixed(7));
+              if (pMatch[3]) {
+                const pAlt = parseFloat(pMatch[3]);
+                if (!isNaN(pAlt) && isFinite(pAlt)) r.gps.alt = Number(pAlt.toFixed(1));
+              }
+            }
           }
 
           logDebug(`🛰️ [Robot ${robotId}] GPS Status: ${r.gps.mode} (${r.gps.sats} Sats, HDOP ${r.gps.hdop}) | Base: ${r.gps.ntrip}`, 'topic');
@@ -823,10 +940,38 @@ function handleParsedRobotMessage(robotId, topic, data) {
       const hdopMatch = str.match(/HDOP:\s*([\d.]+)/i);
       if (hdopMatch) r.gps.hdop = hdopMatch[1];
 
-      const ntripMatch = str.match(/NTRIP:\s*([^(|]+)(?:\(([^)]+)\))?/i);
-      if (ntripMatch) {
-        r.gps.ntrip = ntripMatch[1].trim();
-        r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
+      // Resilient Coordinate extraction from /gps/status
+      let pMatch = str.match(/Pos:\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?\s*\)/i);
+      if (!pMatch) {
+        const latM = str.match(/Lat(?:itude)?:\s*([-\d.]+)/i);
+        const lonM = str.match(/Lon(?:gitude)?:\s*([-\d.]+)/i);
+        if (latM && lonM) {
+          const altM = str.match(/Alt(?:itude)?:\s*([-\d.]+)/i);
+          pMatch = [null, latM[1], lonM[1], altM ? altM[1] : null];
+        }
+      }
+      if (!pMatch) {
+        pMatch = str.match(/Pos:\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?/i);
+      }
+      if (!pMatch) {
+        const decM = str.match(/\b([0-8]?\d\.\d{4,9})\s*,\s*([0-1]?\d{1,2}\.\d{4,9})\b/);
+        if (decM) {
+          pMatch = [null, decM[1], decM[2], null];
+        }
+      }
+      if (pMatch) {
+        const pLat = parseFloat(pMatch[1]);
+        const pLon = parseFloat(pMatch[2]);
+        if (!isNaN(pLat) && !isNaN(pLon) && isFinite(pLat) && isFinite(pLon) &&
+            Math.abs(pLat) <= 90.0 && Math.abs(pLon) <= 180.0 &&
+            (Math.abs(pLat) > 0.0001 || Math.abs(pLon) > 0.0001)) {
+          r.gps.lat = Number(pLat.toFixed(7));
+          r.gps.lon = Number(pLon.toFixed(7));
+          if (pMatch[3]) {
+            const pAlt = parseFloat(pMatch[3]);
+            if (!isNaN(pAlt) && isFinite(pAlt)) r.gps.alt = Number(pAlt.toFixed(1));
+          }
+        }
       }
     }
   }
@@ -969,20 +1114,22 @@ function renderUIUpdates() {
       // GPS Metric
       if (r.gps.present) {
         let gpsTxt = '';
+        const hasValidCoords = (r.gps.lat !== null && r.gps.lon !== null && !isNaN(r.gps.lat) && !isNaN(r.gps.lon) && (Math.abs(r.gps.lat) > 0.0001 || Math.abs(r.gps.lon) > 0.0001));
+        const coordSnippet = hasValidCoords ? ` [${r.gps.lat.toFixed(5)}, ${r.gps.lon.toFixed(5)}]` : '';
         if (r.gps.mode === 'RTK FIX') {
-          gpsTxt = `🟢 RTK FIX (${r.gps.sats} Sats)`;
+          gpsTxt = `🟢 RTK FIX (${r.gps.sats} Sats)${coordSnippet}`;
           gpsEl.className = 'metric-val gps-rtk';
         } else if (r.gps.mode === 'FLOAT') {
-          gpsTxt = `🟡 RTK FLOAT (${r.gps.sats} Sats)`;
+          gpsTxt = `🟡 RTK FLOAT (${r.gps.sats} Sats)${coordSnippet}`;
           gpsEl.className = 'metric-val gps-float';
         } else if (r.gps.mode === '3D FIX' || (r.gps.mode && r.gps.mode.includes('3D'))) {
           const isBaseConnected = (r.gps.ntrip && r.gps.ntrip.toLowerCase().includes('connected'));
           gpsTxt = isBaseConnected 
-            ? `3D FIX (${r.gps.sats} Sats)` 
-            : `3D FIX (No Base Station) [${r.gps.sats} Sats]`;
+            ? `3D FIX (${r.gps.sats} Sats)${coordSnippet}` 
+            : `3D FIX [${r.gps.sats} Sats]${coordSnippet}`;
           gpsEl.className = 'metric-val gps-none';
         } else {
-          gpsTxt = `${r.gps.mode} (${r.gps.sats} Sats)`;
+          gpsTxt = `${r.gps.mode} (${r.gps.sats} Sats)${coordSnippet}`;
           gpsEl.className = 'metric-val gps-none';
         }
         gpsEl.innerText = gpsTxt;
@@ -1112,9 +1259,11 @@ function updateModalContent(r) {
     battModalEl.style.color = (r.health.battery_v && r.health.battery_v !== '--') ? '#10b981' : 'var(--text-muted)';
   }
 
-  document.getElementById('modal-lat').innerText = r.gps.lat ? r.gps.lat.toFixed(7) : (r.gps.present ? 'NO FIX' : 'Not Equipped');
-  document.getElementById('modal-lon').innerText = r.gps.lon ? r.gps.lon.toFixed(7) : (r.gps.present ? 'NO FIX' : 'Not Equipped');
-  document.getElementById('modal-alt').innerText = r.gps.alt ? `${r.gps.alt} m` : '--';
+  const hasLat = (r.gps.lat !== null && r.gps.lat !== undefined && !isNaN(r.gps.lat));
+  const hasLon = (r.gps.lon !== null && r.gps.lon !== undefined && !isNaN(r.gps.lon));
+  document.getElementById('modal-lat').innerText = hasLat ? r.gps.lat.toFixed(7) : (r.gps.present ? 'NO FIX' : 'Not Equipped');
+  document.getElementById('modal-lon').innerText = hasLon ? r.gps.lon.toFixed(7) : (r.gps.present ? 'NO FIX' : 'Not Equipped');
+  document.getElementById('modal-alt').innerText = (r.gps.alt !== null && r.gps.alt !== undefined && !isNaN(r.gps.alt) && r.gps.alt !== '--') ? `${r.gps.alt} m` : '--';
   document.getElementById('modal-hdop').innerText = r.gps.hdop || '--';
 
   const ntripEl = document.getElementById('modal-ntrip');

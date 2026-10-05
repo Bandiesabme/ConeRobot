@@ -85,7 +85,10 @@
             <h2>Live Fleet GPS Positioning</h2>
           </div>
           <div class="map-controls">
-            <button id="btn-fit-map" class="map-mini-btn" title="Fit all robots in view">Fit All</button>
+            <span class="map-coords-badge" id="map-live-coords" style="font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); padding: 3px 10px; border-radius: 6px; display: inline-flex; align-items: center; gap: 6px;">
+              <span>📍</span> <span id="map-coords-text">Searching GPS...</span>
+            </span>
+            <button id="btn-fit-map" class="map-mini-btn" title="Center map on robot">Center Robot</button>
             <span class="map-legend-item"><span class="legend-dot green"></span> RTK Fix</span>
             <span class="map-legend-item"><span class="legend-dot yellow"></span> Float</span>
             <span class="map-legend-item"><span class="legend-dot red"></span> Lost</span>
@@ -262,6 +265,6 @@
   <!-- Leaflet JS for Maps -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <!-- Custom Fleet JS with cache buster -->
-  <script src="js/dashboard.js?v=v225"></script>
+  <script src="js/dashboard.js?v=v235"></script>
 </body>
 </html>

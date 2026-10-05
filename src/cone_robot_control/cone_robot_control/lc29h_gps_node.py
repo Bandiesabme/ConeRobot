@@ -196,14 +196,22 @@ class LC29HGPSNode(Node):
         if not raw_coord or not direction:
             return None
         try:
-            deg_digits = 3 if is_lon else 2
-            degrees = float(raw_coord[:deg_digits])
-            minutes = float(raw_coord[deg_digits:])
+            dot_idx = raw_coord.find('.')
+            if dot_idx != -1 and dot_idx >= 2:
+                # Minutes are always the 2 digits immediately preceding the decimal point plus fractional part
+                deg_part = raw_coord[:dot_idx - 2]
+                min_part = raw_coord[dot_idx - 2:]
+            else:
+                deg_digits = 3 if is_lon else 2
+                deg_part = raw_coord[:deg_digits]
+                min_part = raw_coord[deg_digits:]
+            degrees = float(deg_part) if deg_part else 0.0
+            minutes = float(min_part)
             decimal = degrees + (minutes / 60.0)
             if direction in ['S', 'W']:
                 decimal = -decimal
             return decimal
-        except ValueError:
+        except (ValueError, IndexError):
             return None
 
     def _parse_gga(self, line: str) -> None:
@@ -606,6 +614,7 @@ class LC29HGPSNode(Node):
         status_msg = String()
         status_text = (
             f"Fix: {quality_str} | Sats: {self.current_num_sats} | HDOP: {self.current_hdop:.2f} | "
+            f"Pos: ({self.current_lat:.7f}, {self.current_lon:.7f}, {self.current_alt:.1f}m) | "
             f"NTRIP: {'Connected' if self.ntrip_connected else ('Disabled' if not self.ntrip_enable else 'Connecting...')} "
             f"({self.rtcm_bytes_received / 1024.0:.1f} KB RTCM)"
         )

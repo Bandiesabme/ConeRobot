@@ -292,6 +292,21 @@ body {
   background-color: #111827 !important;
 }
 
+.robot-map-tooltip {
+  background: rgba(15, 23, 42, 0.95) !important;
+  backdrop-filter: blur(8px) !important;
+  color: #f8fafc !important;
+  border: 1px solid rgba(56, 189, 248, 0.4) !important;
+  border-radius: 6px !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.74rem !important;
+  padding: 4px 8px !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5) !important;
+}
+.robot-map-tooltip::before {
+  border-top-color: rgba(15, 23, 42, 0.95) !important;
+}
+
 /* 13-Robot Cards Grid */
 .grid-section {
   display: flex;

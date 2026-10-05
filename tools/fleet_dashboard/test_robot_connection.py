@@ -9,8 +9,8 @@ import socket
 import base64
 import os
 
-ROBOT_IP = "192.168.0.100"
-ROBOT_PORT = 8765
+ROBOT_IP = sys.argv[1] if len(sys.argv) > 1 else "192.168.137.217"
+ROBOT_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
 
 key = base64.b64encode(os.urandom(16)).decode('ascii')
 
