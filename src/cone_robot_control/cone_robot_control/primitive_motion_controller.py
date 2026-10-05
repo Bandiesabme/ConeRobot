@@ -744,13 +744,7 @@ class PrimitiveMotionController(Node):
             if abs(cmd_v) > decel_v_limit:
                 cmd_v = math.copysign(max(self.min_linear_speed, decel_v_limit), cmd_v) if dist_remaining > self.distance_tolerance_m else 0.0
 
-        if dist_remaining <= self.distance_tolerance_m:
-            # Distance reached but heading still needs final alignment: stop linear motion and pivot to complete angle
-            cmd_v = 0.0
-            remaining_yaw = shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw)
-            sign = 1.0 if remaining_yaw >= 0 else -1.0
-            cmd_omega = sign * max(self.min_angular_speed, min(self.current_max_w, abs(remaining_yaw) * 2.0))
-        elif self.active_motion_type == "ARC":
+        if self.active_motion_type == "ARC":
             cmd_omega = self.profiler.curvature * cmd_v + yaw_trim
         else:
             cmd_omega = omega_ref + yaw_trim
@@ -791,7 +785,11 @@ class PrimitiveMotionController(Node):
             and (time.time() - self.last_gps_time < 1.0)
         ):
             if self.active_motion_type == "ARC":
-                # For curved paths & circles, return accumulated path distance along trajectory
+                # For an arc of radius R = 1 / |curvature|:
+                # Continuous path distance is s = R * |delta_yaw|
+                if abs(self.profiler.curvature) > 1e-4:
+                    arc_radius = 1.0 / abs(self.profiler.curvature)
+                    return arc_radius * abs(self._get_measured_yaw_rad())
                 return self.accumulated_gps_dist_m
             else:
                 # For straight lines, return direct Euclidean distance from start
