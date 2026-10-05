@@ -259,6 +259,8 @@ class PrimitiveMotionController(Node):
         # ----------------------------------------------------------------------
         self.state = ControllerState.IDLE
         self.current_heading_rad: Optional[float] = None
+        self.unrolled_yaw_rad: float = 0.0
+        self.start_unrolled_yaw: float = 0.0
         self.current_yaw_rate: float = 0.0
         self.last_heading_time: float = 0.0
 
@@ -267,9 +269,11 @@ class PrimitiveMotionController(Node):
         self.start_odom_pos: Optional[Tuple[float, float]] = None
         self.last_odom_time: float = 0.0
 
-        # GPS State (Fallback)
+        # GPS State (RTK Position & Incremental Path Odometer)
         self.current_gps_coords: Optional[Tuple[float, float]] = None
         self.start_gps_coords: Optional[Tuple[float, float]] = None
+        self.last_gps_accum_coords: Optional[Tuple[float, float]] = None
+        self.accumulated_gps_dist_m: float = 0.0
         self.gps_status: int = NavSatStatus.STATUS_NO_FIX
         self.last_gps_time: float = 0.0
 
@@ -313,10 +317,18 @@ class PrimitiveMotionController(Node):
     # Sensor Callbacks
     # --------------------------------------------------------------------------
     def _heading_callback(self, msg: Float32) -> None:
-        """Converts [0, 360] degrees heading into standard ROS [-pi, pi] radians (CCW positive)."""
+        """Converts [0, 360] degrees heading into standard ROS [-pi, pi] radians and unrolls continuous yaw."""
         # Note: BNO08x heading in this repo is 0-360 deg clockwise/compass or CCW
         rad = math.radians(normalize_angle_deg(msg.data))
-        self.current_heading_rad = normalize_angle_rad(rad)
+        norm_rad = normalize_angle_rad(rad)
+
+        if self.current_heading_rad is not None:
+            diff = shortest_angular_diff_rad(norm_rad, self.current_heading_rad)
+            self.unrolled_yaw_rad += diff
+        else:
+            self.unrolled_yaw_rad = norm_rad
+
+        self.current_heading_rad = norm_rad
         self.last_heading_time = time.time()
 
     def _imu_data_callback(self, msg: Imu) -> None:
@@ -328,9 +340,28 @@ class PrimitiveMotionController(Node):
 
     def _fix_callback(self, msg: NavSatFix) -> None:
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
-            self.current_gps_coords = (msg.latitude, msg.longitude)
+            curr_lat = msg.latitude
+            curr_lon = msg.longitude
+            self.current_gps_coords = (curr_lat, curr_lon)
             self.gps_status = msg.status.status
             self.last_gps_time = time.time()
+
+            # Incrementally accumulate path distance during active motion
+            if self.state == ControllerState.EXECUTING and self.last_gps_accum_coords is not None:
+                is_rtk_ok = (not self.gps_require_rtk) or (
+                    self.gps_status in [NavSatStatus.STATUS_GBAS_FIX, NavSatStatus.STATUS_SBAS_FIX]
+                )
+                if is_rtk_ok:
+                    step_m = gps_distance_m(
+                        self.last_gps_accum_coords[0], self.last_gps_accum_coords[1],
+                        curr_lat, curr_lon
+                    )
+                    # Filter out static noise (< 3mm) and reject multi-path glitch jumps (> 50cm in 100ms)
+                    if step_m > 0.50:
+                        self.last_gps_accum_coords = (curr_lat, curr_lon)
+                    elif step_m >= 0.003:
+                        self.accumulated_gps_dist_m += step_m
+                        self.last_gps_accum_coords = (curr_lat, curr_lon)
 
     def _battery_callback(self, msg: BatteryState) -> None:
         if msg.voltage > 5.0:
@@ -511,16 +542,21 @@ class PrimitiveMotionController(Node):
 
         # Baseline capture
         self.start_heading_rad = self.current_heading_rad if self.current_heading_rad is not None else 0.0
+        self.start_unrolled_yaw = self.unrolled_yaw_rad
         self.start_odom_pos = self.current_odom_pos if (self.current_odom_pos and (time.time() - self.last_odom_time < 0.6)) else None
 
-        # Capture GPS baseline if recent (< 1.0s) and RTK mode condition is satisfied
+        # Reset GPS baseline and path odometer
+        self.accumulated_gps_dist_m = 0.0
         if self.current_gps_coords and (time.time() - self.last_gps_time < 1.0):
             if not self.gps_require_rtk or self.gps_status in [NavSatStatus.STATUS_GBAS_FIX, NavSatStatus.STATUS_SBAS_FIX]:
                 self.start_gps_coords = self.current_gps_coords
+                self.last_gps_accum_coords = self.current_gps_coords
             else:
                 self.start_gps_coords = None
+                self.last_gps_accum_coords = None
         else:
             self.start_gps_coords = None
+            self.last_gps_accum_coords = None
 
         # Determine active distance tracking method for logging
         active_source = "TIME_FALLBACK"
@@ -599,7 +635,7 @@ class PrimitiveMotionController(Node):
         # (Ignore stall watchdog when within 4.0 deg of target to prevent false aborts during final trim/settle)
         is_near_target = (
             (self.active_motion_type == "ROTATE" and abs(shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw)) <= math.radians(4.0))
-            or (self.active_motion_type == "STRAIGHT" and (abs(self.target_dist_m) - abs(actual_dist)) <= 0.05)
+            or (self.active_motion_type in ["STRAIGHT", "ARC"] and (abs(self.target_dist_m) - abs(actual_dist)) <= 0.05)
         )
 
         if is_commanding_movement and not is_near_target and (now - self.last_moved_time > self.stuck_detect_time_s):
@@ -652,11 +688,35 @@ class PrimitiveMotionController(Node):
         # --- LOGIC FOR STRAIGHT DRIVE & DRIVE ARC ---
         motion_complete = False
         if self.active_motion_type == "STRAIGHT":
-            motion_complete = profiler_finished and (dist_remaining <= self.distance_tolerance_m)
+            motion_complete = (dist_remaining <= self.distance_tolerance_m) and (profiler_finished or dist_remaining <= 0.005)
         elif self.active_motion_type == "ARC":
-            motion_complete = profiler_finished and (
-                dist_remaining <= self.distance_tolerance_m or abs(yaw_error_to_target) <= self.yaw_tolerance_rad
-            )
+            # Check if this is a closed loop / full circle (target yaw ~ 360 deg = 2*pi)
+            is_full_circle = abs(self.target_yaw_rad) >= (2.0 * math.pi - 0.25)
+
+            # High-precision RTK loop closure: if full circle is > 80% complete and heading rotated > 315 deg
+            if (
+                is_full_circle
+                and self.start_gps_coords
+                and self.current_gps_coords
+                and (time.time() - self.last_gps_time < 1.0)
+                and actual_dist >= 0.80 * abs(self.target_dist_m)
+                and abs(actual_yaw) >= (2.0 * math.pi - math.radians(45.0))
+            ):
+                loop_closure_err = gps_distance_m(
+                    self.start_gps_coords[0], self.start_gps_coords[1],
+                    self.current_gps_coords[0], self.current_gps_coords[1]
+                )
+                if loop_closure_err <= self.distance_tolerance_m:
+                    self.get_logger().info(
+                        f"[CIRCLE RTK LOOP CLOSURE] Target spot reached! Loop closure error: {loop_closure_err*100.0:.1f} cm"
+                    )
+                    motion_complete = True
+
+            if not motion_complete:
+                # Standard completion: distance reached AND heading reached, or profiler finished with remaining dist satisfied
+                dist_done = dist_remaining <= self.distance_tolerance_m
+                yaw_done = abs(yaw_error_to_target) <= self.yaw_tolerance_rad
+                motion_complete = (dist_done and yaw_done) or (dist_done and profiler_finished) or (dist_remaining <= 0.005)
 
         if motion_complete:
             self._publish_cmd_vel(0.0, 0.0)
@@ -676,11 +736,21 @@ class PrimitiveMotionController(Node):
         # Clamp steering trim authority to +/- 0.40 rad/s to prevent track chatter
         yaw_trim = max(-0.40, min(0.40, p_yaw + i_yaw))
 
+        # Closed-loop distance braking: prevent forward overshoot if motor speed runs ahead of profile
         cmd_v = v_ref
-        cmd_omega = omega_ref + yaw_trim
+        if abs(self.target_dist_m) > 0.05 and dist_remaining < 0.25:
+            # v_limit = sqrt(2 * a * dist_remaining)
+            decel_v_limit = math.sqrt(max(0.0, 2.0 * self.max_linear_accel * max(0.0, dist_remaining)))
+            if abs(cmd_v) > decel_v_limit:
+                cmd_v = math.copysign(max(self.min_linear_speed, decel_v_limit), cmd_v) if dist_remaining > self.distance_tolerance_m else 0.0
 
-        # Enforce minimum linear speed only so vehicle doesn't stall during forward cruise
-        if abs(cmd_v) > 1e-4 and abs(cmd_v) < self.min_linear_speed:
+        if self.active_motion_type == "ARC":
+            cmd_omega = self.profiler.curvature * cmd_v + yaw_trim
+        else:
+            cmd_omega = omega_ref + yaw_trim
+
+        # Enforce minimum linear speed only when active distance remains to drive
+        if abs(cmd_v) > 1e-4 and abs(cmd_v) < self.min_linear_speed and dist_remaining > self.distance_tolerance_m:
             cmd_v = math.copysign(self.min_linear_speed, cmd_v)
 
         self._publish_cmd_vel(cmd_v, cmd_omega)
@@ -689,10 +759,10 @@ class PrimitiveMotionController(Node):
     # Sensor State Helpers
     # --------------------------------------------------------------------------
     def _get_measured_yaw_rad(self) -> float:
-        """Returns heading change in radians since motion start."""
+        """Returns continuous unrolled heading change in radians since motion start."""
         if self.current_heading_rad is None:
             return 0.0
-        return shortest_angular_diff_rad(self.current_heading_rad, self.start_heading_rad)
+        return self.unrolled_yaw_rad - self.start_unrolled_yaw
 
     def _get_measured_distance_m(self) -> float:
         """Returns distance traveled in meters from active sensor source."""
@@ -714,10 +784,15 @@ class PrimitiveMotionController(Node):
             and self.current_gps_coords
             and (time.time() - self.last_gps_time < 1.0)
         ):
-            return gps_distance_m(
-                self.start_gps_coords[0], self.start_gps_coords[1],
-                self.current_gps_coords[0], self.current_gps_coords[1]
-            )
+            if self.active_motion_type == "ARC":
+                # For curved paths & circles, return accumulated path distance along trajectory
+                return self.accumulated_gps_dist_m
+            else:
+                # For straight lines, return direct Euclidean distance from start
+                return gps_distance_m(
+                    self.start_gps_coords[0], self.start_gps_coords[1],
+                    self.current_gps_coords[0], self.current_gps_coords[1]
+                )
 
         # 3. Universal Time-integration fallback
         if self.motion_start_time is not None:
