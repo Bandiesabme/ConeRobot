@@ -22,6 +22,7 @@ import time
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from std_msgs.msg import String
 
 try:
     from cone_robot_interfaces.action import ExecuteMotion
@@ -37,11 +38,57 @@ class SafeActionRunner(Node):
         self._goal_handle = None
         self._is_done = False
 
+        # Real-time GPS RTK Fix Monitor
+        self.gps_status_sub = self.create_subscription(String, '/gps/status', self._gps_status_cb, 10)
+        self.current_fix_quality = "UNKNOWN"
+        self.num_sats = 0
+        self.hdop = 99.99
+        self.initial_fix_quality = None
+        self.drop_events = []
+        self.motion_start_time = None
+
+    def _gps_status_cb(self, msg: String):
+        text = msg.data
+        if "Fix:" in text:
+            parts = text.split('|')
+            fix_part = parts[0].replace("Fix:", "").strip()
+            prev_quality = self.current_fix_quality
+            self.current_fix_quality = fix_part
+
+            if self.initial_fix_quality is None and fix_part != "UNKNOWN":
+                self.initial_fix_quality = fix_part
+
+            for p in parts[1:]:
+                p_strip = p.strip()
+                if p_strip.startswith("Sats:"):
+                    try:
+                        self.num_sats = int(p_strip.split(":")[1].strip())
+                    except ValueError:
+                        pass
+                elif p_strip.startswith("HDOP:"):
+                    try:
+                        self.hdop = float(p_strip.split(":")[1].strip())
+                    except ValueError:
+                        pass
+
+            # Detect degradation (drop) events immediately during active motion
+            if prev_quality != "UNKNOWN" and fix_part != prev_quality:
+                elapsed = (time.time() - self.motion_start_time) if self.motion_start_time else 0.0
+                if "FIX" in prev_quality and "FIX" not in fix_part:
+                    event = f"⚠️ [GPS DROP] Degraded from {prev_quality} -> {fix_part} at t={elapsed:.1f}s (Sats: {self.num_sats}, HDOP: {self.hdop:.2f})"
+                    self.drop_events.append(event)
+                    sys.stdout.write(f"\n\n{event}\n\n")
+                    sys.stdout.flush()
+                elif "FLOAT" in prev_quality and "FIX" in fix_part:
+                    sys.stdout.write(f"\n\n🟢 [GPS RECOVERED] Upgraded to {fix_part} at t={elapsed:.1f}s!\n\n")
+                    sys.stdout.flush()
+
     def wait_for_server(self, timeout_sec: float = 5.0) -> bool:
         self.get_logger().info("Connecting to /execute_motion Action Server...")
         return self._action_client.wait_for_server(timeout_sec=timeout_sec)
 
     def send_goal(self, motion_type: int, distance: float, delta_yaw: float, max_v: float, max_w: float):
+        self.motion_start_time = time.time()
         goal_msg = ExecuteMotion.Goal()
         goal_msg.motion_type = motion_type
         goal_msg.distance = float(distance)
@@ -70,8 +117,20 @@ class SafeActionRunner(Node):
     def _feedback_callback(self, feedback_msg):
         fb = feedback_msg.feedback
         pct = fb.progress_ratio * 100.0
+
+        # Real-time GPS status badge
+        if "RTK FIX" in self.current_fix_quality:
+            gps_badge = "🟢 RTK FIX"
+        elif "RTK FLOAT" in self.current_fix_quality:
+            gps_badge = "🟡 RTK FLOAT"
+        elif "3D" in self.current_fix_quality:
+            gps_badge = "🔵 3D FIX"
+        else:
+            gps_badge = f"⚪ {self.current_fix_quality}"
+
+        sat_str = f"|{self.num_sats}s" if self.num_sats > 0 else ""
         sys.stdout.write(
-            f"\rExecuting: [{pct:5.1f}%] | Dist Rem: {fb.distance_remaining:4.2f}m | Yaw Rem: {math.degrees(fb.yaw_remaining):5.1f}° | Speed: {fb.current_velocity:4.2f}m/s   "
+            f"\rExecuting: [{pct:5.1f}%] | Dist Rem: {fb.distance_remaining:4.2f}m | Yaw Rem: {math.degrees(fb.yaw_remaining):5.1f}° | Speed: {fb.current_velocity:4.2f}m/s | GPS: [{gps_badge}{sat_str}]   "
         )
         sys.stdout.flush()
 
@@ -94,6 +153,23 @@ class SafeActionRunner(Node):
                 self.get_logger().warn(
                     f"⚠️ Motion Finished with Status: {res.result.message} (Code: {res.result.error_code})"
                 )
+
+            # Print GPS Performance & Stability Report
+            print("\n" + "=" * 65)
+            print(" 📡 RTK GPS INTEGRITY & STABILITY REPORT")
+            print("=" * 65)
+            print(f" Initial Status at Start : {self.initial_fix_quality or 'N/A'}")
+            print(f" Final Status at Finish  : {self.current_fix_quality} (Sats: {self.num_sats}, HDOP: {self.hdop:.2f})")
+            if not self.drop_events:
+                if "RTK FIX" in self.current_fix_quality:
+                    print(" 🏆 PERFECT RTK LOCK: Fix remained solid RTK FIX throughout entire motion!")
+                else:
+                    print(f" ℹ️ Constant State: Remained in {self.current_fix_quality} (no state drop observed).")
+            else:
+                print(f" ⚠️ {len(self.drop_events)} DROP EVENT(S) DETECTED DURING MOTION:")
+                for ev in self.drop_events:
+                    print(f"    • {ev}")
+            print("=" * 65 + "\n")
 
     def cancel_active_goal(self):
         """Immediately sends cancel request and halts robot."""

@@ -714,8 +714,11 @@ class PrimitiveMotionController(Node):
 
             if not motion_complete:
                 # Both distance AND heading must be satisfied for ARC (or RTK loop closure above)
-                dist_done = dist_remaining <= self.distance_tolerance_m
-                yaw_done = abs(yaw_error_to_target) <= self.yaw_tolerance_rad
+                dist_done = (dist_remaining <= self.distance_tolerance_m) or (actual_dist >= abs(self.target_dist_m) - self.distance_tolerance_m)
+                if self.target_yaw_rad >= 0:
+                    yaw_done = (actual_yaw >= self.target_yaw_rad - self.yaw_tolerance_rad) or (abs(yaw_error_to_target) <= self.yaw_tolerance_rad)
+                else:
+                    yaw_done = (actual_yaw <= self.target_yaw_rad + self.yaw_tolerance_rad) or (abs(yaw_error_to_target) <= self.yaw_tolerance_rad)
                 motion_complete = dist_done and yaw_done
 
         if motion_complete:
