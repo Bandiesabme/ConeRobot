@@ -592,6 +592,7 @@ class LC29HGPSNode(Node):
                     if self.serial_conn and self.serial_conn.is_open:
                         with self.serial_lock:
                             self.serial_conn.write(rtcm_data)
+                            self.serial_conn.flush()
 
             except Exception as e:
                 self.ntrip_connected = False

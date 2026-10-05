@@ -45,6 +45,10 @@ function logDebug(msg, level = 'info') {
   line.style.color = color;
   line.innerHTML = `<span style="color: #64748b;">[${timeStr}]</span> ${msg}`;
   container.appendChild(line);
+
+  while (container.children.length > 60) {
+    container.removeChild(container.firstChild);
+  }
   container.scrollTop = container.scrollHeight;
 }
 
@@ -137,15 +141,25 @@ function updateMapMarkers() {
       const tooltipContent = `<b>ConeRobot ${rNum}</b> [${gpsMode}]<br>📍 ${lat.toFixed(7)}, ${lon.toFixed(7)}<br>Alt: ${r.gps?.alt ? r.gps.alt + ' m' : '--'} | Sats: ${r.gps?.sats || 0}`;
 
       if (robotMarkers[id]) {
-        robotMarkers[id].setLatLng([lat, lon]);
-        robotMarkers[id].setIcon(icon);
-        if (robotMarkers[id].getTooltip()) {
-          robotMarkers[id].setTooltipContent(tooltipContent);
+        const prev = robotMarkers[id]._prevData;
+        const posChanged = !prev || Math.abs(prev.lat - lat) > 1e-7 || Math.abs(prev.lon - lon) > 1e-7;
+        const rotChanged = !prev || Math.abs((prev.heading || 0) - (heading || 0)) > 0.4 || prev.gpsMode !== gpsMode;
+
+        if (posChanged) {
+          robotMarkers[id].setLatLng([lat, lon]);
         }
+        if (rotChanged) {
+          robotMarkers[id].setIcon(icon);
+          if (robotMarkers[id].getTooltip()) {
+            robotMarkers[id].setTooltipContent(tooltipContent);
+          }
+        }
+        robotMarkers[id]._prevData = { lat, lon, heading, gpsMode };
       } else {
         const marker = L.marker([lat, lon], { icon: icon }).addTo(map);
         marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -18], className: 'robot-map-tooltip' });
         marker.on('click', () => openRobotDetailModal(id));
+        marker._prevData = { lat, lon, heading, gpsMode };
         robotMarkers[id] = marker;
       }
 
@@ -615,7 +629,6 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
           const rounded = Number(val.toFixed(1));
           if (r.imu.heading !== rounded) {
             r.imu.heading = rounded;
-            logDebug(`🧭 [Robot ${robotId}] Live Heading: ${r.imu.heading}°`, 'topic');
           }
         }
       }
@@ -793,11 +806,7 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
           r.imu.pitch = Number(pitch.toFixed(1));
           r.imu.yaw = Number(yaw.toFixed(1));
           
-          const prevH = r.imu.heading;
           r.imu.heading = Number(yaw.toFixed(1));
-          if (prevH === null || Math.abs((prevH || 0) - r.imu.heading) > 0.4) {
-            logDebug(`🧭 [Robot ${robotId}] IMU Live Yaw: ${r.imu.heading}° (Pitch: ${r.imu.pitch}°, Roll: ${r.imu.roll}°)`, 'topic');
-          }
         }
       }
 
