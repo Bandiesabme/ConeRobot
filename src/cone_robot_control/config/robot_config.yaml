@@ -12,7 +12,7 @@ mdd10_motor_controller:
     dir2_pin: 25   # Right Motor Direction (GPIO 25)
 
     # --- Physical Dimensions & Hardware Limits ---
-    wheel_track: 0.290         # Distance between left & right wheels (meters)
+    wheel_track: 0.380         # Effective track width for skid-steer track slip (meters)
     max_linear_speed: 1.0      # Maximum forward/reverse speed (m/s)
     max_angular_speed: 3.0     # Maximum turning speed (rad/s)
     cmd_timeout: 0.5           # Safety timeout (seconds)

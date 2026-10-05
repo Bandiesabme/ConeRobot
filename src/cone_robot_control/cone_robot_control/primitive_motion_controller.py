@@ -713,10 +713,10 @@ class PrimitiveMotionController(Node):
                     motion_complete = True
 
             if not motion_complete:
-                # Standard completion: distance reached AND heading reached, or profiler finished with remaining dist satisfied
+                # Both distance AND heading must be satisfied for ARC (or RTK loop closure above)
                 dist_done = dist_remaining <= self.distance_tolerance_m
                 yaw_done = abs(yaw_error_to_target) <= self.yaw_tolerance_rad
-                motion_complete = (dist_done and yaw_done) or (dist_done and profiler_finished) or (dist_remaining <= 0.005)
+                motion_complete = dist_done and yaw_done
 
         if motion_complete:
             self._publish_cmd_vel(0.0, 0.0)
@@ -733,10 +733,10 @@ class PrimitiveMotionController(Node):
 
         p_yaw = self.yaw_kp * yaw_error
         i_yaw = self.yaw_ki * self.yaw_integral
-        # Clamp steering trim authority to +/- 0.40 rad/s to prevent track chatter
-        yaw_trim = max(-0.40, min(0.40, p_yaw + i_yaw))
+        # Ample steering authority (+/- 0.90 rad/s) to overcome track scrubbing on turns
+        yaw_trim = max(-0.90, min(0.90, p_yaw + i_yaw))
 
-        # Closed-loop distance braking: prevent forward overshoot if motor speed runs ahead of profile
+        # Closed-loop distance braking: prevent forward overshoot
         cmd_v = v_ref
         if abs(self.target_dist_m) > 0.05 and dist_remaining < 0.25:
             # v_limit = sqrt(2 * a * dist_remaining)
@@ -744,7 +744,13 @@ class PrimitiveMotionController(Node):
             if abs(cmd_v) > decel_v_limit:
                 cmd_v = math.copysign(max(self.min_linear_speed, decel_v_limit), cmd_v) if dist_remaining > self.distance_tolerance_m else 0.0
 
-        if self.active_motion_type == "ARC":
+        if dist_remaining <= self.distance_tolerance_m:
+            # Distance reached but heading still needs final alignment: stop linear motion and pivot to complete angle
+            cmd_v = 0.0
+            remaining_yaw = shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw)
+            sign = 1.0 if remaining_yaw >= 0 else -1.0
+            cmd_omega = sign * max(self.min_angular_speed, min(self.current_max_w, abs(remaining_yaw) * 2.0))
+        elif self.active_motion_type == "ARC":
             cmd_omega = self.profiler.curvature * cmd_v + yaw_trim
         else:
             cmd_omega = omega_ref + yaw_trim
