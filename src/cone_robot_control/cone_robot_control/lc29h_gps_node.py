@@ -196,16 +196,10 @@ class LC29HGPSNode(Node):
         if not raw_coord or not direction:
             return None
         try:
-            dot_idx = raw_coord.find('.')
-            if dot_idx != -1 and dot_idx >= 2:
-                # Minutes are always the 2 digits immediately preceding the decimal point plus fractional part
-                deg_part = raw_coord[:dot_idx - 2]
-                min_part = raw_coord[dot_idx - 2:]
-            else:
-                deg_digits = 3 if is_lon else 2
-                deg_part = raw_coord[:deg_digits]
-                min_part = raw_coord[deg_digits:]
-            degrees = float(deg_part) if deg_part else 0.0
+            deg_digits = 3 if is_lon else 2
+            deg_part = raw_coord[:deg_digits]
+            min_part = raw_coord[deg_digits:]
+            degrees = float(deg_part)
             minutes = float(min_part)
             decimal = degrees + (minutes / 60.0)
             if direction in ['S', 'W']:
@@ -592,7 +586,6 @@ class LC29HGPSNode(Node):
                     if self.serial_conn and self.serial_conn.is_open:
                         with self.serial_lock:
                             self.serial_conn.write(rtcm_data)
-                            self.serial_conn.flush()
 
             except Exception as e:
                 self.ntrip_connected = False
