@@ -741,19 +741,20 @@ class PrimitiveMotionController(Node):
         d_yaw = -0.25 * self.current_yaw_rate  # Active gyro rate damping to prevent snaking/veering
         yaw_trim = max(-0.90, min(0.90, p_yaw + i_yaw + d_yaw))
 
-        # Closed-loop distance braking: smoothly ramp speed down into target
+        # Closed-loop distance braking for Straight driving: smoothly ramp speed down into target
         cmd_v = v_ref
-        if abs(self.target_dist_m) > 0.10 and dist_remaining < 0.60:
-            # Linear approach ramp: decel from v_ref at 0.60m down to gentle crawl speed at target
-            crawl_speed = max(0.05, self.min_linear_speed * 0.70)
-            speed_ratio = max(0.0, (dist_remaining - self.distance_tolerance_m) / 0.55)
-            v_ramp = crawl_speed + (abs(v_ref) - crawl_speed) * speed_ratio
-            if abs(cmd_v) > v_ramp:
-                cmd_v = math.copysign(v_ramp, cmd_v)
+        if self.active_motion_type == "STRAIGHT":
+            if abs(self.target_dist_m) > 0.10 and dist_remaining < 0.60:
+                # Linear approach ramp: decel from v_ref at 0.60m down to gentle crawl speed at target
+                crawl_speed = max(0.05, self.min_linear_speed * 0.70)
+                speed_ratio = max(0.0, (dist_remaining - self.distance_tolerance_m) / 0.55)
+                v_ramp = crawl_speed + (abs(v_ref) - crawl_speed) * speed_ratio
+                if abs(cmd_v) > v_ramp:
+                    cmd_v = math.copysign(v_ramp, cmd_v)
 
-        # Hard stop command when target distance is reached
-        if dist_remaining <= self.distance_tolerance_m or actual_dist >= abs(self.target_dist_m) - 0.01:
-            cmd_v = 0.0
+            # Hard stop command when target distance is reached
+            if dist_remaining <= self.distance_tolerance_m or actual_dist >= abs(self.target_dist_m) - 0.01:
+                cmd_v = 0.0
 
         if self.active_motion_type == "ARC":
             cmd_omega = self.profiler.curvature * cmd_v + yaw_trim

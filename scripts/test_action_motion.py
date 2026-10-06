@@ -207,6 +207,29 @@ class SafeActionRunner(Node):
                     print(" ⚠️ GRADE: ELEVATED ERROR (> 15 cm) - Check RTK Fix & motor traction.")
                 print("=" * 65)
 
+            # Print Loop Closure Accuracy Benchmark for Circular Arc motions
+            elif self.start_pos and self.current_pos and self.active_motion_type == 2:
+                gap_m = gps_distance_m(self.start_pos[0], self.start_pos[1], self.current_pos[0], self.current_pos[1])
+                gap_cm = gap_m * 100.0
+
+                print("\n" + "=" * 65)
+                print(" 🔄 CIRCULAR LOOP CLOSURE ACCURACY BENCHMARK (RTK GPS)")
+                print("=" * 65)
+                print(f" Path Target Distance      : {self.target_distance:.3f} m")
+                print(f" Start Position (Lat, Lon) : ({self.start_pos[0]:.7f}, {self.start_pos[1]:.7f})")
+                print(f" Final Position (Lat, Lon) : ({self.current_pos[0]:.7f}, {self.current_pos[1]:.7f})")
+                print(f" Loop Closure Gap Distance : {gap_cm:.1f} cm ({gap_m:+.3f} m from start)")
+                print(f" Final Heading Error       : {math.degrees(res.result.actual_yaw) % 360.0:.1f}° (relative to 360°)")
+                if gap_cm <= 3.0:
+                    print(" 🏆 GRADE: SURVEY-GRADE (< 3.0 cm gap) - Perfect closed loop!")
+                elif gap_cm <= 8.0:
+                    print(" 🟢 GRADE: HIGH PRECISION (< 8.0 cm gap) - Excellent circle closure!")
+                elif gap_cm <= 20.0:
+                    print(" 🟡 GRADE: MODERATE (~8-20 cm) - Skid-steer track scrub or RTK Float jitter.")
+                else:
+                    print(" ⚠️ GRADE: ELEVATED ERROR (> 20 cm) - Incomplete turn or track slip.")
+                print("=" * 65)
+
             # Print GPS Performance & Stability Report
             print("\n" + "=" * 65)
             print(" 📡 RTK GPS INTEGRITY & STABILITY REPORT")
