@@ -734,18 +734,23 @@ class PrimitiveMotionController(Node):
         dt = 1.0 / self.control_rate_hz
         self.yaw_integral = max(-1.0, min(1.0, self.yaw_integral + yaw_error * dt))
 
-        p_yaw = self.yaw_kp * yaw_error
+        # Higher P-gain for straight lock to overcome track scrubbing, plus Gyro Rate Damping (D-term)
+        kp_eff = 2.4 if self.active_motion_type == "STRAIGHT" else self.yaw_kp
+        p_yaw = kp_eff * yaw_error
         i_yaw = self.yaw_ki * self.yaw_integral
-        # Ample steering authority (+/- 0.90 rad/s) to overcome track scrubbing on turns
-        yaw_trim = max(-0.90, min(0.90, p_yaw + i_yaw))
+        d_yaw = -0.25 * self.current_yaw_rate  # Active gyro rate damping to prevent snaking/veering
+        yaw_trim = max(-0.90, min(0.90, p_yaw + i_yaw + d_yaw))
 
         # Closed-loop distance braking: prevent forward overshoot
         cmd_v = v_ref
-        if abs(self.target_dist_m) > 0.05 and dist_remaining < 0.25:
+        if abs(self.target_dist_m) > 0.05 and dist_remaining < 0.45:
             # v_limit = sqrt(2 * a * dist_remaining)
             decel_v_limit = math.sqrt(max(0.0, 2.0 * self.max_linear_accel * max(0.0, dist_remaining)))
             if abs(cmd_v) > decel_v_limit:
                 cmd_v = math.copysign(max(self.min_linear_speed, decel_v_limit), cmd_v) if dist_remaining > self.distance_tolerance_m else 0.0
+
+        if dist_remaining <= self.distance_tolerance_m or actual_dist >= abs(self.target_dist_m):
+            cmd_v = 0.0
 
         if self.active_motion_type == "ARC":
             cmd_omega = self.profiler.curvature * cmd_v + yaw_trim
