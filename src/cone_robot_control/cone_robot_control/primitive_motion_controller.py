@@ -688,7 +688,7 @@ class PrimitiveMotionController(Node):
         # --- LOGIC FOR STRAIGHT DRIVE & DRIVE ARC ---
         motion_complete = False
         if self.active_motion_type == "STRAIGHT":
-            motion_complete = (dist_remaining <= self.distance_tolerance_m) and (profiler_finished or dist_remaining <= 0.005)
+            motion_complete = (dist_remaining <= self.distance_tolerance_m) or (actual_dist >= abs(self.target_dist_m) - self.distance_tolerance_m)
         elif self.active_motion_type == "ARC":
             # Check if this is a closed loop / full circle (target yaw ~ 360 deg = 2*pi)
             is_full_circle = abs(self.target_yaw_rad) >= (2.0 * math.pi - 0.25)

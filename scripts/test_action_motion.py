@@ -23,12 +23,24 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String
+from sensor_msgs.msg import NavSatFix
 
 try:
     from cone_robot_interfaces.action import ExecuteMotion
 except ImportError:
     print("[ERROR] cone_robot_interfaces not found. Did you run: source ~/ros2_ws/install/setup.bash ?")
     sys.exit(1)
+
+
+def gps_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Compute local flat-Earth metric distance between two WGS84 GPS coordinates."""
+    earth_radius_m = 6371000.0
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    lat_avg = math.radians((lat1 + lat2) / 2.0)
+    x = d_lon * math.cos(lat_avg)
+    y = d_lat
+    return math.sqrt(x * x + y * y) * earth_radius_m
 
 
 class SafeActionRunner(Node):
@@ -38,14 +50,26 @@ class SafeActionRunner(Node):
         self._goal_handle = None
         self._is_done = False
 
-        # Real-time GPS RTK Fix Monitor
+        # Real-time GPS RTK Fix & Position Monitor
         self.gps_status_sub = self.create_subscription(String, '/gps/status', self._gps_status_cb, 10)
+        self.gps_fix_sub = self.create_subscription(NavSatFix, '/fix', self._fix_cb, 10)
         self.current_fix_quality = "UNKNOWN"
         self.num_sats = 0
         self.hdop = 99.99
         self.initial_fix_quality = None
         self.drop_events = []
         self.motion_start_time = None
+
+        self.current_pos = None
+        self.start_pos = None
+        self.target_distance = 0.0
+        self.active_motion_type = 0
+
+    def _fix_cb(self, msg: NavSatFix):
+        if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
+            self.current_pos = (msg.latitude, msg.longitude)
+            if self.motion_start_time and self.start_pos is None:
+                self.start_pos = (msg.latitude, msg.longitude)
 
     def _gps_status_cb(self, msg: String):
         text = msg.data
@@ -89,6 +113,10 @@ class SafeActionRunner(Node):
 
     def send_goal(self, motion_type: int, distance: float, delta_yaw: float, max_v: float, max_w: float):
         self.motion_start_time = time.time()
+        self.active_motion_type = motion_type
+        self.target_distance = float(distance)
+        self.start_pos = self.current_pos
+
         goal_msg = ExecuteMotion.Goal()
         goal_msg.motion_type = motion_type
         goal_msg.distance = float(distance)
@@ -153,6 +181,31 @@ class SafeActionRunner(Node):
                 self.get_logger().warn(
                     f"⚠️ Motion Finished with Status: {res.result.message} (Code: {res.result.error_code})"
                 )
+
+            # Print Linear Displacement Accuracy Benchmark for Straight motions
+            if self.start_pos and self.current_pos and self.active_motion_type == 0 and self.target_distance > 0.05:
+                actual_gps_dist = gps_distance_m(self.start_pos[0], self.start_pos[1], self.current_pos[0], self.current_pos[1])
+                err_m = actual_gps_dist - self.target_distance
+                err_cm = abs(err_m) * 100.0
+
+                print("\n" + "=" * 65)
+                print(" 🎯 LINEAR DISPLACEMENT ACCURACY BENCHMARK (RTK GPS)")
+                print("=" * 65)
+                print(f" Commanded Target Distance : {self.target_distance:.3f} m")
+                print(f" Measured RTK GPS Distance : {actual_gps_dist:.3f} m")
+                print(f" Net Displacement Error    : {err_cm:.1f} cm ({err_m:+.3f} m)")
+                print(f" Start Position (Lat, Lon) : ({self.start_pos[0]:.7f}, {self.start_pos[1]:.7f})")
+                print(f" Final Position (Lat, Lon) : ({self.current_pos[0]:.7f}, {self.current_pos[1]:.7f})")
+                print(f" Final Heading Error       : {math.degrees(res.result.actual_yaw):+.1f}°")
+                if err_cm <= 2.5:
+                    print(" 🏆 GRADE: SURVEY-GRADE (< 2.5 cm precision) - Flawless RTK performance!")
+                elif err_cm <= 5.0:
+                    print(" 🟢 GRADE: HIGH PRECISION (< 5.0 cm precision) - Excellent linear driving!")
+                elif err_cm <= 15.0:
+                    print(" 🟡 GRADE: MODERATE (~5-15 cm) - Minor track slip or RTK Float jitter.")
+                else:
+                    print(" ⚠️ GRADE: ELEVATED ERROR (> 15 cm) - Check RTK Fix & motor traction.")
+                print("=" * 65)
 
             # Print GPS Performance & Stability Report
             print("\n" + "=" * 65)
