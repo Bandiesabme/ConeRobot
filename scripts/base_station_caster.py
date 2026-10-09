@@ -29,12 +29,37 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
 import os
+import queue
 import select
 import socket
 import sys
 import threading
 import time
 from typing import Deque, Dict, List, Optional, Tuple
+
+
+def _build_crc24q_table() -> List[int]:
+    """Precomputes the CRC-24Q lookup table used by RTCM3 framing (poly 0x1864CFB)."""
+    table = []
+    for i in range(256):
+        crc = i << 16
+        for _ in range(8):
+            crc <<= 1
+            if crc & 0x1000000:
+                crc ^= 0x1864CFB
+        table.append(crc & 0xFFFFFF)
+    return table
+
+
+_CRC24Q_TABLE = _build_crc24q_table()
+
+
+def crc24q(data: bytes) -> int:
+    """Computes RTCM3 CRC-24Q over header + payload."""
+    crc = 0
+    for b in data:
+        crc = ((crc << 8) & 0xFFFFFF) ^ _CRC24Q_TABLE[((crc >> 16) ^ b) & 0xFF]
+    return crc
 
 
 class NTRIPBaseCaster:
@@ -103,6 +128,14 @@ class NTRIPBaseCaster:
         self.ser_lock = threading.Lock()
         self.rtcm_1005_count = 0
         self.last_serial_time: Optional[float] = None
+        self.rtcm_crc_errors = 0
+        self._last_gga_time = 0.0
+
+        # RTCM 1005 verification (what the hardware actually broadcasts vs. what we locked)
+        self._locked_ecef: Optional[Tuple[float, float, float]] = None
+        self._last_1005_ecef: Optional[Tuple[float, float, float]] = None
+        self.base_1005_offset_m: Optional[float] = None
+        self._last_1005_warn_time = 0.0
 
         # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
@@ -391,6 +424,7 @@ class NTRIPBaseCaster:
         if lat == 0.0 or lon == 0.0:
             return
         x, y, z = self._lla_to_ecef(lat, lon, alt)
+        self._locked_ecef = (x, y, z)
         self._send_gnss_cmd(f"PQTMCFGSVIN,W,2,0,0,{x:.4f},{y:.4f},{z:.4f}")
         time.sleep(0.05)
         self._send_gnss_cmd("PQTMSAVEPAR")
@@ -475,6 +509,8 @@ class NTRIPBaseCaster:
             pass
 
         self.is_static_fixed = False
+        self._locked_ecef = None
+        self.base_1005_offset_m = None
         self.survey_valid = False
         self.survey_status = "CALIBRATING"
         self.survey_start_time = None
@@ -564,28 +600,35 @@ class NTRIPBaseCaster:
                 "\r\n"
             )
             client_sock.sendall(response.encode('ascii'))
-            client_sock.settimeout(2.0)
+            client_sock.settimeout(5.0)
             client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+            meta = {
+                "ip": ip,
+                "port": port,
+                "connected_at": time.time(),
+                "bytes_sent": 0,
+                "queue": queue.Queue(maxsize=50),
+                "alive": True,
+                "dropped": 0
+            }
 
             # Deduplicate & register
             with self.clients_lock:
-                to_remove = []
-                for sock, meta in self.clients_map.items():
-                    if meta["ip"] == ip:
-                        to_remove.append(sock)
+                to_remove = [s for s, m in self.clients_map.items() if m["ip"] == ip]
                 for sock in to_remove:
+                    self.clients_map[sock]["alive"] = False
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
                     try:
                         sock.close()
                     except Exception:
                         pass
                     del self.clients_map[sock]
 
-                self.clients_map[client_sock] = {
-                    "ip": ip,
-                    "port": port,
-                    "connected_at": time.time(),
-                    "bytes_sent": 0
-                }
+                self.clients_map[client_sock] = meta
 
             self._add_log(f"Stream Active: Broadcasting RTCM3 to Rover {ip}")
 
@@ -595,6 +638,36 @@ class NTRIPBaseCaster:
                 client_sock.close()
             except Exception:
                 pass
+            return
+
+        # Dedicated per-rover sender: a slow/stalled Wi-Fi link never blocks the serial reader
+        self._client_sender_loop(client_sock, meta)
+
+    def _client_sender_loop(self, client_sock: socket.socket, meta: dict) -> None:
+        """Drains this rover's RTCM queue onto its socket until it disconnects."""
+        q = meta["queue"]
+        while self.is_running and meta.get("alive", False):
+            try:
+                data = q.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                client_sock.sendall(data)
+                meta["bytes_sent"] += len(data)
+                self.total_bytes_sent += len(data)
+            except OSError as e:
+                if meta.get("alive", False):
+                    self._add_log(f"Rover {meta['ip']} disconnected: {e}", "WARN")
+                break
+
+        meta["alive"] = False
+        with self.clients_lock:
+            if self.clients_map.get(client_sock) is meta:
+                del self.clients_map[client_sock]
+        try:
+            client_sock.close()
+        except Exception:
+            pass
 
     def _parse_nmea_coordinate(self, raw_coord: str, direction: str, is_lon: bool = False) -> Optional[float]:
         """Convert NMEA DDMM.MMMM or DDDMM.MMMM format to decimal degrees."""
@@ -729,12 +802,16 @@ class NTRIPBaseCaster:
                 y = raw_y * 0.0001
                 z = raw_z * 0.0001
                 if abs(x) > 1000.0 and abs(y) > 1000.0:
+                    self._check_1005_consistency(x, y, z)
                     lat, lon, alt = self._ecef_to_lla(x, y, z)
                     if not self.is_static_fixed:
                         self.survey_lat = lat
                         self.survey_lon = lon
                         self.survey_alt = alt
-                        self._update_survey_statistics(lat, lon, alt)
+                        # Only use 1005 as a fallback sample source when GGA isn't flowing,
+                        # so the survey average isn't a mix of two different position sources.
+                        if time.time() - self._last_gga_time > 5.0:
+                            self._update_survey_statistics(lat, lon, alt)
 
             # 2. MSM Messages (1071-1077 GPS, 1081-1087 GLO, 1091-1097 GAL, 1111-1117 QZS, 1121-1127 BDS)
             elif 1071 <= msg_id <= 1137 and len(payload) >= 18:
@@ -747,6 +824,36 @@ class NTRIPBaseCaster:
                     self.satellites_tracked = total_sats
         except Exception:
             pass
+
+    def _check_1005_consistency(self, x: float, y: float, z: float) -> None:
+        """
+        Verifies the reference position the GNSS hardware actually broadcasts (RTCM 1005).
+        If it differs from the locked coordinates or jumps between messages, rovers lose RTK FIX.
+        """
+        now = time.time()
+        warn_ok = now - self._last_1005_warn_time > 30.0
+
+        if self._last_1005_ecef is not None and self.is_static_fixed:
+            jump = math.dist((x, y, z), self._last_1005_ecef)
+            if jump > 0.01 and warn_ok:
+                msg = f"⚠️ RTCM 1005 base position JUMPED by {jump * 100:.1f} cm - rovers will drop RTK FIX!"
+                self._add_log(msg, "WARN")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                self._last_1005_warn_time = now
+                warn_ok = False
+        self._last_1005_ecef = (x, y, z)
+
+        if self.is_static_fixed and self._locked_ecef is not None:
+            offset = math.dist((x, y, z), self._locked_ecef)
+            self.base_1005_offset_m = offset
+            if offset > 0.05 and warn_ok:
+                msg = (
+                    f"⚠️ Hardware broadcasts a base position {offset:.2f} m away from the locked coordinates. "
+                    f"The fixed-position command was not applied (module may need a restart/power-cycle)."
+                )
+                self._add_log(msg, "WARN")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                self._last_1005_warn_time = now
 
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
@@ -763,10 +870,18 @@ class NTRIPBaseCaster:
                         self.satellites_tracked = int(parts[7])
                     if parts[8].replace('.', '', 1).isdigit():
                         self.hdop = float(parts[8])
-                    if not self.is_static_fixed and parts[9].replace('.', '', 1).replace('-', '', 1).isdigit():
-                        self.survey_alt = float(parts[9])
+                    if not self.is_static_fixed and parts[9]:
+                        try:
+                            msl_alt = float(parts[9])
+                            geoid_sep = float(parts[11]) if len(parts) > 11 and parts[11] else 0.0
+                            # GGA altitude is above mean sea level; ECEF / RTCM 1005 needs WGS-84
+                            # ellipsoidal height = MSL height + geoid separation (~+44 m in Hungary)
+                            self.survey_alt = msl_alt + geoid_sep
+                        except ValueError:
+                            pass
 
                     if lat and lon and self.satellites_tracked >= 4:
+                        self._last_gga_time = time.time()
                         self._update_survey_statistics(lat, lon, self.survey_alt)
 
             elif 'GSV' in line:
@@ -834,6 +949,18 @@ class NTRIPBaseCaster:
                             if len(raw_byte_stream) < frame_len:
                                 break  # Full frame hasn't arrived yet; wait for remaining bytes
 
+                            # Validate CRC-24Q: on mismatch this 0xD3 was a false sync (or corrupted
+                            # frame) -> skip one byte and resync instead of trusting a bogus length
+                            expected_crc = (
+                                (raw_byte_stream[frame_len - 3] << 16)
+                                | (raw_byte_stream[frame_len - 2] << 8)
+                                | raw_byte_stream[frame_len - 1]
+                            )
+                            if crc24q(raw_byte_stream[:frame_len - 3]) != expected_crc:
+                                self.rtcm_crc_errors += 1
+                                del raw_byte_stream[0]
+                                continue
+
                             frame = bytes(raw_byte_stream[:frame_len])
                             del raw_byte_stream[:frame_len]
 
@@ -866,29 +993,28 @@ class NTRIPBaseCaster:
                         else:
                             del raw_byte_stream[0]
 
-                    # Multicast ONLY valid, clean RTCM3 packets to all active rover clients (never raw NMEA)
+                    # Multicast ONLY valid, clean RTCM3 packets to all active rover clients (never raw NMEA).
+                    # Non-blocking: frames go into each rover's queue; its own thread does the socket send.
                     if rtcm_frames_to_send:
                         outgoing_data = b"".join(rtcm_frames_to_send)
                         with self.clients_lock:
-                            client_items = list(self.clients_map.items())
+                            client_metas = list(self.clients_map.values())
 
-                        dead_socks = []
-                        for client, meta in client_items:
+                        for meta in client_metas:
+                            q = meta["queue"]
                             try:
-                                client.sendall(outgoing_data)
-                                meta["bytes_sent"] += len(outgoing_data)
-                            except (socket.error, socket.timeout):
-                                dead_socks.append(client)
-
-                        if dead_socks:
-                            with self.clients_lock:
-                                for dead in dead_socks:
-                                    if dead in self.clients_map:
-                                        del self.clients_map[dead]
-                                    try:
-                                        dead.close()
-                                    except Exception:
-                                        pass
+                                q.put_nowait(outgoing_data)
+                            except queue.Full:
+                                # Rover link is stalled: drop the oldest (stale) corrections first
+                                try:
+                                    q.get_nowait()
+                                except queue.Empty:
+                                    pass
+                                meta["dropped"] += 1
+                                try:
+                                    q.put_nowait(outgoing_data)
+                                except queue.Full:
+                                    pass
 
             except Exception as e:
                 self._add_log(f"Serial Error: {e}. Retrying in 2 seconds...", "ERROR")
@@ -912,7 +1038,8 @@ class NTRIPBaseCaster:
             rtcm_kb = self.total_rtcm_bytes_read / 1024.0
 
             if self.is_static_fixed:
-                msg = f"🎯 [STATIC FIXED BASE] Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}, {self.survey_alt:.1f}m) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB (Msg 1005: {self.rtcm_1005_count}) [0 mm Drift]"
+                offset_str = f"{self.base_1005_offset_m * 100:.1f} cm" if self.base_1005_offset_m is not None else "n/a"
+                msg = f"🎯 [STATIC FIXED BASE] Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}, {self.survey_alt:.1f}m) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB (Msg 1005: {self.rtcm_1005_count}, 1005 vs locked: {offset_str}, CRC errors: {self.rtcm_crc_errors})"
             elif self.survey_valid:
                 msg = f"🎯 [BASE READY] Status: LOCKED (Accuracy: < {self.survey_accuracy:.2f}m) | Pos: ({self.survey_lat:.8f}, {self.survey_lon:.8f}) | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB (Msg 1005: {self.rtcm_1005_count})"
             else:
@@ -1000,6 +1127,8 @@ class NTRIPBaseCaster:
             "rtcm_ingested_kb": round(self.total_rtcm_bytes_read / 1024.0, 1),
             "rtcm_broadcasted_kb": round(self.total_bytes_sent / 1024.0, 1),
             "rtcm_1005_count": self.rtcm_1005_count,
+            "rtcm_crc_errors": self.rtcm_crc_errors,
+            "base_1005_offset_m": round(self.base_1005_offset_m, 4) if self.base_1005_offset_m is not None else None,
             "is_serial_alive": is_serial_live,
             "last_serial_ago_sec": time_since_serial,
             "active_rovers_count": len(active_rovers),

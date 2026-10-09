@@ -104,9 +104,14 @@ class LC29HGPSNode(Node):
         self.current_fix_quality = 0
         self.current_num_sats = 0
         self.current_hdop = 99.99
+        self.current_diff_age: Optional[float] = None  # GGA field 13: age of RTCM corrections (s)
         self.last_fix_time = 0.0
         self._last_diag_log_time = 0.0
         self._last_logged_fix_quality = -1
+
+        # Per-signal C/N0 table from GSV: (talker, signal_id, prn) -> (cn0_dbhz, timestamp)
+        self._cn0_table = {}
+        self._cn0_lock = threading.Lock()
 
         self.get_logger().info("==================================================")
         self.get_logger().info(" Waveshare LC29H(DA) Dual-Band GPS/RTK Driver")
@@ -184,6 +189,8 @@ class LC29HGPSNode(Node):
                         header = clean_sentence.split(',')[0]
                         if header.endswith('GGA'):
                             self._parse_gga(clean_sentence)
+                        elif header.endswith('GSV'):
+                            self._parse_gsv(clean_sentence)
                         elif header.endswith('RMC'):
                             self._parse_rmc(clean_sentence)
 
@@ -225,6 +232,11 @@ class LC29HGPSNode(Node):
             num_sats_str = parts[7] if len(parts) > 7 else "0"
             hdop_str = parts[8] if len(parts) > 8 else "99.99"
             alt_str = parts[9] if len(parts) > 9 else "0.0"
+            age_str = parts[13].split('*')[0] if len(parts) > 13 else ""
+            try:
+                self.current_diff_age = float(age_str)
+            except ValueError:
+                self.current_diff_age = None
 
             if num_sats_str.isdigit() and int(num_sats_str) > 0:
                 self.current_num_sats = int(num_sats_str)
@@ -252,15 +264,44 @@ class LC29HGPSNode(Node):
             self.get_logger().debug(f"Error parsing GGA: {e}")
 
     def _parse_gsv(self, line: str) -> None:
-        """Parse NMEA GSV sentences to track satellites in view."""
+        """Parse NMEA GSV sentences to track satellites in view and per-signal C/N0."""
         try:
-            parts = line.split(',')
-            if len(parts) >= 4 and parts[3].isdigit():
+            parts = line.split('*')[0].split(',')
+            if len(parts) < 4:
+                return
+            if parts[3].isdigit():
                 sats_in_view = int(parts[3])
                 if sats_in_view > self.current_num_sats and self.current_fix_quality == 0:
                     self.current_num_sats = sats_in_view
+
+            talker = parts[0][1:3]
+            n_fields = len(parts) - 4
+            # NMEA 4.10+ appends a signal ID (e.g. L1 vs L5) -> one extra trailing field
+            signal_id = parts[-1] if n_fields % 4 == 1 else ''
+            now = time.time()
+            with self._cn0_lock:
+                for i in range(4, 4 + (n_fields // 4) * 4, 4):
+                    prn, snr = parts[i], parts[i + 3]
+                    if prn and snr:
+                        try:
+                            self._cn0_table[(talker, signal_id, prn)] = (float(snr), now)
+                        except ValueError:
+                            pass
         except Exception:
             pass
+
+    def _get_cn0_summary(self) -> str:
+        """Summarize recent C/N0 values (signal strength) for interference/antenna diagnostics."""
+        now = time.time()
+        with self._cn0_lock:
+            for key in [k for k, (_, t) in self._cn0_table.items() if now - t > 5.0]:
+                del self._cn0_table[key]
+            vals = [v for v, _ in self._cn0_table.values()]
+        if not vals:
+            return "C/N0: n/a"
+        avg = sum(vals) / len(vals)
+        strong = sum(1 for v in vals if v >= 35.0)
+        return f"C/N0: avg {avg:.1f} dB-Hz, {strong}/{len(vals)} signals >=35"
 
     def _parse_rmc(self, line: str) -> None:
         """Parse NMEA $GNRMC sentence for speed/heading fallback."""
@@ -564,7 +605,8 @@ class LC29HGPSNode(Node):
                     f"[NTRIP] Stream Connected! Receiving live RTCM3 corrections from [{self.ntrip_mountpoint}]"
                 )
                 self.ntrip_connected = True
-                sock.settimeout(30.0)
+                # Base streams at 1 Hz; if nothing arrives for 5 s the corrections are stale -> reconnect
+                sock.settimeout(5.0)
                 last_gga_send_time = time.time()
 
                 # Stream RTCM3 binary correction data to LC29H serial port
@@ -605,12 +647,13 @@ class LC29HGPSNode(Node):
             self.current_fix_quality, ("UNKNOWN", NavSatStatus.STATUS_NO_FIX, 100.0)
         )
         
+        age_str = f"{self.current_diff_age:.1f}s" if self.current_diff_age is not None else "-"
         status_msg = String()
         status_text = (
             f"Fix: {quality_str} | Sats: {self.current_num_sats} | HDOP: {self.current_hdop:.2f} | "
             f"Pos: ({self.current_lat:.7f}, {self.current_lon:.7f}, {self.current_alt:.1f}m) | "
             f"NTRIP: {'Connected' if self.ntrip_connected else ('Disabled' if not self.ntrip_enable else 'Connecting...')} "
-            f"({self.rtcm_bytes_received / 1024.0:.1f} KB RTCM)"
+            f"({self.rtcm_bytes_received / 1024.0:.1f} KB RTCM) | Corr. age: {age_str} | {self._get_cn0_summary()}"
         )
         status_msg.data = status_text
         self.status_pub.publish(status_msg)
@@ -622,11 +665,16 @@ class LC29HGPSNode(Node):
             self._last_diag_log_time = now
             self._last_logged_fix_quality = self.current_fix_quality
             if self.current_fix_quality in [4, 5]:
-                self.get_logger().info(f"[RTK ACTIVE] {status_text} | Pos: ({self.current_lat:.7f}, {self.current_lon:.7f})")
+                self.get_logger().info(f"[RTK ACTIVE] {status_text}")
             elif self.current_fix_quality > 0:
-                self.get_logger().info(f"[GNSS 3D] {status_text} | Pos: ({self.current_lat:.7f}, {self.current_lon:.7f})")
+                self.get_logger().info(f"[GNSS 3D] {status_text}")
             else:
                 self.get_logger().warn(f"[SEARCHING SATELLITES] {status_text}")
+
+            if self.ntrip_connected and self.current_diff_age is not None and self.current_diff_age > 5.0:
+                self.get_logger().warn(
+                    f"[RTK] Correction age {self.current_diff_age:.1f}s is high - RTCM link is lagging/stalling (check Wi-Fi to base)."
+                )
 
     def _publish_mock_data(self) -> None:
         """Simulate realistic RTK Float / RTK Fix data in mock mode."""
