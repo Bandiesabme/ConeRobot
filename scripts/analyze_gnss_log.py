@@ -33,6 +33,8 @@ class Run:
         self.first_fix = None
         self.losses = 0
         self.gst = []
+        self.samples = []                    # (t_rel, group, elev, snr)
+        self.fixes = []                      # (t_rel, quality)
         self.t0 = None
         self.t1 = None
         prev = None
@@ -62,11 +64,13 @@ class Run:
                     n_nots += 1
                 kind = line.split(',', 1)[0][-3:]
                 if kind == 'GSV':
-                    self._gsv(line)
+                    self._gsv(line, (ts - self.t0) if (ts is not None and self.t0 is not None) else None)
                 elif kind == 'GGA':
                     p = line.split(',')
                     if len(p) > 6 and p[6].isdigit():
                         q = int(p[6])
+                        if ts is not None and self.t0 is not None:
+                            self.fixes.append((ts - self.t0, q))
                         self.epochs[q] += 1
                         if q == 4 and self.first_fix is None and ts is not None and self.t0 is not None:
                             self.first_fix = ts - self.t0
@@ -80,7 +84,7 @@ class Run:
                     except (ValueError, IndexError):
                         pass
 
-    def _gsv(self, line):
+    def _gsv(self, line, t_rel=None):
         parsed = parse_gsv(line)
         if not parsed:
             return
@@ -90,6 +94,8 @@ class Run:
             if snr is None:
                 continue
             self.bands[(const, band)].append(snr)
+            if t_rel is not None:
+                self.samples.append((t_rel, group, elev, snr))
             if elev is not None and az is not None:
                 self.sky.append((az, elev, snr, group))
             eb = elev_bucket(elev)
@@ -126,6 +132,7 @@ def main() -> None:
     ap.add_argument('--skip', type=float, default=0.0, help='skip first N seconds (needs timestamps)')
     ap.add_argument('--plot', action='store_true')
     ap.add_argument('--save', metavar='PREFIX')
+    ap.add_argument('--timeline', type=float, metavar='SEC', help='print L1/L5 C/N0 (el>=30) and fix per SEC-second bin')
     a = ap.parse_args()
 
     runs = [Run(p, a.skip) for p in a.files]
@@ -162,6 +169,24 @@ def main() -> None:
         ("GST std lat/lon (cm)", [f"{avg([g[0] for g in r.gst]) * 100:.1f}/{avg([g[1] for g in r.gst]) * 100:.1f}" if r.gst else "n/a" for r in runs]),
     ]
     table("Fix quality", rows, runs)
+
+    if a.timeline:
+        for r in runs:
+            print(f"\n== Timeline {r.name} (bin {a.timeline:.0f} s, t=0 at first line; L1/L5 at el>=30)")
+            print(f"{'t[s]':>6} {'L1':>6} {'L5':>6} {'L5-L1':>7} {'FIX%':>5} {'FLOAT%':>6}")
+            if not r.samples:
+                print("  (no timestamped samples)")
+                continue
+            nb = int(max(s[0] for s in r.samples) // a.timeline) + 1
+            for b in range(nb):
+                lo, hi = b * a.timeline, (b + 1) * a.timeline
+                l1 = [s[3] for s in r.samples if lo <= s[0] < hi and s[1] == 'L1' and s[2] is not None and s[2] >= 30]
+                l5 = [s[3] for s in r.samples if lo <= s[0] < hi and s[1] == 'L5' and s[2] is not None and s[2] >= 30]
+                fx = [q for t, q in r.fixes if lo <= t < hi]
+                d = f"{avg(l5) - avg(l1):+7.1f}" if l1 and l5 else "      -"
+                pf = f"{100.0 * fx.count(4) / len(fx):5.0f}" if fx else "    -"
+                pl = f"{100.0 * fx.count(5) / len(fx):6.0f}" if fx else "     -"
+                print(f"{lo:6.0f} {fmt(avg(l1)):>6} {fmt(avg(l5)):>6} {d} {pf} {pl}")
 
     if not (a.plot or a.save):
         return
