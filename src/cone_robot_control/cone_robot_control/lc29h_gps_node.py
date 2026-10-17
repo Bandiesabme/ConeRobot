@@ -22,6 +22,7 @@ License: MIT
 """
 
 import base64
+import os
 from concurrent.futures import ThreadPoolExecutor
 import json
 import math
@@ -34,6 +35,8 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from std_msgs.msg import String
+
+from cone_robot_control.gnss_diagnostics import SignalDiagnostics, nmea_command, pi_health
 
 
 class LC29HGPSNode(Node):
@@ -61,6 +64,13 @@ class LC29HGPSNode(Node):
         self.declare_parameter('publish_rate_hz', 10.0)
         self.declare_parameter('mock_hardware', False)
 
+        # Signal-quality diagnostics (all optional, off by default)
+        self.declare_parameter('debug_signal_log', False)         # detailed [SIGDIAG] lines
+        self.declare_parameter('debug_signal_log_period_s', 5.0)
+        self.declare_parameter('record_nmea', False)              # raw NMEA -> timestamped file
+        self.declare_parameter('record_dir', '~/gnss_logs')
+        self.declare_parameter('run_label', '')                   # e.g. 'A_motors_off' (used in file name)
+
         # NTRIP Caster Configuration (Supports Public Casters & Local/Private Base Stations)
         self.declare_parameter('ntrip_enable', True)
         self.declare_parameter('ntrip_caster', 'rtk2go.com')
@@ -76,6 +86,11 @@ class LC29HGPSNode(Node):
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.publish_rate_hz = self.get_parameter('publish_rate_hz').get_parameter_value().double_value
         self.mock_hardware = self.get_parameter('mock_hardware').get_parameter_value().bool_value
+        self.debug_signal_log = self.get_parameter('debug_signal_log').get_parameter_value().bool_value
+        self.debug_signal_log_period_s = self.get_parameter('debug_signal_log_period_s').get_parameter_value().double_value
+        self.record_nmea = self.get_parameter('record_nmea').get_parameter_value().bool_value
+        self.record_dir = os.path.expanduser(self.get_parameter('record_dir').get_parameter_value().string_value)
+        self.run_label = self.get_parameter('run_label').get_parameter_value().string_value
 
         self.ntrip_enable = self.get_parameter('ntrip_enable').get_parameter_value().bool_value
         self.ntrip_caster = self.get_parameter('ntrip_caster').get_parameter_value().string_value
@@ -112,6 +127,23 @@ class LC29HGPSNode(Node):
         # Per-signal C/N0 table from GSV: (talker, signal_id, prn) -> (cn0_dbhz, timestamp)
         self._cn0_table = {}
         self._cn0_lock = threading.Lock()
+
+        # Optional diagnostics + raw NMEA recorder
+        self._diag: Optional[SignalDiagnostics] = None
+        self._nmea_file = None
+        self._last_pi_health_time = 0.0
+        if self.debug_signal_log:
+            self._diag = SignalDiagnostics(start_time=time.time())
+            self.diag_timer = self.create_timer(max(self.debug_signal_log_period_s, 1.0), self._log_signal_diagnostics)
+        if self.record_nmea:
+            try:
+                os.makedirs(self.record_dir, exist_ok=True)
+                label = f"_{self.run_label}" if self.run_label else ""
+                path = os.path.join(self.record_dir, f"nmea_{time.strftime('%Y%m%d_%H%M%S')}{label}.log")
+                self._nmea_file = open(path, 'a', buffering=1)
+                self.get_logger().info(f"Recording raw NMEA to {path}")
+            except Exception as e:
+                self.get_logger().error(f"Cannot open NMEA record file: {e}")
 
         self.get_logger().info("==================================================")
         self.get_logger().info(" Waveshare LC29H(DA) Dual-Band GPS/RTK Driver")
@@ -157,6 +189,9 @@ class LC29HGPSNode(Node):
             try:
                 with self.serial_lock:
                     self.serial_conn.write(b"$PQTMCFGRCVRMODE,W,1*2A\r\n")
+                    if self.debug_signal_log:
+                        # Enable $GxGST (position error std-dev) at 1 Hz; not saved to flash
+                        self.serial_conn.write(nmea_command("PAIR062,8,1"))
             except Exception:
                 pass
         except Exception as e:
@@ -187,6 +222,13 @@ class LC29HGPSNode(Node):
                     if '$' in line:
                         clean_sentence = line[line.find('$'):]
                         header = clean_sentence.split(',')[0]
+                        if self._diag is not None:
+                            self._diag.feed(clean_sentence, time.time())
+                        if self._nmea_file is not None:
+                            try:
+                                self._nmea_file.write(f"{time.time():.3f} {clean_sentence}\n")
+                            except Exception:
+                                pass
                         if header.endswith('GGA'):
                             self._parse_gga(clean_sentence)
                         elif header.endswith('GSV'):
@@ -302,6 +344,17 @@ class LC29HGPSNode(Node):
         avg = sum(vals) / len(vals)
         strong = sum(1 for v in vals if v >= 35.0)
         return f"C/N0: avg {avg:.1f} dB-Hz, {strong}/{len(vals)} signals >=35"
+
+    def _log_signal_diagnostics(self) -> None:
+        """Detailed per-band / elevation / fix / GST / Pi health log (debug_signal_log:=true)."""
+        if self._diag is None:
+            return
+        now = time.time()
+        for text in self._diag.report(now):
+            self.get_logger().info(text)
+        if now - self._last_pi_health_time >= 30.0:
+            self._last_pi_health_time = now
+            self.get_logger().info(f"[SIGDIAG pi] {pi_health()}")
 
     def _parse_rmc(self, line: str) -> None:
         """Parse NMEA $GNRMC sentence for speed/heading fallback."""
@@ -690,6 +743,11 @@ class LC29HGPSNode(Node):
     def destroy_node(self) -> None:
         """Clean up serial connection on node shutdown."""
         self.is_running = False
+        if self._nmea_file is not None:
+            try:
+                self._nmea_file.close()
+            except Exception:
+                pass
         if self.serial_conn and self.serial_conn.is_open:
             try:
                 self.serial_conn.close()
