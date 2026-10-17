@@ -20,6 +20,8 @@ def launch_setup(context, *args, **kwargs):
     launch_foxglove_val = LaunchConfiguration('launch_foxglove').perform(context).lower() == 'true'
     launch_motion_val = LaunchConfiguration('launch_motion_controller').perform(context).lower() == 'true'
     motion_type_val = LaunchConfiguration('motion_controller_type').perform(context).lower()
+    gps_debug_val = LaunchConfiguration('gps_debug').perform(context).lower() == 'true'
+    gps_run_label_val = LaunchConfiguration('gps_run_label').perform(context)
 
     # Resolve active hardware based on robot_type preset
     if robot_type_val == 'gps':
@@ -90,7 +92,7 @@ def launch_setup(context, *args, **kwargs):
                 executable='lc29h_gps_node',
                 name='lc29h_gps_node',
                 output='screen',
-                parameters=[config_file]
+                parameters=[config_file, {'debug_signal_log': gps_debug_val, 'record_nmea': gps_debug_val, 'run_label': gps_run_label_val}]
             )
         )
         nodes_to_launch.append(
@@ -212,5 +214,7 @@ def generate_launch_description():
         declare_launch_motion_cmd,
         declare_motion_controller_type_cmd,
         declare_launch_foxglove_cmd,
+        DeclareLaunchArgument('gps_debug', default_value='false', description='GPS signal diagnostics: [SIGDIAG] logs + raw NMEA recording'),
+        DeclareLaunchArgument('gps_run_label', default_value='', description='Label in the recorded NMEA file name'),
         OpaqueFunction(function=launch_setup)
     ])
