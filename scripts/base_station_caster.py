@@ -1545,6 +1545,75 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- 🔋 Dedicated Power, Battery & Hardware Thermal Health Box -->
+    <div class="grid" id="powerHealthSection">
+      <div class="card" style="grid-column: 1 / -1;">
+        <div class="card-title">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span>🔋 BATTERY, POWER & THERMAL HEALTH</span>
+            <span id="boxModeBadge" class="status-badge" style="padding: 2px 10px; font-size: 11px; font-weight: 700;">DETECTING...</span>
+          </div>
+          <span id="boxEstRuntime" class="data-val" style="color: var(--accent); font-size: 13px;">Calculating...</span>
+        </div>
+
+        <!-- 5-Metric Quick Glance Bar -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin: 12px 0 16px 0;">
+          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+            <div class="data-label">Battery Level</div>
+            <div class="metric-value" style="font-size: 28px;"><span id="boxBattPct">--</span><span class="metric-unit" style="font-size: 14px;">%</span></div>
+            <div id="boxBattSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Samsung 35E (1S)</div>
+          </div>
+          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+            <div class="data-label">Terminal Voltage</div>
+            <div class="metric-value" style="font-size: 28px;"><span id="boxBattV">--</span><span class="metric-unit" style="font-size: 14px;">V</span></div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Range: 3.00V - 4.20V</div>
+          </div>
+          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+            <div class="data-label">Current Flow</div>
+            <div class="metric-value" style="font-size: 28px;"><span id="boxBattCurrent">--</span><span class="metric-unit" style="font-size: 14px;">mA</span></div>
+            <div id="boxCurrentSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Net Battery Flow</div>
+          </div>
+          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+            <div class="data-label">Live Power</div>
+            <div class="metric-value" style="font-size: 28px;"><span id="boxBattPower">--</span><span class="metric-unit" style="font-size: 14px;">W</span></div>
+            <div id="boxPowerSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Energy Rate</div>
+          </div>
+          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+            <div class="data-label">Pi Zero CPU Temp</div>
+            <div class="metric-value" style="font-size: 28px;"><span id="boxCpuTemp">--</span><span class="metric-unit" style="font-size: 14px;">°C</span></div>
+            <div id="boxCpuSubtext" style="font-size: 11px; color: #34d399; margin-top: 2px;">Cool & Optimal</div>
+          </div>
+        </div>
+
+        <!-- Animated Progress Bar -->
+        <div class="progress-container" style="margin: 6px 0 16px 0;">
+          <div class="progress-bar-bg" style="height: 10px;">
+            <div id="boxBattProgressBar" class="progress-bar-fill" style="width: 0%; transition: width 0.4s ease;"></div>
+          </div>
+        </div>
+
+        <!-- Telemetry Breakdown Table -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 24px;">
+          <div class="data-row">
+            <span class="data-label">Power State:</span>
+            <span id="boxPowerState" class="data-val">Detecting...</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Cell Chemistry / Profile:</span>
+            <span id="boxChemistry" class="data-val">Samsung 35E (1S 18650 Li-ion 3500mAh)</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Charge / Discharge Phase:</span>
+            <span id="boxChargeStage" class="data-val">--</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">CPU Thermal Health:</span>
+            <span id="boxThermalStatus" class="data-val" style="color: #34d399;">Normal</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="grid">
       <div class="card">
         <div class="card-title">📍 Base Station Coordinates</div>
@@ -1852,6 +1921,128 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               battEl.style.color = '#f87171';
             } else {
               battEl.style.color = '#34d399';
+            }
+          }
+        }
+
+        // Live update for Dedicated Power & Hardware Health Big Box
+        const boxSection = document.getElementById('powerHealthSection');
+        if (boxSection) {
+          const v = data.battery_voltage;
+          const ma = data.battery_current_ma;
+          const w = data.battery_power_w;
+          const temp = data.cpu_temp;
+
+          if (v !== null && v !== undefined) {
+            document.getElementById('boxBattV').textContent = v.toFixed(2);
+            document.getElementById('boxBattCurrent').textContent = (ma !== null && ma !== undefined) ? (ma > 0 ? `+${ma.toFixed(0)}` : ma.toFixed(0)) : '--';
+            document.getElementById('boxBattPower').textContent = (w !== null && w !== undefined) ? w.toFixed(2) : '--';
+
+            const isCharging = (ma !== null && ma !== undefined && ma < -15.0);
+            const isDischarging = (ma !== null && ma !== undefined && ma > 15.0);
+            const bar = document.getElementById('boxBattProgressBar');
+            const badge = document.getElementById('boxModeBadge');
+            const stateEl = document.getElementById('boxPowerState');
+            const stageEl = document.getElementById('boxChargeStage');
+            const estEl = document.getElementById('boxEstRuntime');
+            const pctEl = document.getElementById('boxBattPct');
+
+            let pct = 0;
+            if (v >= 9.0) {
+              pct = Math.round(Math.max(0, Math.min(100, (v - 10.5) / 2.1 * 100)));
+              document.getElementById('boxChemistry').textContent = '3S LiPo Pack (10.5V - 12.6V)';
+              document.getElementById('boxBattSubtext').textContent = '3S LiPo';
+            } else if (v >= 2.8 && v <= 4.3) {
+              const vAdj = isCharging ? Math.max(3.0, v - 0.08) : v;
+              pct = Math.round(Math.max(0, Math.min(100, (vAdj - 3.0) / 1.2 * 100)));
+              document.getElementById('boxChemistry').textContent = 'Samsung INR18650-35E (3500mAh 1S)';
+              document.getElementById('boxBattSubtext').textContent = 'Samsung 35E (1S)';
+            } else {
+              pct = 100;
+              document.getElementById('boxChemistry').textContent = 'Regulated 5V Rail / USB';
+              document.getElementById('boxBattSubtext').textContent = '5V Rail';
+            }
+
+            pctEl.textContent = pct;
+            bar.style.width = pct + '%';
+
+            if (isCharging) {
+              const chargeMa = Math.round(Math.abs(ma));
+              badge.textContent = `⚡ CHARGING (+${chargeMa} mA)`;
+              badge.className = 'status-badge fixed';
+              badge.style.color = '#38bdf8';
+              badge.style.background = 'rgba(56, 189, 248, 0.15)';
+              badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+              bar.className = 'progress-bar-fill';
+              bar.style.background = 'linear-gradient(90deg, #0284c7, #38bdf8)';
+
+              stateEl.textContent = `🔌 External Power Active (Supplying +${chargeMa} mA to Cell)`;
+              stateEl.style.color = '#38bdf8';
+              document.getElementById('boxCurrentSubtext').textContent = 'Flowing INTO Battery';
+              document.getElementById('boxPowerSubtext').textContent = 'Charging Energy Delivery';
+
+              let stage = 'CC Fast Charge';
+              if (v >= 4.18 && chargeMa < 250) {
+                stage = 'Nearly Full / Float Topping Off (>95%)';
+              } else if (v >= 4.15) {
+                stage = 'Constant Voltage (CV) Saturation (~85-95%)';
+              } else {
+                stage = `Constant Current (CC) Fast Charge (~${pct}%)`;
+              }
+              stageEl.textContent = stage;
+
+              const remMah = Math.max(0, (100 - pct) / 100 * 3500);
+              const estHours = chargeMa > 50 ? (remMah / chargeMa) : 0;
+              estEl.textContent = estHours > 0 ? `⚡ Full in ~${estHours.toFixed(1)} hours` : '⚡ Nearly Full';
+              estEl.style.color = '#38bdf8';
+            } else if (isDischarging) {
+              const drawMa = Math.round(ma);
+              badge.textContent = `🔋 DISCHARGING (-${drawMa} mA)`;
+              badge.className = 'status-badge';
+              badge.style.color = '#34d399';
+              badge.style.background = 'rgba(16, 185, 129, 0.15)';
+              badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+              bar.className = 'progress-bar-fill';
+              bar.style.background = 'linear-gradient(90deg, #10b981, #34d399)';
+
+              stateEl.textContent = `🔋 Battery Powered (Base Station Load: ${drawMa} mA)`;
+              stateEl.style.color = '#34d399';
+              document.getElementById('boxCurrentSubtext').textContent = 'Flowing OUT to System';
+              document.getElementById('boxPowerSubtext').textContent = 'Base Station Consumption';
+
+              stageEl.textContent = pct > 20 ? 'Healthy Discharge Curve' : 'Low Battery (Charge Soon)';
+              const hoursLeft = drawMa > 20 ? ((pct / 100 * 3500) / drawMa) : 0;
+              estEl.textContent = hoursLeft > 0 ? `Est. Runtime: ~${hoursLeft.toFixed(1)} hours left` : 'Calculating runtime...';
+              estEl.style.color = pct > 20 ? 'var(--accent)' : '#f87171';
+            } else {
+              badge.textContent = '🔌 STANDBY / IDLE';
+              badge.className = 'status-badge';
+              badge.style.color = 'var(--text-muted)';
+              stateEl.textContent = 'Standby / Low Current Draw';
+              stageEl.textContent = 'Stable';
+              estEl.textContent = 'Standby';
+            }
+          }
+
+          if (temp !== null && temp !== undefined) {
+            document.getElementById('boxCpuTemp').textContent = temp.toFixed(1);
+            const cpuSub = document.getElementById('boxCpuSubtext');
+            const cpuHealth = document.getElementById('boxThermalStatus');
+            if (temp >= 75) {
+              cpuSub.textContent = '⚠️ Thermal Throttling Zone';
+              cpuSub.style.color = '#f87171';
+              cpuHealth.textContent = 'HOT (Throttled)';
+              cpuHealth.style.color = '#f87171';
+            } else if (temp >= 60) {
+              cpuSub.textContent = 'Warm (Active Load)';
+              cpuSub.style.color = '#fbbf24';
+              cpuHealth.textContent = 'Warm';
+              cpuHealth.style.color = '#fbbf24';
+            } else {
+              cpuSub.textContent = 'Cool & Optimal';
+              cpuSub.style.color = '#34d399';
+              cpuHealth.textContent = 'Cool & Healthy';
+              cpuHealth.style.color = '#34d399';
             }
           }
         }
