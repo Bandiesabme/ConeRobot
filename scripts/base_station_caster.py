@@ -1813,30 +1813,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const battBadge = document.getElementById('batteryBadge');
           const battEl = document.getElementById('batteryVal');
           battBadge.style.display = 'flex';
-          let txt = `${data.battery_voltage.toFixed(2)} V`;
-          if (data.battery_current_ma !== null && data.battery_current_ma !== undefined && Math.abs(data.battery_current_ma) > 5.0) {
-            txt += ` | ${Math.round(data.battery_current_ma)} mA (${data.battery_power_w.toFixed(1)}W)`;
-          }
           const v = data.battery_voltage;
-          let pct = null;
-          if (v >= 9.0) {
-            pct = Math.round(Math.max(0, Math.min(100, (v - 10.5) / 2.1 * 100)));
-          } else if (v >= 2.8 && v <= 4.3) {
-            // 1S 18650 Li-ion (Samsung 35E: 3.0V empty to 4.2V full)
-            pct = Math.round(Math.max(0, Math.min(100, (v - 3.0) / 1.2 * 100)));
-          }
-          if (pct !== null) {
-            txt = `${pct}% • ${txt}`;
-          }
-          battEl.textContent = txt;
-          if (v >= 11.1 || (v >= 3.6 && v <= 4.3)) {
-            battEl.style.color = '#34d399';
-          } else if (v >= 10.5 || (v >= 3.2 && v < 3.6)) {
-            battEl.style.color = '#fbbf24';
-          } else if (v > 6.0 || v < 3.2) {
-            battEl.style.color = '#f87171';
+          const ma = data.battery_current_ma;
+          const isCharging = (ma !== null && ma !== undefined && ma < -15.0);
+
+          if (isCharging) {
+            const chargeMa = Math.round(Math.abs(ma));
+            let stage = "Charging";
+            if (v >= 4.18 && chargeMa < 250) {
+              stage = "Nearly Full (>95%)";
+            } else if (v >= 4.15) {
+              stage = "CV Saturation";
+            } else {
+              stage = "CC Fast Charge";
+            }
+            battEl.textContent = `⚡ ${stage} (+${chargeMa} mA) • ${v.toFixed(2)} V`;
+            battEl.style.color = '#38bdf8'; // Glowing blue during active charging
           } else {
-            battEl.style.color = '#34d399';
+            let txt = `${v.toFixed(2)} V`;
+            if (ma !== null && ma !== undefined && Math.abs(ma) > 5.0) {
+              txt += ` | ${Math.round(ma)} mA (${data.battery_power_w.toFixed(1)}W)`;
+            }
+            let pct = null;
+            if (v >= 9.0) {
+              pct = Math.round(Math.max(0, Math.min(100, (v - 10.5) / 2.1 * 100)));
+            } else if (v >= 2.8 && v <= 4.3) {
+              pct = Math.round(Math.max(0, Math.min(100, (v - 3.0) / 1.2 * 100)));
+            }
+            if (pct !== null) {
+              txt = `${pct}% • ${txt}`;
+            }
+            battEl.textContent = txt;
+            if (v >= 11.1 || (v >= 3.6 && v <= 4.3)) {
+              battEl.style.color = '#34d399';
+            } else if (v >= 10.5 || (v >= 3.2 && v < 3.6)) {
+              battEl.style.color = '#fbbf24';
+            } else if (v > 6.0 || v < 3.2) {
+              battEl.style.color = '#f87171';
+            } else {
+              battEl.style.color = '#34d399';
+            }
           }
         }
 

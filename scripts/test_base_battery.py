@@ -87,15 +87,30 @@ def get_charge_estimate(voltage: float, current_ma: float = 0.0) -> str:
         return f"5V Rail ({voltage:.2f}V)"
     elif voltage >= 2.8:
         # 1S 18650 Li-ion cell (Samsung 35E: 3.0V cutoff to 4.2V full, 3500 mAh)
-        min_v, max_v = 3.0, 4.2
-        pct = max(0, min(100, int((voltage - min_v) / (max_v - min_v) * 100)))
-        bars = int(pct / 10)
-        runtime_str = ""
-        if current_ma > 15.0:
+        if current_ma < -15.0:
+            charge_ma = abs(current_ma)
+            if voltage >= 4.18 and charge_ma < 250:
+                stage = "Topping Off / Full (>95%)"
+            elif voltage >= 4.15:
+                stage = "CV Saturation Phase (~85-95%)"
+            else:
+                # In CC phase, compensate for ~0.08V IR drop during charge
+                v_adj = max(3.0, voltage - 0.08)
+                pct = max(0, min(95, int((v_adj - 3.0) / 1.2 * 100)))
+                stage = f"CC Fast Charge (~{pct}%)"
+            return f"⚡ CHARGING (+{charge_ma:.0f} mA) | {stage}"
+        elif current_ma > 15.0:
+            min_v, max_v = 3.0, 4.2
+            pct = max(0, min(100, int((voltage - min_v) / (max_v - min_v) * 100)))
+            bars = int(pct / 10)
             remaining_mah = 3500.0 * (pct / 100.0)
             hours_left = remaining_mah / current_ma
-            runtime_str = f" | Est: ~{hours_left:.1f}h left"
-        return f"1S 18650 (3500mAh) ~{pct}% [{'█' * bars}{'░' * (10 - bars)}]{runtime_str}"
+            return f"1S 18650 ~{pct}% [{'█' * bars}{'░' * (10 - bars)}] | Est: ~{hours_left:.1f}h left"
+        else:
+            min_v, max_v = 3.0, 4.2
+            pct = max(0, min(100, int((voltage - min_v) / (max_v - min_v) * 100)))
+            bars = int(pct / 10)
+            return f"1S 18650 ~{pct}% [{'█' * bars}{'░' * (10 - bars)}] (Standby / Full)"
     else:
         return f"Cutoff / Low ({voltage:.2f}V)"
 
