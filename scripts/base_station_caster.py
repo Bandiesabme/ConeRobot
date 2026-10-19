@@ -1666,7 +1666,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
             <div class="data-label">Terminal Voltage</div>
             <div class="metric-value" style="font-size: 28px;"><span id="boxBattV">--</span><span class="metric-unit" style="font-size: 14px;">V</span></div>
-            <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Range: 3.00V - 4.20V</div>
+            <div id="boxOcvSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Resting EMF: -- V</div>
           </div>
           <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
             <div class="data-label">Current Flow</div>
@@ -2009,9 +2009,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             }
             let pct = null;
             if (v >= 9.0) {
-              pct = Math.round(Math.max(0, Math.min(100, (v - 10.5) / 2.1 * 100)));
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              const vOcv = Math.max(9.0, Math.min(12.6, v + (currentA * 0.40)));
+              pct = Math.round(Math.max(0, Math.min(100, (vOcv - 10.5) / 2.1 * 100)));
             } else if (v >= 2.8 && v <= 4.3) {
-              pct = Math.round(Math.max(0, Math.min(100, (v - 3.0) / 1.2 * 100)));
+              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts ~0.25 = 0.41 ohm)
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              const vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.41)));
+              if (vOcv >= 4.15) pct = 95 + (vOcv - 4.15) * 100;
+              else if (vOcv >= 4.05) pct = 85 + (vOcv - 4.05) * 100;
+              else if (vOcv >= 3.95) pct = 75 + (vOcv - 3.95) * 100;
+              else if (vOcv >= 3.85) pct = 62 + (vOcv - 3.85) * 130;
+              else if (vOcv >= 3.75) pct = 45 + (vOcv - 3.75) * 170;
+              else if (vOcv >= 3.65) pct = 28 + (vOcv - 3.65) * 170;
+              else if (vOcv >= 3.50) pct = 12 + (vOcv - 3.50) * 106;
+              else pct = Math.max(0, (vOcv - 3.0) / 0.50 * 12);
+              pct = Math.round(Math.max(0, Math.min(100, pct)));
             }
             if (pct !== null) {
               txt = `${pct}% • ${txt}`;
@@ -2052,13 +2065,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             const pctEl = document.getElementById('boxBattPct');
 
             let pct = 0;
+            let vOcv = v;
             if (v >= 9.0) {
-              pct = Math.round(Math.max(0, Math.min(100, (v - 10.5) / 2.1 * 100)));
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              vOcv = Math.max(9.0, Math.min(12.6, v + (currentA * 0.40)));
+              pct = Math.round(Math.max(0, Math.min(100, (vOcv - 10.5) / 2.1 * 100)));
               document.getElementById('boxChemistry').textContent = '3S LiPo Pack (10.5V - 12.6V)';
               document.getElementById('boxBattSubtext').textContent = '3S LiPo';
             } else if (v >= 2.8 && v <= 4.3) {
-              const vAdj = isCharging ? Math.max(3.0, v - 0.08) : v;
-              pct = Math.round(Math.max(0, Math.min(100, (vAdj - 3.0) / 1.2 * 100)));
+              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts ~0.25 = 0.41 ohm)
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.41)));
+
+              if (vOcv >= 4.15) pct = 95 + (vOcv - 4.15) * 100;
+              else if (vOcv >= 4.05) pct = 85 + (vOcv - 4.05) * 100;
+              else if (vOcv >= 3.95) pct = 75 + (vOcv - 3.95) * 100;
+              else if (vOcv >= 3.85) pct = 62 + (vOcv - 3.85) * 130;
+              else if (vOcv >= 3.75) pct = 45 + (vOcv - 3.75) * 170;
+              else if (vOcv >= 3.65) pct = 28 + (vOcv - 3.65) * 170;
+              else if (vOcv >= 3.50) pct = 12 + (vOcv - 3.50) * 106;
+              else pct = Math.max(0, (vOcv - 3.0) / 0.50 * 12);
+              pct = Math.round(Math.max(0, Math.min(100, pct)));
+
               document.getElementById('boxChemistry').textContent = 'Samsung INR18650-35E (3500mAh 1S)';
               document.getElementById('boxBattSubtext').textContent = 'Samsung 35E (1S)';
             } else {
@@ -2067,6 +2095,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               document.getElementById('boxBattSubtext').textContent = '5V Rail';
             }
 
+            document.getElementById('boxOcvSubtext').textContent = `Resting EMF: ${vOcv.toFixed(2)} V`;
             pctEl.textContent = pct;
             bar.style.width = pct + '%';
 

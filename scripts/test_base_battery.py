@@ -87,6 +87,21 @@ def get_charge_estimate(voltage: float, current_ma: float = 0.0) -> str:
         return f"5V Rail ({voltage:.2f}V)"
     elif voltage >= 2.8:
         # 1S 18650 Li-ion cell (Samsung 35E: 3.0V cutoff to 4.2V full, 3500 mAh)
+        # Dynamic loop IR drop compensation (Shunt 0.10 ohm + cell IR ~0.06 ohm + contacts ~0.25 ohm = 0.41 ohm)
+        v_ocv = max(3.0, min(4.20, voltage + (current_ma / 1000.0) * 0.41))
+
+        # Empirical Samsung 35E resting OCV discharge curve
+        if v_ocv >= 4.15: pct = int(95 + (v_ocv - 4.15) * 100)
+        elif v_ocv >= 4.05: pct = int(85 + (v_ocv - 4.05) * 100)
+        elif v_ocv >= 3.95: pct = int(75 + (v_ocv - 3.95) * 100)
+        elif v_ocv >= 3.85: pct = int(62 + (v_ocv - 3.85) * 130)
+        elif v_ocv >= 3.75: pct = int(45 + (v_ocv - 3.75) * 170)
+        elif v_ocv >= 3.65: pct = int(28 + (v_ocv - 3.65) * 170)
+        elif v_ocv >= 3.50: pct = int(12 + (v_ocv - 3.50) * 106)
+        else: pct = int(max(0, (v_ocv - 3.0) / 0.50 * 12))
+        pct = max(0, min(100, pct))
+        bars = int(pct / 10)
+
         if current_ma < -15.0:
             charge_ma = abs(current_ma)
             if voltage >= 4.18 and charge_ma < 250:
@@ -94,23 +109,14 @@ def get_charge_estimate(voltage: float, current_ma: float = 0.0) -> str:
             elif voltage >= 4.15:
                 stage = "CV Saturation Phase (~85-95%)"
             else:
-                # In CC phase, compensate for ~0.08V IR drop during charge
-                v_adj = max(3.0, voltage - 0.08)
-                pct = max(0, min(95, int((v_adj - 3.0) / 1.2 * 100)))
                 stage = f"CC Fast Charge (~{pct}%)"
-            return f"⚡ CHARGING (+{charge_ma:.0f} mA) | {stage}"
+            return f"⚡ CHARGING (+{charge_ma:.0f} mA) | {stage} | OCV: {v_ocv:.2f}V"
         elif current_ma > 15.0:
-            min_v, max_v = 3.0, 4.2
-            pct = max(0, min(100, int((voltage - min_v) / (max_v - min_v) * 100)))
-            bars = int(pct / 10)
             remaining_mah = 3500.0 * (pct / 100.0)
             hours_left = remaining_mah / current_ma
-            return f"1S 18650 ~{pct}% [{'█' * bars}{'░' * (10 - bars)}] | Est: ~{hours_left:.1f}h left"
+            return f"1S 18650 ~{pct}% [{'█' * bars}{'░' * (10 - bars)}] | Est: ~{hours_left:.1f}h left | OCV: {v_ocv:.2f}V"
         else:
-            min_v, max_v = 3.0, 4.2
-            pct = max(0, min(100, int((voltage - min_v) / (max_v - min_v) * 100)))
-            bars = int(pct / 10)
-            return f"1S 18650 ~{pct}% [{'█' * bars}{'░' * (10 - bars)}] (Standby / Full)"
+            return f"1S 18650 ~{pct}% [{'█' * bars}{'░' * (10 - bars)}] (Standby / Full) | OCV: {v_ocv:.2f}V"
     else:
         return f"Cutoff / Low ({voltage:.2f}V)"
 
