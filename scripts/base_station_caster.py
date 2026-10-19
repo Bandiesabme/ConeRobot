@@ -529,6 +529,12 @@ class NTRIPBaseCaster:
         print(f"  • Serial Port       : {self.serial_port} @ {self.baud_rate} baud")
         print(f"  • NTRIP Server Port : {self.server_port} (Mountpoint: /{self.mountpoint})")
         print(f"  • 🌐 Web Dashboard  : http://{self.local_ip}:{self.web_port}")
+        batt = self._get_battery_data()
+        if batt is not None:
+            v = batt["voltage"]
+            ma = batt["current_ma"]
+            print(f"  • 🔋 Battery Monitor: {v:.2f} V | {ma:.1f} mA (INA219 @ 0x40)")
+            self._add_log(f"🔋 INA219 Battery Monitor active: {v:.2f} V, {ma:.1f} mA")
         if self.is_static_fixed:
             print(f"  • Mode              : 🎯 STATIC FIXED BASE (0 mm Drift)")
             print(f"  • Coordinates       : {self.survey_lat:.8f}°, {self.survey_lon:.8f}°, {self.survey_alt:.2f}m")
@@ -1050,21 +1056,38 @@ class NTRIPBaseCaster:
 
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-    def get_status_json(self) -> dict:
-        """Generates real-time telemetry dictionary for HTTP dashboard."""
-        with self.clients_lock:
-            active_rovers = [
-                {
-                    "ip": meta["ip"],
-                    "port": meta["port"],
-                    "uptime_sec": int(time.time() - meta["connected_at"]),
-                    "bytes_sent_kb": round(meta["bytes_sent"] / 1024.0, 1)
-                }
-                for meta in self.clients_map.values()
-            ]
+    @staticmethod
+    def _get_battery_data() -> Optional[dict]:
+        """Reads INA219 battery bus voltage, shunt current, and power over I2C (address 0x40)."""
+        try:
+            try:
+                import smbus
+            except ImportError:
+                import smbus2 as smbus  # type: ignore
+            bus = smbus.SMBus(1)
+            try:
+                # Register 0x02: Bus Voltage
+                raw_v = bus.read_word_data(0x40, 0x02)
+                raw_v_swapped = ((raw_v & 0xFF) << 8) | (raw_v >> 8)
+                voltage = round(((raw_v_swapped >> 3) & 0x1FFF) * 0.004, 2)
 
-        with self.logs_lock:
-            log_list = list(self.logs)[-30:]
+                # Register 0x01: Shunt Current (signed 16-bit, 10 uV LSB / 0.1 ohm = 0.1 mA)
+                raw_s = bus.read_word_data(0x40, 0x01)
+                raw_s_swapped = ((raw_s & 0xFF) << 8) | (raw_s >> 8)
+                if raw_s_swapped >= 32768:
+                    raw_s_swapped -= 65536
+                current_ma = round(raw_s_swapped * 0.1, 1)
+                power_w = round(voltage * (abs(current_ma) / 1000.0), 2)
+
+                return {
+                    "voltage": voltage,
+                    "current_ma": current_ma,
+                    "power_w": power_w
+                }
+            finally:
+                bus.close()
+        except Exception:
+            return None
 
     @staticmethod
     def _get_cpu_temp() -> Optional[float]:
@@ -1103,6 +1126,7 @@ class NTRIPBaseCaster:
         is_serial_live = time_since_serial is not None and time_since_serial < 2.5
         current_ip = self._get_local_ip()
         display_ip = client_host if (client_host and not client_host.startswith("127.") and not client_host.endswith(".local")) else (current_ip if (current_ip and not current_ip.startswith("127.")) else self.local_ip)
+        batt = self._get_battery_data()
 
         return {
             "survey_status": "STATIC_FIXED" if self.is_static_fixed else self.survey_status,
@@ -1113,6 +1137,9 @@ class NTRIPBaseCaster:
             "saved_locations": loc_store.get("locations", {}),
             "active_location": loc_store.get("active_location") or self.active_location,
             "cpu_temp": self._get_cpu_temp(),
+            "battery_voltage": batt["voltage"] if batt else None,
+            "battery_current_ma": batt["current_ma"] if batt else None,
+            "battery_power_w": batt["power_w"] if batt else None,
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
             "remaining_sec": remaining_sec,
@@ -1442,6 +1469,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 12px;">
+        <div id="batteryBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1); display: none;">
+          <span>🔋 Battery:</span>
+          <span id="batteryVal" style="color: #34d399; font-family: ui-monospace, monospace; font-weight: 700;">-- V</span>
+        </div>
         <div id="cpuBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1);">
           <span>🌡️ CPU:</span>
           <span id="cpuTempVal" style="color: #34d399; font-family: ui-monospace, monospace; font-weight: 700;">-- °C</span>
@@ -1775,6 +1806,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             tempEl.style.color = '#fbbf24';
           } else {
             tempEl.style.color = '#34d399';
+          }
+        }
+
+        if (data.battery_voltage !== null && data.battery_voltage !== undefined) {
+          const battBadge = document.getElementById('batteryBadge');
+          const battEl = document.getElementById('batteryVal');
+          battBadge.style.display = 'flex';
+          let txt = `${data.battery_voltage.toFixed(2)} V`;
+          if (data.battery_current_ma !== null && data.battery_current_ma !== undefined && Math.abs(data.battery_current_ma) > 5.0) {
+            txt += ` | ${Math.round(data.battery_current_ma)} mA (${data.battery_power_w.toFixed(1)}W)`;
+          }
+          const v = data.battery_voltage;
+          let pct = null;
+          if (v >= 9.0) {
+            pct = Math.round(Math.max(0, Math.min(100, (v - 10.5) / 2.1 * 100)));
+          } else if (v >= 2.8 && v <= 4.3) {
+            // 1S 18650 Li-ion (Samsung 35E: 3.0V empty to 4.2V full)
+            pct = Math.round(Math.max(0, Math.min(100, (v - 3.0) / 1.2 * 100)));
+          }
+          if (pct !== null) {
+            txt = `${pct}% • ${txt}`;
+          }
+          battEl.textContent = txt;
+          if (v >= 11.1 || (v >= 3.6 && v <= 4.3)) {
+            battEl.style.color = '#34d399';
+          } else if (v >= 10.5 || (v >= 3.2 && v < 3.6)) {
+            battEl.style.color = '#fbbf24';
+          } else if (v > 6.0 || v < 3.2) {
+            battEl.style.color = '#f87171';
+          } else {
+            battEl.style.color = '#34d399';
           }
         }
 

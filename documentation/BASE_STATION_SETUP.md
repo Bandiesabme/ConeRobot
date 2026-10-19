@@ -25,12 +25,41 @@ Mount your RTK Base GNSS HAT directly to the Raspberry Pi Zero 40-pin GPIO heade
 
 ---
 
+## 1.1 Optional: Battery Voltage & Current Monitor (CJMCU-219 / INA219)
+
+Unlike the robot (which draws 20–50A motor current), the **Raspberry Pi Zero + GNSS Base HAT only draws ~150–300 mA (<0.5 A)**. 
+Therefore, you can connect the INA219 **in series** to monitor **Voltage, Current (mA), and Power (W)** simultaneously without any risk to the 3.2A-rated $0.1\,\Omega$ shunt:
+
+| CJMCU-219 Pin | Connection | Function | Notes |
+| :--- | :--- | :--- | :--- |
+| **VCC** | **Pin 1** (or 17) | 3.3V Logic | Protects Pi Zero GPIO logic |
+| **GND** | **Pin 9** (or 6, 14) | Common Ground | System ground (Battery Negative connects here) |
+| **SDA** | **Pin 3** | GPIO 2 (I2C1 SDA) | I2C Data line |
+| **SCL** | **Pin 5** | GPIO 3 (I2C1 SCL) | I2C Clock line |
+| **VIN+** | **Battery Positive (+)** | Shunt Input | Battery (+) cable feeds into `VIN+` |
+| **VIN-** | **Pi Zero / DC-DC 5V (+)** | Shunt Output (Load) | Powers the Pi Zero / buck converter |
+
+```text
+[ Battery (+) ] ────────► VIN+ [ INA219 ] VIN- ────────► [ Pi Zero / DC-DC 5V (+) ]
+                                   │
+[ Battery (–) ] ────────┬──────────┴───────────────────► [ Pi Zero GND (Pin 9) ]
+                        └── (COMMON SYSTEM GROUND)
+```
+
+> [!NOTE]
+> - **Voltage Drop**: At 250 mA, voltage drop across the $0.1\,\Omega$ shunt is only $0.025\text{ V}$ (negligible).
+> - **Current & Power**: Measures real-time current draw in mA and total power in Watts.
+> - **Safety Rule**: **NEVER** connect `VIN-` directly to `GND`! `VIN-` is the power feed to your Pi Zero / DC-DC converter.
+
+---
+
 ## 2. System Prerequisites
 
 Before launching the base station software, ensure your Raspberry Pi Zero has been prepared following the dedicated **[Raspberry Pi Zero Setup Guide](RPI_ZERO_SETUP.md)**:
-- [x] Base packages installed (`git`, `python3`, `python3-serial`).
+- [x] Base packages installed (`git`, `python3`, `python3-serial`, `python3-smbus`, `i2c-tools`).
 - [x] Hardware PL011 UART enabled (`/dev/ttyAMA0` configured via `dtoverlay=disable-bt`).
-- [x] Serial login console disabled and user added to `dialout` group.
+- [x] Hardware I2C enabled (`sudo raspi-config nonint do_i2c 0`).
+- [x] Serial login console disabled and user added to `dialout` and `i2c` groups.
 - [x] Wi-Fi configured and power saving disabled (`wifi.powersave = 2`).
 - [x] Repository cloned to `~/github/ConeRobot`.
 
