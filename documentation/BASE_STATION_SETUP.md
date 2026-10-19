@@ -127,6 +127,9 @@ http://<BASE_PI_ZERO_IP>:8080
 ### Dashboard Features:
 - 🎯 **Survey-In Progress Bar**: Real-time calibration countdown (`0%` $\rightarrow$ `100%`), elapsed duration, and standard deviation accuracy (`0.35 m`).
 - 🛰️ **Tracked Satellite Constellations**: Real-time count of GPS, GLONASS, Galileo, and BeiDou satellites.
+- 📶 **GNSS Satellite SNR (C/N0) & Constellations (Collapsible)**: Live vertical signal strength bars (in dB-Hz) per satellite across all constellations (GPS, Galileo, BeiDou, GLONASS) with carrier phase lock threshold indicators (≥38 dB-Hz).
+- 🔋 **Battery, Power & Thermal Health (Collapsible)**: Live battery %, terminal voltage, dynamic IR-compensated resting EMF, current flow (mA), power (W), CPU temperature, and GPIO 17 button status with safe shutdown timer.
+- 📂 **Uncluttered Collapsible Design**: Diagnostic sections feature roll-down headers that default to a compact view with live summary pills (`74% • 3.82V • +260 mA`, `28 Sats • Avg 41.2 dB-Hz`), preserving state across browser refreshes via `localStorage`.
 - 📍 **Fixed Reference Coordinates**: Absolute Latitude, Longitude, and Ellipsoidal Height with a direct **Google Maps** link.
 - 🔒 **"Lock Now" & Auto-Restore**: Locks current averaged position or automatically restores previous survey coordinates on boot (0 mm drift).
 - 📍 **Saved Location Profiles (Presets)**: Save multiple physical benchmark spots (e.g. "Home Yard", "University Roof", "Spot A"). Switch between them with 1 click from the dropdown without recalibrating!

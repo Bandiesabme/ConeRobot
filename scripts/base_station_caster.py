@@ -151,6 +151,11 @@ class NTRIPBaseCaster:
         self._batt_ma_history: Deque[float] = deque(maxlen=8)
         self._ina219_configured = False
 
+        # GNSS Satellite Signal SNR (C/N0 in dB-Hz) Tracking
+        self.sat_snr_map: Dict[str, dict] = {}
+        self.sat_snr_lock = threading.Lock()
+        self._last_gsv_time = 0.0
+
         # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
             self._apply_fixed_coords(fixed_lat, fixed_lon, fixed_alt or 0.0, "Command-Line Arguments")
@@ -423,6 +428,9 @@ class NTRIPBaseCaster:
         time.sleep(0.05)
         # 4. Enable NMEA GGA sentence output (1 Hz) for live telemetry
         self._send_gnss_cmd("PAIR062,0,1")
+        time.sleep(0.05)
+        # 5. Enable NMEA GSV sentence output (1 Hz) for satellite C/N0 SNR telemetry
+        self._send_gnss_cmd("PAIR062,3,1")
         time.sleep(0.05)
         # 4. If static coordinates are locked, send fixed position to hardware
         if self.is_static_fixed and self.survey_lat != 0.0 and self.survey_lon != 0.0:
@@ -913,12 +921,75 @@ class NTRIPBaseCaster:
                         self._update_survey_statistics(lat, lon, self.survey_alt)
 
             elif 'GSV' in line:
-                parts = line.split(',')
-                if len(parts) >= 4 and parts[3].isdigit():
-                    sats_in_view = int(parts[3])
-                    if sats_in_view > 0:
-                        self.satellites_tracked = max(self.satellites_tracked, sats_in_view)
+                self._parse_gsv(line)
 
+        except Exception:
+            pass
+
+    def _parse_gsv(self, line: str) -> None:
+        """Parses multi-constellation NMEA GSV sentences for per-satellite SNR (C/N0), elevation, azimuth."""
+        try:
+            body = line.strip().lstrip('$').split('*')[0]
+            parts = body.split(',')
+            if len(parts) < 4:
+                return
+
+            talker = parts[0][:2].upper()
+            prefix_map = {'GP': 'G', 'GL': 'R', 'GA': 'E', 'GB': 'B', 'BD': 'B', 'GQ': 'Q', 'GN': 'S'}
+            const_map = {'GP': 'GPS', 'GL': 'GLONASS', 'GA': 'Galileo', 'GB': 'BeiDou', 'BD': 'BeiDou', 'GQ': 'QZSS', 'GN': 'GNSS'}
+            prefix = prefix_map.get(talker, 'S')
+            constellation = const_map.get(talker, 'GNSS')
+
+            if parts[3].isdigit():
+                in_view = int(parts[3])
+                if in_view > 0:
+                    self.satellites_tracked = max(self.satellites_tracked, in_view)
+
+            n_fields = len(parts) - 4
+            now = time.time()
+            self._last_gsv_time = now
+
+            for i in range(4, 4 + (n_fields // 4) * 4, 4):
+                prn_str = parts[i].strip()
+                if not prn_str or not prn_str.isdigit():
+                    continue
+                prn = int(prn_str)
+                sat_id = f"{prefix}{prn:02d}"
+
+                elev = None
+                if i + 1 < len(parts) and parts[i + 1]:
+                    try:
+                        elev = float(parts[i + 1])
+                    except ValueError:
+                        pass
+
+                az = None
+                if i + 2 < len(parts) and parts[i + 2]:
+                    try:
+                        az = float(parts[i + 2])
+                    except ValueError:
+                        pass
+
+                snr = None
+                if i + 3 < len(parts) and parts[i + 3]:
+                    try:
+                        snr = float(parts[i + 3])
+                    except ValueError:
+                        pass
+
+                with self.sat_snr_lock:
+                    if snr is not None and snr > 0:
+                        self.sat_snr_map[sat_id] = {
+                            "id": sat_id,
+                            "constellation": constellation,
+                            "prn": prn,
+                            "elev": int(elev) if elev is not None else None,
+                            "az": int(az) if az is not None else None,
+                            "snr": round(snr, 1),
+                            "last_seen": now
+                        }
+                    elif sat_id in self.sat_snr_map:
+                        self.sat_snr_map[sat_id]["last_seen"] = now
         except Exception:
             pass
 
@@ -1077,6 +1148,10 @@ class NTRIPBaseCaster:
                 msg = f"⏳ [CALIBRATING] {self.survey_duration}s/{self.survey_target_duration}s ({mins}m {secs}s left) | Est. Acc: {self.survey_accuracy:.2f}m | Sats: {self.satellites_tracked} | Rovers: {rovers} | RTCM: {rtcm_kb:.1f} KB (Msg 1005: {self.rtcm_1005_count})"
 
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+            # Ensure GSV output is flowing if no GSV received in last 15s
+            if self.ser and (time.time() - self._last_gsv_time > 15.0):
+                self._send_gnss_cmd("PAIR062,3,1")
 
     def _get_battery_data(self) -> Optional[dict]:
         """Reads INA219 battery bus voltage, shunt current, and power with hardware 128x averaging and sliding window filter."""
@@ -1267,6 +1342,25 @@ class NTRIPBaseCaster:
         display_ip = client_host if (client_host and not client_host.startswith("127.") and not client_host.endswith(".local")) else (current_ip if (current_ip and not current_ip.startswith("127.")) else self.local_ip)
         batt = self._get_battery_data()
 
+        now = time.time()
+        with self.sat_snr_lock:
+            stale_keys = [k for k, v in self.sat_snr_map.items() if now - v.get("last_seen", 0) > 5.0]
+            for k in stale_keys:
+                del self.sat_snr_map[k]
+            sat_list = list(self.sat_snr_map.values())
+
+        sat_list.sort(key=lambda s: (s.get("snr") or 0), reverse=True)
+        avg_snr = round(sum(s["snr"] for s in sat_list) / len(sat_list), 1) if sat_list else 0.0
+        max_snr = max((s["snr"] for s in sat_list), default=0.0)
+        strong_count = sum(1 for s in sat_list if s["snr"] >= 38.0)
+        good_count = sum(1 for s in sat_list if 28.0 <= s["snr"] < 38.0)
+        weak_count = sum(1 for s in sat_list if s["snr"] < 28.0)
+
+        const_counts = {}
+        for s in sat_list:
+            c = s.get("constellation", "Other")
+            const_counts[c] = const_counts.get(c, 0) + 1
+
         return {
             "survey_status": "STATIC_FIXED" if self.is_static_fixed else self.survey_status,
             "survey_valid": self.survey_valid,
@@ -1283,6 +1377,16 @@ class NTRIPBaseCaster:
             "button_held_sec": round(self._button_held_sec, 1),
             "button_shutting_down": self._shutdown_initiated,
             "button_backend": self.button_backend,
+            "sat_snr_data": {
+                "sats": sat_list,
+                "count": len(sat_list),
+                "avg_snr": avg_snr,
+                "max_snr": max_snr,
+                "strong_count": strong_count,
+                "good_count": good_count,
+                "weak_count": weak_count,
+                "constellations": const_counts
+            },
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
             "remaining_sec": remaining_sec,
@@ -1395,6 +1499,17 @@ class NTRIPBaseCaster:
                     success = caster_instance.delete_named_location(name)
                     resp = json.dumps({"status": "ok" if success else "error"}).encode('utf-8')
                     self.send_response(200 if success else 400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp)))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.wfile.write(resp)
+                elif self.path == '/api/gsv/enable':
+                    caster_instance._send_gnss_cmd("PAIR062,3,1")
+                    caster_instance._add_log("📡 Manually requested NMEA GSV satellite signal stream ($PAIR062,3,1)")
+                    resp = json.dumps({"status": "ok"}).encode('utf-8')
+                    self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Content-Length', str(len(resp)))
                     self.send_header('Access-Control-Allow-Origin', '*')
@@ -1599,6 +1714,118 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .log-time { color: #64748b; margin-right: 8px; }
     .log-msg.error { color: #f87171; }
     .log-msg.warn { color: #fbbf24; }
+
+    /* Collapsible Sections & Roll-down Panels */
+    .collapsible-card {
+      transition: all 0.25s ease;
+    }
+    .collapsible-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+      padding: 2px 0;
+      gap: 12px;
+    }
+    .collapsible-header:hover .collapsible-title {
+      color: #fff;
+    }
+    .collapsible-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: color 0.2s;
+    }
+    .toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 9999px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .toggle-btn:hover {
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .collapsed-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-muted);
+      background: rgba(0, 0, 0, 0.35);
+      padding: 4px 12px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      flex-wrap: wrap;
+    }
+    .sum-sep { color: rgba(255, 255, 255, 0.2); }
+
+    /* Satellite SNR Bar Chart */
+    .snr-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 18px 10px 10px 10px;
+      min-height: 195px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(56, 189, 248, 0.3) transparent;
+    }
+    .snr-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 36px;
+      flex: 0 0 auto;
+      position: relative;
+      cursor: pointer;
+    }
+    .snr-val {
+      font-size: 11px;
+      font-weight: 700;
+      font-family: ui-monospace, monospace;
+      margin-bottom: 5px;
+      color: #94a3b8;
+    }
+    .snr-bar-track {
+      width: 18px;
+      height: 120px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      display: flex;
+      align-items: flex-end;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      position: relative;
+    }
+    .snr-bar-fill {
+      width: 100%;
+      border-radius: 3px 3px 0 0;
+      transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .snr-sat-tag {
+      margin-top: 6px;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: ui-monospace, monospace;
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: rgba(0, 0, 0, 0.4);
+    }
   </style>
 </head>
 <body>
@@ -1692,74 +1919,154 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- 🔋 Dedicated Power, Battery & Hardware Thermal Health Box -->
-    <div class="grid" id="powerHealthSection">
-      <div class="card" style="grid-column: 1 / -1;">
-        <div class="card-title">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span>🔋 BATTERY, POWER & THERMAL HEALTH</span>
+    <!-- 📶 GNSS Satellite Signal Strength (SNR / C/N0) Section (Collapsible) -->
+    <div class="grid" id="snrGrid" style="margin-bottom: 20px;">
+      <div class="card collapsible-card" id="snrSection" style="grid-column: 1 / -1;">
+        <div class="collapsible-header" onclick="toggleSection('snr')">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span class="collapsible-title">📶 GNSS SATELLITE SIGNAL NOISE RATIO (SNR / C/N0)</span>
+            <span id="snrHealthBadge" class="status-badge" style="padding: 2px 10px; font-size: 11px; font-weight: 700; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">TRACKING...</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div id="snrCollapsedSummary" class="collapsed-summary">
+              <span id="sumSnrSats" style="color: var(--accent); font-weight: 700;">-- Sats Tracked</span>
+              <span class="sum-sep">•</span>
+              <span>Avg SNR: <strong id="sumAvgSnr">-- dB-Hz</strong></span>
+            </div>
+            <button class="toggle-btn" id="snrToggleBtn" type="button">
+              <span id="snrToggleIcon">▼</span> <span id="snrToggleText">Details</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="snrBody" class="collapsible-body" style="display: none; margin-top: 14px;">
+          <!-- 4-Metric Quick Glance Bar -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 16px;">
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Avg Signal Strength</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrAvgVal">--</span><span class="metric-unit" style="font-size: 14px;">dB-Hz</span></div>
+              <div id="snrAvgSubtext" style="font-size: 11px; color: var(--success); margin-top: 2px;">Optimal for RTK Base</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Active Satellites (C/N0)</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrSatCount">0</span><span class="metric-unit" style="font-size: 14px;">sats</span></div>
+              <div id="snrSatSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">-- Strong (&gt;38 dB)</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Top Satellite</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrTopVal">--</span><span class="metric-unit" style="font-size: 14px;">dB-Hz</span></div>
+              <div id="snrTopSubtext" style="font-size: 11px; color: var(--accent); margin-top: 2px;">--</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Active Constellations</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrConstCount">--</span></div>
+              <div id="snrConstSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">GPS, GAL, BDS, GLO</div>
+            </div>
+          </div>
+
+          <!-- Threshold Legend & Refresh Button -->
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text-muted);">
+            <div style="display: flex; gap: 14px; align-items: center; flex-wrap: wrap;">
+              <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: #10b981;"></span> ≥38 dB-Hz (Strong / Phase Lock)</span>
+              <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: #f59e0b;"></span> 28–37 dB-Hz (Good)</span>
+              <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: #ef4444;"></span> &lt;28 dB-Hz (Horizon / Weak)</span>
+            </div>
+            <button onclick="event.stopPropagation(); requestGsvStream();" class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px;" type="button">🔄 Poll / Request GSV</button>
+          </div>
+
+          <!-- Vertical Satellite SNR Bar Chart Grid -->
+          <div id="snrChartContainer" class="snr-chart" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px;">
+            <!-- Populated via Javascript -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 🔋 Dedicated Power, Battery & Hardware Thermal Health Box (Collapsible) -->
+    <div class="grid" id="powerHealthGrid" style="margin-bottom: 20px;">
+      <div class="card collapsible-card" id="powerHealthSection" style="grid-column: 1 / -1;">
+        <div class="collapsible-header" onclick="toggleSection('powerHealth')">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span class="collapsible-title">🔋 BATTERY, POWER & THERMAL HEALTH</span>
             <span id="boxModeBadge" class="status-badge" style="padding: 2px 10px; font-size: 11px; font-weight: 700;">DETECTING...</span>
           </div>
-          <span id="boxEstRuntime" class="data-val" style="color: var(--accent); font-size: 13px;">Calculating...</span>
-        </div>
-
-        <!-- 5-Metric Quick Glance Bar -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin: 12px 0 16px 0;">
-          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
-            <div class="data-label">Battery Level</div>
-            <div class="metric-value" style="font-size: 28px;"><span id="boxBattPct">--</span><span class="metric-unit" style="font-size: 14px;">%</span></div>
-            <div id="boxBattSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Samsung 35E (1S)</div>
-          </div>
-          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
-            <div class="data-label">Terminal Voltage</div>
-            <div class="metric-value" style="font-size: 28px;"><span id="boxBattV">--</span><span class="metric-unit" style="font-size: 14px;">V</span></div>
-            <div id="boxOcvSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Resting EMF: -- V</div>
-          </div>
-          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
-            <div class="data-label">Current Flow</div>
-            <div class="metric-value" style="font-size: 28px;"><span id="boxBattCurrent">--</span><span class="metric-unit" style="font-size: 14px;">mA</span></div>
-            <div id="boxCurrentSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Net Battery Flow</div>
-          </div>
-          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
-            <div class="data-label">Live Power</div>
-            <div class="metric-value" style="font-size: 28px;"><span id="boxBattPower">--</span><span class="metric-unit" style="font-size: 14px;">W</span></div>
-            <div id="boxPowerSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Energy Rate</div>
-          </div>
-          <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
-            <div class="data-label">Pi Zero CPU Temp</div>
-            <div class="metric-value" style="font-size: 28px;"><span id="boxCpuTemp">--</span><span class="metric-unit" style="font-size: 14px;">°C</span></div>
-            <div id="boxCpuSubtext" style="font-size: 11px; color: #34d399; margin-top: 2px;">Cool & Optimal</div>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div id="powerHealthCollapsedSummary" class="collapsed-summary">
+              <span id="sumBattPct" style="color: var(--success); font-weight: 700;">--%</span>
+              <span class="sum-sep">•</span>
+              <span id="sumBattV" style="font-family: ui-monospace, monospace;">--V</span>
+              <span class="sum-sep">•</span>
+              <span id="sumBattCurrent" style="font-family: ui-monospace, monospace;">--mA</span>
+              <span class="sum-sep">•</span>
+              <span id="sumBattRuntime" style="color: var(--accent);">--</span>
+              <span class="sum-sep">•</span>
+              <span id="sumCpuTemp">--°C</span>
+            </div>
+            <button class="toggle-btn" id="powerHealthToggleBtn" type="button">
+              <span id="powerHealthToggleIcon">▼</span> <span id="powerHealthToggleText">Details</span>
+            </button>
           </div>
         </div>
 
-        <!-- Animated Progress Bar -->
-        <div class="progress-container" style="margin: 6px 0 16px 0;">
-          <div class="progress-bar-bg" style="height: 10px;">
-            <div id="boxBattProgressBar" class="progress-bar-fill" style="width: 0%; transition: width 0.4s ease;"></div>
+        <div id="powerHealthBody" class="collapsible-body" style="display: none; margin-top: 14px;">
+          <!-- 5-Metric Quick Glance Bar -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin: 12px 0 16px 0;">
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Battery Level</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattPct">--</span><span class="metric-unit" style="font-size: 14px;">%</span></div>
+              <div id="boxBattSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Samsung 35E (1S)</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Terminal Voltage</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattV">--</span><span class="metric-unit" style="font-size: 14px;">V</span></div>
+              <div id="boxOcvSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Resting EMF: -- V</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Current Flow</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattCurrent">--</span><span class="metric-unit" style="font-size: 14px;">mA</span></div>
+              <div id="boxCurrentSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Net Battery Flow</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Live Power</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattPower">--</span><span class="metric-unit" style="font-size: 14px;">W</span></div>
+              <div id="boxPowerSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Energy Rate</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Pi Zero CPU Temp</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxCpuTemp">--</span><span class="metric-unit" style="font-size: 14px;">°C</span></div>
+              <div id="boxCpuSubtext" style="font-size: 11px; color: #34d399; margin-top: 2px;">Cool & Optimal</div>
+            </div>
           </div>
-        </div>
 
-        <!-- Telemetry Breakdown Table -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 24px;">
-          <div class="data-row">
-            <span class="data-label">Power State:</span>
-            <span id="boxPowerState" class="data-val">Detecting...</span>
+          <!-- Animated Progress Bar -->
+          <div class="progress-container" style="margin: 6px 0 16px 0;">
+            <div class="progress-bar-bg" style="height: 10px;">
+              <div id="boxBattProgressBar" class="progress-bar-fill" style="width: 0%; transition: width 0.4s ease;"></div>
+            </div>
           </div>
-          <div class="data-row">
-            <span class="data-label">Cell Chemistry / Profile:</span>
-            <span id="boxChemistry" class="data-val">Samsung 35E (1S 18650 Li-ion 3500mAh)</span>
-          </div>
-          <div class="data-row">
-            <span class="data-label">Charge / Discharge Phase:</span>
-            <span id="boxChargeStage" class="data-val">--</span>
-          </div>
-          <div class="data-row">
-            <span class="data-label">CPU Thermal Health:</span>
-            <span id="boxThermalStatus" class="data-val" style="color: #34d399;">Normal</span>
-          </div>
-          <div class="data-row">
-            <span class="data-label">Hardware Button (GPIO 17 / D17):</span>
-            <span id="boxBtnStatus" class="data-val" style="color: #94a3b8;">⚪ Released (Open)</span>
+
+          <!-- Telemetry Breakdown Table -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 24px;">
+            <div class="data-row">
+              <span class="data-label">Power State:</span>
+              <span id="boxPowerState" class="data-val">Detecting...</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">Cell Chemistry / Profile:</span>
+              <span id="boxChemistry" class="data-val">Samsung 35E (1S 18650 Li-ion 3500mAh)</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">Charge / Discharge Phase:</span>
+              <span id="boxChargeStage" class="data-val">--</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">CPU Thermal Health:</span>
+              <span id="boxThermalStatus" class="data-val" style="color: #34d399;">Normal</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">Hardware Button (GPIO 17 / D17):</span>
+              <span id="boxBtnStatus" class="data-val" style="color: #94a3b8;">⚪ Released (Open)</span>
+            </div>
           </div>
         </div>
       </div>
@@ -2225,6 +2532,115 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               cpuHealth.style.color = '#34d399';
             }
           }
+
+          // Update collapsed summary for Power & Battery
+          const sumPct = document.getElementById('sumBattPct');
+          const sumV = document.getElementById('sumBattV');
+          const sumCur = document.getElementById('sumBattCurrent');
+          const sumRun = document.getElementById('sumBattRuntime');
+          const sumTemp = document.getElementById('sumCpuTemp');
+          if (sumPct) sumPct.textContent = `${pct}%`;
+          if (sumV) sumV.textContent = `${v.toFixed(2)}V (EMF: ${vOcv.toFixed(2)}V)`;
+          if (sumCur) {
+            sumCur.textContent = (ma !== null && ma !== undefined) ? `${ma > 0 ? '+' : ''}${Math.round(ma)} mA` : '-- mA';
+            sumCur.style.color = isCharging ? '#38bdf8' : (isDischarging ? '#34d399' : 'var(--text-muted)');
+          }
+          if (sumRun) {
+            if (isCharging) {
+              const chargeMa = Math.round(Math.abs(ma));
+              const remMah = Math.max(0, (100 - pct) / 100 * 3500);
+              const estHours = chargeMa > 50 ? (remMah / chargeMa) : 0;
+              sumRun.textContent = estHours > 0 ? `⚡ Full in ~${estHours.toFixed(1)}h` : '⚡ Full';
+              sumRun.style.color = '#38bdf8';
+            } else if (isDischarging) {
+              const drawMa = Math.round(ma);
+              const hoursLeft = drawMa > 20 ? ((pct / 100 * 3500) / drawMa) : 0;
+              sumRun.textContent = hoursLeft > 0 ? `~${hoursLeft.toFixed(1)}h left` : '--';
+              sumRun.style.color = 'var(--accent)';
+            } else {
+              sumRun.textContent = 'Standby';
+              sumRun.style.color = 'var(--text-muted)';
+            }
+          }
+          if (sumTemp && temp !== null && temp !== undefined) {
+            sumTemp.textContent = `${temp.toFixed(1)}°C`;
+            sumTemp.style.color = temp >= 75 ? '#f87171' : (temp >= 60 ? '#fbbf24' : '#34d399');
+          }
+        }
+
+        // Live update for Satellite Signal Strength (SNR / C/N0)
+        const snrData = data.sat_snr_data;
+        const snrBadge = document.getElementById('snrHealthBadge');
+        const sumSnrSats = document.getElementById('sumSnrSats');
+        const sumAvgSnr = document.getElementById('sumAvgSnr');
+
+        if (snrData) {
+          const avg = snrData.avg_snr;
+          const count = snrData.count;
+          if (sumSnrSats) sumSnrSats.textContent = `${count} Sats (SNR)`;
+          if (sumAvgSnr) sumAvgSnr.textContent = `${avg.toFixed(1)} dB-Hz`;
+
+          if (snrBadge) {
+            if (avg >= 38) {
+              snrBadge.textContent = `🟢 EXCELLENT (${avg.toFixed(1)} dB-Hz)`;
+              snrBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+              snrBadge.style.color = '#34d399';
+              snrBadge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+            } else if (avg >= 28) {
+              snrBadge.textContent = `🟡 GOOD (${avg.toFixed(1)} dB-Hz)`;
+              snrBadge.style.background = 'rgba(245, 158, 11, 0.15)';
+              snrBadge.style.color = '#fbbf24';
+              snrBadge.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+            } else if (count > 0) {
+              snrBadge.textContent = `🔴 LOW SIGNAL (${avg.toFixed(1)} dB-Hz)`;
+              snrBadge.style.background = 'rgba(239, 68, 68, 0.15)';
+              snrBadge.style.color = '#f87171';
+              snrBadge.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+            } else {
+              snrBadge.textContent = `${data.satellites || 0} SATS TRACKED (MSM)`;
+              snrBadge.style.background = 'rgba(56, 189, 248, 0.15)';
+              snrBadge.style.color = '#38bdf8';
+              snrBadge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+            }
+          }
+
+          const avgValEl = document.getElementById('snrAvgVal');
+          if (avgValEl) avgValEl.textContent = count > 0 ? avg.toFixed(1) : '--';
+          const avgSubEl = document.getElementById('snrAvgSubtext');
+          if (avgSubEl) {
+            if (avg >= 38) { avgSubEl.textContent = '🟢 Optimal for RTK Base Phase Lock'; avgSubEl.style.color = '#34d399'; }
+            else if (avg >= 28) { avgSubEl.textContent = '🟡 Good Satellite Signal Lock'; avgSubEl.style.color = '#fbbf24'; }
+            else { avgSubEl.textContent = 'Low Horizon / Obstructed Sky'; avgSubEl.style.color = '#f87171'; }
+          }
+
+          const satCountEl = document.getElementById('snrSatCount');
+          if (satCountEl) satCountEl.textContent = count;
+          const satSubEl = document.getElementById('snrSatSubtext');
+          if (satSubEl) satSubEl.textContent = `${snrData.strong_count || 0} Strong (>38 dB), ${snrData.good_count || 0} Good`;
+
+          const topValEl = document.getElementById('snrTopVal');
+          if (topValEl) topValEl.textContent = count > 0 ? snrData.max_snr.toFixed(1) : '--';
+          const topSubEl = document.getElementById('snrTopSubtext');
+          if (topSubEl) {
+            const topSat = (snrData.sats && snrData.sats.length > 0) ? snrData.sats[0] : null;
+            topSubEl.textContent = topSat ? `${topSat.constellation} ${topSat.id} (Elev ${topSat.elev !== null ? topSat.elev + '°' : '--'})` : '--';
+          }
+
+          const constCountEl = document.getElementById('snrConstCount');
+          if (constCountEl) {
+            const constKeys = Object.keys(snrData.constellations || {});
+            constCountEl.textContent = constKeys.length > 0 ? `${constKeys.length} Bands` : 'Multi-Const.';
+            const constSubEl = document.getElementById('snrConstSubtext');
+            if (constSubEl) {
+              if (constKeys.length > 0) {
+                constSubEl.textContent = constKeys.map(k => `${k}: ${snrData.constellations[k]}`).join(' • ');
+              } else {
+                constSubEl.textContent = 'GPS, GAL, BDS, GLO';
+              }
+            }
+          }
+
+          renderSnrBars(snrData.sats);
         }
 
         // Live update for Hardware Button (GPIO 17)
@@ -2358,6 +2774,111 @@ ntrip_mountpoint: "${data.mountpoint}"`;
       }
     }
 
+    function toggleSection(secName) {
+      const body = document.getElementById(secName + 'Body');
+      const sum = document.getElementById(secName + 'CollapsedSummary');
+      const icon = document.getElementById(secName + 'ToggleIcon');
+      const text = document.getElementById(secName + 'ToggleText');
+
+      if (!body) return;
+      const isHidden = (body.style.display === 'none');
+      if (isHidden) {
+        body.style.display = 'block';
+        if (sum) sum.style.display = 'none';
+        if (icon) icon.textContent = '▲';
+        if (text) text.textContent = 'Hide';
+        localStorage.setItem(secName + '_collapsed', 'false');
+      } else {
+        body.style.display = 'none';
+        if (sum) sum.style.display = 'flex';
+        if (icon) icon.textContent = '▼';
+        if (text) text.textContent = 'Details';
+        localStorage.setItem(secName + '_collapsed', 'true');
+      }
+    }
+
+    function initCollapsibleState() {
+      ['powerHealth', 'snr'].forEach(sec => {
+        const saved = localStorage.getItem(sec + '_collapsed');
+        // Default to collapsed for clean & uncluttered initial presentation
+        const shouldCollapse = (saved === null) ? true : (saved === 'true');
+        const body = document.getElementById(sec + 'Body');
+        const sum = document.getElementById(sec + 'CollapsedSummary');
+        const icon = document.getElementById(sec + 'ToggleIcon');
+        const text = document.getElementById(sec + 'ToggleText');
+        if (body) {
+          body.style.display = shouldCollapse ? 'none' : 'block';
+          if (sum) sum.style.display = shouldCollapse ? 'flex' : 'none';
+          if (icon) icon.textContent = shouldCollapse ? '▼' : '▲';
+          if (text) text.textContent = shouldCollapse ? 'Details' : 'Hide';
+        }
+      });
+    }
+
+    async function requestGsvStream() {
+      try {
+        await fetch('/api/gsv/enable', { method: 'POST' });
+        updateDashboard();
+      } catch (e) {
+        console.error('Failed to request GSV stream:', e);
+      }
+    }
+
+    function renderSnrBars(satList) {
+      const container = document.getElementById('snrChartContainer');
+      if (!container) return;
+
+      if (!satList || satList.length === 0) {
+        container.innerHTML = `
+          <div style="width: 100%; text-align: center; padding: 24px; color: var(--text-muted);">
+            <div style="font-size: 26px; margin-bottom: 6px;">🛰️</div>
+            <div style="font-weight: 600;">Waiting for NMEA GSV satellite signal stream from LC29H...</div>
+            <div style="font-size: 12px; margin-top: 4px; color: #64748b;">(Click "🔄 Poll / Request GSV" above to trigger stream)</div>
+          </div>
+        `;
+        return;
+      }
+
+      const constColors = {
+        'GPS': '#38bdf8',     // Sky blue
+        'Galileo': '#34d399', // Emerald
+        'BeiDou': '#c084fc',  // Purple
+        'GLONASS': '#fb7185', // Rose
+        'QZSS': '#fbbf24'     // Amber
+      };
+
+      let html = '';
+      satList.forEach(sat => {
+        const snr = sat.snr || 0;
+        const heightPct = Math.min(100, Math.max(8, (snr / 50.0) * 100));
+        let barGrad = 'linear-gradient(to top, #059669, #10b981)';
+        let valColor = '#34d399';
+        if (snr < 28) {
+          barGrad = 'linear-gradient(to top, #dc2626, #ef4444)';
+          valColor = '#ef4444';
+        } else if (snr < 38) {
+          barGrad = 'linear-gradient(to top, #d97706, #f59e0b)';
+          valColor = '#fbbf24';
+        }
+        const tagColor = constColors[sat.constellation] || '#94a3b8';
+        const elevStr = (sat.elev !== null && sat.elev !== undefined) ? `${sat.elev}°` : '--';
+        const azStr = (sat.az !== null && sat.az !== undefined) ? `${sat.az}°` : '--';
+        const tooltip = `${sat.constellation} ${sat.id}&#10;SNR: ${snr.toFixed(1)} dB-Hz&#10;Elevation: ${elevStr}&#10;Azimuth: ${azStr}`;
+
+        html += `
+          <div class="snr-col" title="${tooltip}">
+            <div class="snr-val" style="color: ${valColor};">${Math.round(snr)}</div>
+            <div class="snr-bar-track">
+              <div class="snr-bar-fill" style="height: ${heightPct.toFixed(0)}%; background: ${barGrad};"></div>
+            </div>
+            <div class="snr-sat-tag" style="color: ${tagColor}; border-color: ${tagColor}40;">${sat.id}</div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    initCollapsibleState();
     setInterval(updateDashboard, 400);
     updateDashboard();
   </script>
