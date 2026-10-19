@@ -2060,6 +2060,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <span id="boxChargeStage" class="data-val">--</span>
             </div>
             <div class="data-row">
+              <span class="data-label">Estimated Runtime / Charge:</span>
+              <span id="boxEstRuntime" class="data-val" style="color: var(--accent);">--</span>
+            </div>
+            <div class="data-row">
               <span class="data-label">CPU Thermal Health:</span>
               <span id="boxThermalStatus" class="data-val" style="color: #34d399;">Normal</span>
             </div>
@@ -2404,13 +2408,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const w = data.battery_power_w;
           const temp = data.cpu_temp;
 
-          if (v !== null && v !== undefined) {
-            document.getElementById('boxBattV').textContent = v.toFixed(2);
-            document.getElementById('boxBattCurrent').textContent = (ma !== null && ma !== undefined) ? (ma > 0 ? `+${ma.toFixed(0)}` : ma.toFixed(0)) : '--';
-            document.getElementById('boxBattPower').textContent = (w !== null && w !== undefined) ? w.toFixed(2) : '--';
+          let pct = null;
+          let vOcv = (v !== null && v !== undefined) ? v : 0;
+          const isCharging = (ma !== null && ma !== undefined && ma < -15.0);
+          const isDischarging = (ma !== null && ma !== undefined && ma > 15.0);
 
-            const isCharging = (ma !== null && ma !== undefined && ma < -15.0);
-            const isDischarging = (ma !== null && ma !== undefined && ma > 15.0);
+          if (v !== null && v !== undefined) {
+            const vEl = document.getElementById('boxBattV');
+            if (vEl) vEl.textContent = v.toFixed(2);
+            const curEl = document.getElementById('boxBattCurrent');
+            if (curEl) curEl.textContent = (ma !== null && ma !== undefined) ? (ma > 0 ? `+${ma.toFixed(0)}` : ma.toFixed(0)) : '--';
+            const powEl = document.getElementById('boxBattPower');
+            if (powEl) powEl.textContent = (w !== null && w !== undefined) ? w.toFixed(2) : '--';
+
             const bar = document.getElementById('boxBattProgressBar');
             const badge = document.getElementById('boxModeBadge');
             const stateEl = document.getElementById('boxPowerState');
@@ -2418,14 +2428,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             const estEl = document.getElementById('boxEstRuntime');
             const pctEl = document.getElementById('boxBattPct');
 
-            let pct = 0;
-            let vOcv = v;
             if (v >= 9.0) {
               const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
               vOcv = Math.max(9.0, Math.min(12.6, v + (currentA * 0.40)));
               pct = Math.round(Math.max(0, Math.min(100, (vOcv - 10.5) / 2.1 * 100)));
-              document.getElementById('boxChemistry').textContent = '3S LiPo Pack (10.5V - 12.6V)';
-              document.getElementById('boxBattSubtext').textContent = '3S LiPo';
+              const chemEl = document.getElementById('boxChemistry');
+              if (chemEl) chemEl.textContent = '3S LiPo Pack (10.5V - 12.6V)';
+              const subEl = document.getElementById('boxBattSubtext');
+              if (subEl) subEl.textContent = '3S LiPo';
             } else if (v >= 2.8 && v <= 4.3) {
               // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts/wiring ~0.30 = 0.457 ohm)
               const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
@@ -2441,32 +2451,45 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               else pct = Math.max(0, (vOcv - 3.0) / 0.50 * 12);
               pct = Math.round(Math.max(0, Math.min(100, pct)));
 
-              document.getElementById('boxChemistry').textContent = 'Samsung INR18650-35E (3500mAh 1S)';
-              document.getElementById('boxBattSubtext').textContent = 'Samsung 35E (1S)';
+              const chemEl = document.getElementById('boxChemistry');
+              if (chemEl) chemEl.textContent = 'Samsung INR18650-35E (3500mAh 1S)';
+              const subEl = document.getElementById('boxBattSubtext');
+              if (subEl) subEl.textContent = 'Samsung 35E (1S)';
             } else {
               pct = 100;
-              document.getElementById('boxChemistry').textContent = 'Regulated 5V Rail / USB';
-              document.getElementById('boxBattSubtext').textContent = '5V Rail';
+              const chemEl = document.getElementById('boxChemistry');
+              if (chemEl) chemEl.textContent = 'Regulated 5V Rail / USB';
+              const subEl = document.getElementById('boxBattSubtext');
+              if (subEl) subEl.textContent = '5V Rail';
             }
 
-            document.getElementById('boxOcvSubtext').textContent = `Resting EMF: ${vOcv.toFixed(2)} V`;
-            pctEl.textContent = pct;
-            bar.style.width = pct + '%';
+            const ocvEl = document.getElementById('boxOcvSubtext');
+            if (ocvEl) ocvEl.textContent = `Resting EMF: ${vOcv.toFixed(2)} V`;
+            if (pctEl) pctEl.textContent = pct;
+            if (bar) bar.style.width = pct + '%';
 
             if (isCharging) {
               const chargeMa = Math.round(Math.abs(ma));
-              badge.textContent = `⚡ CHARGING (+${chargeMa} mA)`;
-              badge.className = 'status-badge fixed';
-              badge.style.color = '#38bdf8';
-              badge.style.background = 'rgba(56, 189, 248, 0.15)';
-              badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
-              bar.className = 'progress-bar-fill';
-              bar.style.background = 'linear-gradient(90deg, #0284c7, #38bdf8)';
+              if (badge) {
+                badge.textContent = `⚡ CHARGING (+${chargeMa} mA)`;
+                badge.className = 'status-badge fixed';
+                badge.style.color = '#38bdf8';
+                badge.style.background = 'rgba(56, 189, 248, 0.15)';
+                badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+              }
+              if (bar) {
+                bar.className = 'progress-bar-fill';
+                bar.style.background = 'linear-gradient(90deg, #0284c7, #38bdf8)';
+              }
 
-              stateEl.textContent = `🔌 External Power Active (Supplying +${chargeMa} mA to Cell)`;
-              stateEl.style.color = '#38bdf8';
-              document.getElementById('boxCurrentSubtext').textContent = 'Flowing INTO Battery';
-              document.getElementById('boxPowerSubtext').textContent = 'Charging Energy Delivery';
+              if (stateEl) {
+                stateEl.textContent = `🔌 External Power Active (Supplying +${chargeMa} mA to Cell)`;
+                stateEl.style.color = '#38bdf8';
+              }
+              const curSub = document.getElementById('boxCurrentSubtext');
+              if (curSub) curSub.textContent = 'Flowing INTO Battery';
+              const powSub = document.getElementById('boxPowerSubtext');
+              if (powSub) powSub.textContent = 'Charging Energy Delivery';
 
               let stage = 'CC Fast Charge';
               if (v >= 4.18 && chargeMa < 250) {
@@ -2476,60 +2499,73 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               } else {
                 stage = `Constant Current (CC) Fast Charge (~${pct}%)`;
               }
-              stageEl.textContent = stage;
+              if (stageEl) stageEl.textContent = stage;
 
               const remMah = Math.max(0, (100 - pct) / 100 * 3500);
               const estHours = chargeMa > 50 ? (remMah / chargeMa) : 0;
-              estEl.textContent = estHours > 0 ? `⚡ Full in ~${estHours.toFixed(1)} hours` : '⚡ Nearly Full';
-              estEl.style.color = '#38bdf8';
+              if (estEl) {
+                estEl.textContent = estHours > 0 ? `⚡ Full in ~${estHours.toFixed(1)} hours` : '⚡ Nearly Full';
+                estEl.style.color = '#38bdf8';
+              }
             } else if (isDischarging) {
               const drawMa = Math.round(ma);
-              badge.textContent = `🔋 DISCHARGING (-${drawMa} mA)`;
-              badge.className = 'status-badge';
-              badge.style.color = '#34d399';
-              badge.style.background = 'rgba(16, 185, 129, 0.15)';
-              badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
-              bar.className = 'progress-bar-fill';
-              bar.style.background = 'linear-gradient(90deg, #10b981, #34d399)';
+              if (badge) {
+                badge.textContent = `🔋 DISCHARGING (-${drawMa} mA)`;
+                badge.className = 'status-badge';
+                badge.style.color = '#34d399';
+                badge.style.background = 'rgba(16, 185, 129, 0.15)';
+                badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+              }
+              if (bar) {
+                bar.className = 'progress-bar-fill';
+                bar.style.background = 'linear-gradient(90deg, #10b981, #34d399)';
+              }
 
-              stateEl.textContent = `🔋 Battery Powered (Base Station Load: ${drawMa} mA)`;
-              stateEl.style.color = '#34d399';
-              document.getElementById('boxCurrentSubtext').textContent = 'Flowing OUT to System';
-              document.getElementById('boxPowerSubtext').textContent = 'Base Station Consumption';
+              if (stateEl) {
+                stateEl.textContent = `🔋 Battery Powered (Base Station Load: ${drawMa} mA)`;
+                stateEl.style.color = '#34d399';
+              }
+              const curSub = document.getElementById('boxCurrentSubtext');
+              if (curSub) curSub.textContent = 'Flowing OUT to System';
+              const powSub = document.getElementById('boxPowerSubtext');
+              if (powSub) powSub.textContent = 'Base Station Consumption';
 
-              stageEl.textContent = pct > 20 ? 'Healthy Discharge Curve' : 'Low Battery (Charge Soon)';
+              if (stageEl) stageEl.textContent = pct > 20 ? 'Healthy Discharge Curve' : 'Low Battery (Charge Soon)';
               const hoursLeft = drawMa > 20 ? ((pct / 100 * 3500) / drawMa) : 0;
-              estEl.textContent = hoursLeft > 0 ? `Est. Runtime: ~${hoursLeft.toFixed(1)} hours left` : 'Calculating runtime...';
-              estEl.style.color = pct > 20 ? 'var(--accent)' : '#f87171';
+              if (estEl) {
+                estEl.textContent = hoursLeft > 0 ? `Est. Runtime: ~${hoursLeft.toFixed(1)} hours left` : 'Calculating runtime...';
+                estEl.style.color = pct > 20 ? 'var(--accent)' : '#f87171';
+              }
             } else {
-              badge.textContent = '🔌 STANDBY / IDLE';
-              badge.className = 'status-badge';
-              badge.style.color = 'var(--text-muted)';
-              stateEl.textContent = 'Standby / Low Current Draw';
-              stageEl.textContent = 'Stable';
-              estEl.textContent = 'Standby';
+              if (badge) {
+                badge.textContent = '🔌 STANDBY / IDLE';
+                badge.className = 'status-badge';
+                badge.style.color = 'var(--text-muted)';
+              }
+              if (stateEl) stateEl.textContent = 'Standby / Low Current Draw';
+              if (stageEl) stageEl.textContent = 'Stable';
+              if (estEl) {
+                estEl.textContent = 'Standby';
+                estEl.style.color = 'var(--text-muted)';
+              }
             }
           }
 
+          // Live CPU Temperature & Thermal Health (Pi Zero)
           if (temp !== null && temp !== undefined) {
-            document.getElementById('boxCpuTemp').textContent = temp.toFixed(1);
+            const cpuEl = document.getElementById('boxCpuTemp');
+            if (cpuEl) cpuEl.textContent = temp.toFixed(1);
             const cpuSub = document.getElementById('boxCpuSubtext');
             const cpuHealth = document.getElementById('boxThermalStatus');
             if (temp >= 75) {
-              cpuSub.textContent = '⚠️ Thermal Throttling Zone';
-              cpuSub.style.color = '#f87171';
-              cpuHealth.textContent = 'HOT (Throttled)';
-              cpuHealth.style.color = '#f87171';
+              if (cpuSub) { cpuSub.textContent = '⚠️ Thermal Throttling Zone'; cpuSub.style.color = '#f87171'; }
+              if (cpuHealth) { cpuHealth.textContent = 'HOT (Throttled)'; cpuHealth.style.color = '#f87171'; }
             } else if (temp >= 60) {
-              cpuSub.textContent = 'Warm (Active Load)';
-              cpuSub.style.color = '#fbbf24';
-              cpuHealth.textContent = 'Warm';
-              cpuHealth.style.color = '#fbbf24';
+              if (cpuSub) { cpuSub.textContent = 'Warm (Active Load)'; cpuSub.style.color = '#fbbf24'; }
+              if (cpuHealth) { cpuHealth.textContent = 'Warm'; cpuHealth.style.color = '#fbbf24'; }
             } else {
-              cpuSub.textContent = 'Cool & Optimal';
-              cpuSub.style.color = '#34d399';
-              cpuHealth.textContent = 'Cool & Healthy';
-              cpuHealth.style.color = '#34d399';
+              if (cpuSub) { cpuSub.textContent = 'Cool & Optimal'; cpuSub.style.color = '#34d399'; }
+              if (cpuHealth) { cpuHealth.textContent = 'Cool & Healthy'; cpuHealth.style.color = '#34d399'; }
             }
           }
 
@@ -2539,32 +2575,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const sumCur = document.getElementById('sumBattCurrent');
           const sumRun = document.getElementById('sumBattRuntime');
           const sumTemp = document.getElementById('sumCpuTemp');
-          if (sumPct) sumPct.textContent = `${pct}%`;
-          if (sumV) sumV.textContent = `${v.toFixed(2)}V (EMF: ${vOcv.toFixed(2)}V)`;
+
+          if (sumPct) {
+            sumPct.textContent = (pct !== null) ? `${pct}%` : '--%';
+            sumPct.style.color = isCharging ? '#38bdf8' : (pct !== null && pct <= 20 ? '#f87171' : 'var(--success)');
+          }
+          if (sumV) {
+            if (v !== null && v !== undefined) {
+              sumV.textContent = `${v.toFixed(2)}V`;
+            } else {
+              sumV.textContent = '--V';
+            }
+          }
           if (sumCur) {
-            sumCur.textContent = (ma !== null && ma !== undefined) ? `${ma > 0 ? '+' : ''}${Math.round(ma)} mA` : '-- mA';
-            sumCur.style.color = isCharging ? '#38bdf8' : (isDischarging ? '#34d399' : 'var(--text-muted)');
+            if (ma !== null && ma !== undefined) {
+              sumCur.textContent = `${ma > 0 ? '+' : ''}${Math.round(ma)} mA`;
+              sumCur.style.color = isCharging ? '#38bdf8' : (isDischarging ? '#34d399' : 'var(--text-muted)');
+            } else {
+              sumCur.textContent = '-- mA';
+              sumCur.style.color = 'var(--text-muted)';
+            }
           }
           if (sumRun) {
             if (isCharging) {
-              const chargeMa = Math.round(Math.abs(ma));
-              const remMah = Math.max(0, (100 - pct) / 100 * 3500);
+              const chargeMa = (ma !== null && ma !== undefined) ? Math.round(Math.abs(ma)) : 0;
+              const curPct = (pct !== null) ? pct : 0;
+              const remMah = Math.max(0, (100 - curPct) / 100 * 3500);
               const estHours = chargeMa > 50 ? (remMah / chargeMa) : 0;
               sumRun.textContent = estHours > 0 ? `⚡ Full in ~${estHours.toFixed(1)}h` : '⚡ Full';
               sumRun.style.color = '#38bdf8';
             } else if (isDischarging) {
-              const drawMa = Math.round(ma);
-              const hoursLeft = drawMa > 20 ? ((pct / 100 * 3500) / drawMa) : 0;
+              const drawMa = (ma !== null && ma !== undefined) ? Math.round(ma) : 0;
+              const curPct = (pct !== null) ? pct : 0;
+              const hoursLeft = drawMa > 20 ? ((curPct / 100 * 3500) / drawMa) : 0;
               sumRun.textContent = hoursLeft > 0 ? `~${hoursLeft.toFixed(1)}h left` : '--';
-              sumRun.style.color = 'var(--accent)';
+              sumRun.style.color = curPct > 20 ? 'var(--accent)' : '#f87171';
             } else {
               sumRun.textContent = 'Standby';
               sumRun.style.color = 'var(--text-muted)';
             }
           }
-          if (sumTemp && temp !== null && temp !== undefined) {
-            sumTemp.textContent = `${temp.toFixed(1)}°C`;
-            sumTemp.style.color = temp >= 75 ? '#f87171' : (temp >= 60 ? '#fbbf24' : '#34d399');
+          if (sumTemp) {
+            if (temp !== null && temp !== undefined) {
+              sumTemp.textContent = `${temp.toFixed(1)}°C`;
+              sumTemp.style.color = temp >= 75 ? '#f87171' : (temp >= 60 ? '#fbbf24' : '#34d399');
+            } else {
+              sumTemp.textContent = '--°C';
+              sumTemp.style.color = 'var(--text-muted)';
+            }
           }
         }
 
@@ -2700,26 +2758,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           }
         }
 
-        document.getElementById('surveyTime').textContent = `${data.survey_duration}s / ${data.survey_target_duration}s`;
-        document.getElementById('surveyAcc').textContent = `${data.survey_accuracy.toFixed(2)} m`;
-        document.getElementById('satsCount').textContent = data.satellites;
-        document.getElementById('hdopVal').textContent = data.hdop.toFixed(2);
-        document.getElementById('rtcmIngested').textContent = `${data.rtcm_ingested_kb.toFixed(1)} KB`;
-        document.getElementById('rtcmBroadcast').textContent = `${data.rtcm_broadcasted_kb.toFixed(1)} KB`;
+        const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        setTxt('surveyTime', `${data.survey_duration}s / ${data.survey_target_duration}s`);
+        setTxt('surveyAcc', `${data.survey_accuracy.toFixed(2)} m`);
+        setTxt('satsCount', data.satellites);
+        setTxt('hdopVal', data.hdop.toFixed(2));
+        setTxt('rtcmIngested', `${data.rtcm_ingested_kb.toFixed(1)} KB`);
+        setTxt('rtcmBroadcast', `${data.rtcm_broadcasted_kb.toFixed(1)} KB`);
 
-        document.getElementById('baseLat').textContent = data.latitude.toFixed(8) + '°';
-        document.getElementById('baseLon').textContent = data.longitude.toFixed(8) + '°';
-        document.getElementById('baseAlt').textContent = data.altitude.toFixed(2) + ' m';
-        document.getElementById('mapsBtn').href = `https://www.google.com/maps?q=${data.latitude},${data.longitude}`;
+        setTxt('baseLat', data.latitude.toFixed(8) + '°');
+        setTxt('baseLon', data.longitude.toFixed(8) + '°');
+        setTxt('baseAlt', data.altitude.toFixed(2) + ' m');
+        const mapsBtn = document.getElementById('mapsBtn');
+        if (mapsBtn) mapsBtn.href = `https://www.google.com/maps?q=${data.latitude},${data.longitude}`;
 
-        document.getElementById('roversCount').textContent = `${data.active_rovers_count} Active`;
-        document.getElementById('ntripPort').textContent = data.ntrip_port;
-        document.getElementById('mountpointVal').textContent = `/${data.mountpoint}`;
+        setTxt('roversCount', `${data.active_rovers_count} Active`);
+        setTxt('ntripPort', data.ntrip_port);
+        setTxt('mountpointVal', `/${data.mountpoint}`);
 
-        document.getElementById('configSnippet').textContent = 
-`ntrip_caster: "${data.local_ip}"
-ntrip_port: ${data.ntrip_port}
-ntrip_mountpoint: "${data.mountpoint}"`;
+        setTxt('configSnippet', `ntrip_caster: "${data.local_ip}"\nntrip_port: ${data.ntrip_port}\nntrip_mountpoint: "${data.mountpoint}"`);
 
         // Populate Saved Benchmark Locations dropdown
         const locSelect = document.getElementById('locationsSelect');
