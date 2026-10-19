@@ -53,6 +53,20 @@ Therefore, you can connect the INA219 **in series** to monitor **Voltage, Curren
 
 ---
 
+## 1.2 Optional: Hardware Pushbutton (GPIO 17 / D17)
+
+A physical tactile button wired to GPIO 17 provides real-time button push status on the Web Dashboard:
+
+| Button Connection | Pi Zero Header | Mode / Function | Notes |
+| :--- | :--- | :--- | :--- |
+| **Terminal 1** | **Pin 11** (GPIO 17 / D17) | Input with Internal Pull-Up | Pulled HIGH (3.3V) when released |
+| **Terminal 2** | **Pin 9** (or Pin 6, 14, 20) | Ground (`GND`) | Connects GPIO 17 to GND when pressed |
+
+- **Terminal Test**: Run `python3 ~/github/ConeRobot/scripts/test_base_button.py`
+- **Dashboard Indicator**: Displays `🔘 D17: RELEASED` (gray) vs `🔘 D17: PUSHED` (glowing emerald green) and logs live state in the **Battery, Power & Thermal Health** box.
+
+---
+
 ## 2. System Prerequisites
 
 Before launching the base station software, ensure your Raspberry Pi Zero has been prepared following the dedicated **[Raspberry Pi Zero Setup Guide](RPI_ZERO_SETUP.md)**:

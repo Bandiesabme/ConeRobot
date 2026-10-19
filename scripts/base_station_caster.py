@@ -137,6 +137,12 @@ class NTRIPBaseCaster:
         self.base_1005_offset_m: Optional[float] = None
         self._last_1005_warn_time = 0.0
 
+        # Hardware Button Input (GPIO 17 / D17 to GND with Internal Pull-Up)
+        self.button_pin = 17
+        self.button_dev = None
+        self.button_backend = None
+        self._init_button()
+
         # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
             self._apply_fixed_coords(fixed_lat, fixed_lon, fixed_alt or 0.0, "Command-Line Arguments")
@@ -535,6 +541,9 @@ class NTRIPBaseCaster:
             ma = batt["current_ma"]
             print(f"  • 🔋 Battery Monitor: {v:.2f} V | {ma:.1f} mA (INA219 @ 0x40)")
             self._add_log(f"🔋 INA219 Battery Monitor active: {v:.2f} V, {ma:.1f} mA")
+        if self.button_backend:
+            print(f"  • 🔘 Button Monitor : Active on GPIO {self.button_pin} ({self.button_backend})")
+            self._add_log(f"🔘 Hardware button monitor active on GPIO {self.button_pin} ({self.button_backend})")
         if self.is_static_fixed:
             print(f"  • Mode              : 🎯 STATIC FIXED BASE (0 mm Drift)")
             print(f"  • Coordinates       : {self.survey_lat:.8f}°, {self.survey_lon:.8f}°, {self.survey_alt:.2f}m")
@@ -1102,6 +1111,62 @@ class NTRIPBaseCaster:
             pass
         return None
 
+    def _init_button(self) -> None:
+        """Initializes GPIO 17 button input with internal pull-up resistor (Active-LOW)."""
+        # 1. Try gpiozero (official Raspberry Pi recommended)
+        try:
+            from gpiozero import Button
+            self.button_dev = Button(self.button_pin, pull_up=True, bounce_time=0.05)
+            self.button_backend = "gpiozero"
+            return
+        except Exception:
+            pass
+
+        # 2. Try RPi.GPIO
+        try:
+            import RPi.GPIO as GPIO
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(self.button_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+            self.button_backend = "rpi.gpio"
+            return
+        except Exception:
+            pass
+
+        # 3. Try gpiod
+        try:
+            import gpiod
+            chip = gpiod.Chip('gpiochip0')
+            line = chip.get_line(self.button_pin)
+            line.request(consumer="conerobot-btn", type=gpiod.LINE_REQ_DIR_IN, flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP)
+            self.button_dev = line
+            self.button_backend = "gpiod"
+            return
+        except Exception:
+            pass
+
+        self.button_backend = None
+
+    def is_button_pressed(self) -> bool:
+        """Returns True if button on GPIO 17 is actively pressed (pulled to GND)."""
+        if self.button_backend == "gpiozero" and self.button_dev:
+            try:
+                return bool(self.button_dev.is_pressed)
+            except Exception:
+                return False
+        elif self.button_backend == "rpi.gpio":
+            try:
+                import RPi.GPIO as GPIO
+                return GPIO.input(self.button_pin) == GPIO.LOW
+            except Exception:
+                return False
+        elif self.button_backend == "gpiod" and self.button_dev:
+            try:
+                return self.button_dev.get_value() == 0
+            except Exception:
+                return False
+        return False
+
     def get_status_json(self, client_host: Optional[str] = None) -> dict:
         """Generates real-time telemetry dictionary for HTTP dashboard."""
         with self.clients_lock:
@@ -1140,6 +1205,8 @@ class NTRIPBaseCaster:
             "battery_voltage": batt["voltage"] if batt else None,
             "battery_current_ma": batt["current_ma"] if batt else None,
             "battery_power_w": batt["power_w"] if batt else None,
+            "button_pressed": self.is_button_pressed(),
+            "button_backend": self.button_backend,
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
             "remaining_sec": remaining_sec,
@@ -1469,6 +1536,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
       <div style="display: flex; align-items: center; gap: 12px;">
+        <div id="btnBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1);">
+          <span>🔘 D17:</span>
+          <span id="btnVal" style="font-family: ui-monospace, monospace; font-weight: 700; color: #94a3b8;">RELEASED</span>
+        </div>
         <div id="batteryBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1); display: none;">
           <span>🔋 Battery:</span>
           <span id="batteryVal" style="color: #34d399; font-family: ui-monospace, monospace; font-weight: 700;">-- V</span>
@@ -1609,6 +1680,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="data-row">
             <span class="data-label">CPU Thermal Health:</span>
             <span id="boxThermalStatus" class="data-val" style="color: #34d399;">Normal</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Hardware Button (GPIO 17 / D17):</span>
+            <span id="boxBtnStatus" class="data-val" style="color: #94a3b8;">⚪ Released (Open)</span>
           </div>
         </div>
       </div>
@@ -2047,6 +2122,39 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           }
         }
 
+        // Live update for Hardware Button (GPIO 17)
+        if (data.button_pressed !== undefined) {
+          const btnBadge = document.getElementById('btnBadge');
+          const btnVal = document.getElementById('btnVal');
+          const boxBtn = document.getElementById('boxBtnStatus');
+
+          if (data.button_pressed) {
+            btnBadge.style.background = 'rgba(16, 185, 129, 0.25)';
+            btnBadge.style.borderColor = 'rgba(16, 185, 129, 0.6)';
+            btnBadge.style.boxShadow = '0 0 15px rgba(16, 185, 129, 0.4)';
+            btnVal.textContent = 'PUSHED';
+            btnVal.style.color = '#10b981';
+
+            if (boxBtn) {
+              boxBtn.textContent = '🟢 PUSHED (GND Active)';
+              boxBtn.style.color = '#10b981';
+              boxBtn.style.fontWeight = '700';
+            }
+          } else {
+            btnBadge.style.background = 'rgba(255, 255, 255, 0.05)';
+            btnBadge.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+            btnBadge.style.boxShadow = 'none';
+            btnVal.textContent = 'RELEASED';
+            btnVal.style.color = '#94a3b8';
+
+            if (boxBtn) {
+              boxBtn.textContent = '⚪ Released (Open)';
+              boxBtn.style.color = '#94a3b8';
+              boxBtn.style.fontWeight = '600';
+            }
+          }
+        }
+
         document.getElementById('surveyTime').textContent = `${data.survey_duration}s / ${data.survey_target_duration}s`;
         document.getElementById('surveyAcc').textContent = `${data.survey_accuracy.toFixed(2)} m`;
         document.getElementById('satsCount').textContent = data.satellites;
@@ -2121,7 +2229,7 @@ ntrip_mountpoint: "${data.mountpoint}"`;
       }
     }
 
-    setInterval(updateDashboard, 1000);
+    setInterval(updateDashboard, 400);
     updateDashboard();
   </script>
 </body>
