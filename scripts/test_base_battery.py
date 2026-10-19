@@ -130,6 +130,10 @@ def main():
     print(f"  • Mode        : Series Sensing (Voltage + Current + Power)")
     print("=" * 68 + "\n")
 
+    from collections import deque
+    v_queue = deque(maxlen=5)
+    ma_queue = deque(maxlen=5)
+
     while True:
         data, err = read_ina219_data(args.bus, args.address)
         timestamp = time.strftime("%H:%M:%S")
@@ -145,9 +149,23 @@ def main():
             if args.loop <= 0:
                 sys.exit(1)
         else:
-            v = data["voltage"]
-            ma = data["current_ma"]
-            w = data["power_w"]
+            v_raw = data["voltage"]
+            ma_raw = data["current_ma"]
+
+            # Reset history if a sharp step change occurs (plug/unplug)
+            if ma_queue:
+                last_ma = sum(ma_queue) / len(ma_queue)
+                if (last_ma < -100 and ma_raw > 50) or (last_ma > 50 and ma_raw < -100):
+                    v_queue.clear()
+                    ma_queue.clear()
+
+            v_queue.append(v_raw)
+            ma_queue.append(ma_raw)
+
+            v = sum(v_queue) / len(v_queue)
+            ma = sum(ma_queue) / len(ma_queue)
+            w = v * (abs(ma) / 1000.0)
+
             estimate = get_charge_estimate(v, ma)
             print(f"[{timestamp}] ⚡ {v:5.2f} V  |  📥 {ma:6.1f} mA  |  🔥 {w:4.2f} W  |  {estimate}")
 

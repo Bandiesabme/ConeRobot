@@ -143,6 +143,11 @@ class NTRIPBaseCaster:
         self.button_backend = None
         self._init_button()
 
+        # Battery Sensor Smoothing & Moving Average (~3 second sliding window)
+        self._batt_v_history: Deque[float] = deque(maxlen=8)
+        self._batt_ma_history: Deque[float] = deque(maxlen=8)
+        self._ina219_configured = False
+
         # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
             self._apply_fixed_coords(fixed_lat, fixed_lon, fixed_alt or 0.0, "Command-Line Arguments")
@@ -1065,9 +1070,8 @@ class NTRIPBaseCaster:
 
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-    @staticmethod
-    def _get_battery_data() -> Optional[dict]:
-        """Reads INA219 battery bus voltage, shunt current, and power over I2C (address 0x40)."""
+    def _get_battery_data(self) -> Optional[dict]:
+        """Reads INA219 battery bus voltage, shunt current, and power with hardware 128x averaging and sliding window filter."""
         try:
             try:
                 import smbus
@@ -1075,23 +1079,48 @@ class NTRIPBaseCaster:
                 import smbus2 as smbus  # type: ignore
             bus = smbus.SMBus(1)
             try:
-                # Register 0x02: Bus Voltage
+                # 1. Enable Hardware 128-sample ADC averaging in INA219 config register (0x00)
+                if not self._ina219_configured:
+                    try:
+                        # 0x3FFF: 32V FSR, 320mV shunt, 128x averaging (68.1ms), continuous mode
+                        bus.write_word_data(0x40, 0x00, ((0x3F) | (0xFF << 8)))
+                        self._ina219_configured = True
+                    except Exception:
+                        pass
+
+                # 2. Register 0x02: Bus Voltage (LSB = 4 mV)
                 raw_v = bus.read_word_data(0x40, 0x02)
                 raw_v_swapped = ((raw_v & 0xFF) << 8) | (raw_v >> 8)
-                voltage = round(((raw_v_swapped >> 3) & 0x1FFF) * 0.004, 2)
+                raw_v_val = ((raw_v_swapped >> 3) & 0x1FFF) * 0.004
 
-                # Register 0x01: Shunt Current (signed 16-bit, 10 uV LSB / 0.1 ohm = 0.1 mA)
+                # 3. Register 0x01: Shunt Current (signed 16-bit, 10 µV LSB / 0.1 Ω = 0.1 mA)
                 raw_s = bus.read_word_data(0x40, 0x01)
                 raw_s_swapped = ((raw_s & 0xFF) << 8) | (raw_s >> 8)
                 if raw_s_swapped >= 32768:
                     raw_s_swapped -= 65536
-                current_ma = round(raw_s_swapped * 0.1, 1)
-                power_w = round(voltage * (abs(current_ma) / 1000.0), 2)
+                raw_ma_val = raw_s_swapped * 0.1
+
+                # 4. Step-change detection: Flush window immediately if charger is plugged/unplugged
+                if self._batt_ma_history:
+                    last_avg_ma = sum(self._batt_ma_history) / len(self._batt_ma_history)
+                    if (last_avg_ma < -100 and raw_ma_val > 50) or (last_avg_ma > 50 and raw_ma_val < -100):
+                        self._batt_v_history.clear()
+                        self._batt_ma_history.clear()
+
+                self._batt_v_history.append(raw_v_val)
+                self._batt_ma_history.append(raw_ma_val)
+
+                # 5. Sliding window moving average (~3 seconds smooth)
+                avg_v = round(sum(self._batt_v_history) / len(self._batt_v_history), 2)
+                avg_ma = round(sum(self._batt_ma_history) / len(self._batt_ma_history), 1)
+                power_w = round(avg_v * (abs(avg_ma) / 1000.0), 2)
 
                 return {
-                    "voltage": voltage,
-                    "current_ma": current_ma,
-                    "power_w": power_w
+                    "voltage": avg_v,
+                    "current_ma": avg_ma,
+                    "power_w": power_w,
+                    "raw_voltage": round(raw_v_val, 2),
+                    "raw_current_ma": round(raw_ma_val, 1)
                 }
             finally:
                 bus.close()
