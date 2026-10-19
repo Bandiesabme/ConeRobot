@@ -87,8 +87,8 @@ def get_charge_estimate(voltage: float, current_ma: float = 0.0) -> str:
         return f"5V Rail ({voltage:.2f}V)"
     elif voltage >= 2.8:
         # 1S 18650 Li-ion cell (Samsung 35E: 3.0V cutoff to 4.2V full, 3500 mAh)
-        # Dynamic loop IR drop compensation (Shunt 0.10 ohm + cell IR ~0.06 ohm + contacts ~0.25 ohm = 0.41 ohm)
-        v_ocv = max(3.0, min(4.20, voltage + (current_ma / 1000.0) * 0.41))
+        # Dynamic loop IR drop compensation (Shunt 0.10 ohm + cell IR ~0.06 ohm + contacts/wiring ~0.30 ohm = 0.457 ohm)
+        v_ocv = max(3.0, min(4.20, voltage + (current_ma / 1000.0) * 0.457))
 
         # Empirical Samsung 35E resting OCV discharge curve
         if v_ocv >= 4.15: pct = int(95 + (v_ocv - 4.15) * 100)

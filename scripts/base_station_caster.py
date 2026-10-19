@@ -2013,9 +2013,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               const vOcv = Math.max(9.0, Math.min(12.6, v + (currentA * 0.40)));
               pct = Math.round(Math.max(0, Math.min(100, (vOcv - 10.5) / 2.1 * 100)));
             } else if (v >= 2.8 && v <= 4.3) {
-              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts ~0.25 = 0.41 ohm)
+              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts/wiring ~0.30 = 0.457 ohm)
               const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
-              const vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.41)));
+              const vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.457)));
               if (vOcv >= 4.15) pct = 95 + (vOcv - 4.15) * 100;
               else if (vOcv >= 4.05) pct = 85 + (vOcv - 4.05) * 100;
               else if (vOcv >= 3.95) pct = 75 + (vOcv - 3.95) * 100;
@@ -2073,9 +2073,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               document.getElementById('boxChemistry').textContent = '3S LiPo Pack (10.5V - 12.6V)';
               document.getElementById('boxBattSubtext').textContent = '3S LiPo';
             } else if (v >= 2.8 && v <= 4.3) {
-              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts ~0.25 = 0.41 ohm)
+              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts/wiring ~0.30 = 0.457 ohm)
               const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
-              vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.41)));
+              vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.457)));
 
               if (vOcv >= 4.15) pct = 95 + (vOcv - 4.15) * 100;
               else if (vOcv >= 4.05) pct = 85 + (vOcv - 4.05) * 100;
