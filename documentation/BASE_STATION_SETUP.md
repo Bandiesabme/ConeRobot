@@ -63,7 +63,14 @@ A physical tactile button wired to GPIO 17 provides real-time button push status
 | **Terminal 2** | **Pin 9** (or Pin 6, 14, 20) | Ground (`GND`) | Connects GPIO 17 to GND when pressed |
 
 - **Terminal Test**: Run `python3 ~/github/ConeRobot/scripts/test_base_button.py`
-- **Dashboard Indicator**: Displays `🔘 D17: RELEASED` (gray) vs `🔘 D17: PUSHED` (glowing emerald green) and logs live state in the **Battery, Power & Thermal Health** box.
+- **Dashboard Indicator**: Displays `🔘 D17: RELEASED` (gray) vs `🟢 PUSHED` (glowing emerald green) and logs live state in the **Battery, Power & Thermal Health** box.
+- **🛑 Safe Shutdown Feature (3s Hold)**:
+  - **Press & hold for 3 seconds**: Triggers graceful Linux shutdown (`sudo shutdown -h now`), syncing filesystems and unmounting the SD card safely.
+  - **The Safe Power-Down Sequence**:
+    1. Hold button for **3 seconds** $\rightarrow$ UI alerts `🛑 SHUTTING DOWN`.
+    2. Watch the green Activity (ACT) LED on the Pi Zero: it will blink 10 times in a slow pulse and turn dark.
+    3. **Flip your physical toggle switch to OFF**: Cuts power completely so the 5V booster doesn't slowly drain the 18650 cell in storage.
+  - **Powering back ON**: Simply flip the toggle switch back to ON — the Pi Zero boots immediately.
 
 ---
 

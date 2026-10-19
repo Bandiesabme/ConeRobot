@@ -141,6 +141,9 @@ class NTRIPBaseCaster:
         self.button_pin = 17
         self.button_dev = None
         self.button_backend = None
+        self._button_press_start: Optional[float] = None
+        self._button_held_sec: float = 0.0
+        self._shutdown_initiated: bool = False
         self._init_button()
 
         # Battery Sensor Smoothing & Moving Average (~3 second sliding window)
@@ -572,7 +575,12 @@ class NTRIPBaseCaster:
         beacon_thread = threading.Thread(target=self._udp_beacon_loop, daemon=True)
         beacon_thread.start()
 
-        # 5. Run serial reader in main thread
+        # 5. Start background hardware button monitor (tracks press & triggers safe shutdown on 3s hold)
+        if self.button_backend:
+            btn_thread = threading.Thread(target=self._button_monitor_loop, daemon=True)
+            btn_thread.start()
+
+        # 6. Run serial reader in main thread
         self._serial_reader_loop()
 
     def _tcp_server_loop(self) -> None:
@@ -1196,6 +1204,43 @@ class NTRIPBaseCaster:
                 return False
         return False
 
+    def _button_monitor_loop(self) -> None:
+        """Monitors GPIO 17 button: tracks hold duration and initiates safe OS shutdown if held >= 3s."""
+        while self.is_running:
+            try:
+                pressed = self.is_button_pressed()
+                now = time.time()
+                if pressed:
+                    if self._button_press_start is None:
+                        self._button_press_start = now
+                    held = now - self._button_press_start
+                    self._button_held_sec = held
+                    if held >= 3.0 and not self._shutdown_initiated:
+                        self._shutdown_initiated = True
+                        self._add_log("🛑 SHUTDOWN BUTTON HELD (3s): Safely halting Linux OS & unmounting SD card...", "WARN")
+                        print("\n" + "!" * 75)
+                        print("  🛑 SAFE SHUTDOWN INITIATED VIA HARDWARE BUTTON (3s HOLD)")
+                        print("  • Linux is unmounting SD card and halting CPU.")
+                        print("  • Wait for green ACT LED to blink 10 times and turn off.")
+                        print("  • Then flip the toggle switch to OFF to cut booster battery drain.")
+                        print("!" * 75 + "\n")
+                        try:
+                            import subprocess
+                            subprocess.run(["sync"], timeout=2.0)
+                        except Exception:
+                            pass
+                        try:
+                            import subprocess
+                            subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+                        except Exception as e:
+                            self._add_log(f"Failed to execute shutdown command: {e}", "ERROR")
+                else:
+                    self._button_press_start = None
+                    self._button_held_sec = 0.0
+            except Exception:
+                pass
+            time.sleep(0.05)
+
     def get_status_json(self, client_host: Optional[str] = None) -> dict:
         """Generates real-time telemetry dictionary for HTTP dashboard."""
         with self.clients_lock:
@@ -1235,6 +1280,8 @@ class NTRIPBaseCaster:
             "battery_current_ma": batt["current_ma"] if batt else None,
             "battery_power_w": batt["power_w"] if batt else None,
             "button_pressed": self.is_button_pressed(),
+            "button_held_sec": round(self._button_held_sec, 1),
+            "button_shutting_down": self._shutdown_initiated,
             "button_backend": self.button_backend,
             "survey_duration": self.survey_duration,
             "survey_target_duration": self.survey_target_duration,
@@ -2186,7 +2233,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const btnVal = document.getElementById('btnVal');
           const boxBtn = document.getElementById('boxBtnStatus');
 
-          if (data.button_pressed) {
+          if (data.button_shutting_down) {
+            btnBadge.style.background = 'rgba(239, 68, 68, 0.3)';
+            btnBadge.style.borderColor = 'rgba(239, 68, 68, 0.8)';
+            btnBadge.style.boxShadow = '0 0 20px rgba(239, 68, 68, 0.6)';
+            btnVal.textContent = 'SHUTTING DOWN';
+            btnVal.style.color = '#ef4444';
+
+            if (boxBtn) {
+              boxBtn.textContent = '🛑 SHUTTING DOWN (Wait for Green LED, then switch OFF)';
+              boxBtn.style.color = '#ef4444';
+              boxBtn.style.fontWeight = '700';
+            }
+          } else if (data.button_held_sec >= 0.5) {
+            btnBadge.style.background = 'rgba(245, 158, 11, 0.3)';
+            btnBadge.style.borderColor = 'rgba(245, 158, 11, 0.8)';
+            btnBadge.style.boxShadow = '0 0 15px rgba(245, 158, 11, 0.5)';
+            btnVal.textContent = `HOLD: ${data.button_held_sec.toFixed(1)}s / 3.0s`;
+            btnVal.style.color = '#f59e0b';
+
+            if (boxBtn) {
+              boxBtn.textContent = `⚠️ Holding for Safe Shutdown (${data.button_held_sec.toFixed(1)}s / 3.0s)...`;
+              boxBtn.style.color = '#f59e0b';
+              boxBtn.style.fontWeight = '700';
+            }
+          } else if (data.button_pressed) {
             btnBadge.style.background = 'rgba(16, 185, 129, 0.25)';
             btnBadge.style.borderColor = 'rgba(16, 185, 129, 0.6)';
             btnBadge.style.boxShadow = '0 0 15px rgba(16, 185, 129, 0.4)';
