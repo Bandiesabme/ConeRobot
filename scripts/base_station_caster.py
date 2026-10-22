@@ -174,6 +174,24 @@ class NTRIPBaseCaster:
 
         self._add_log(f"Base Station initialized. Serial: {self.serial_port}, Web: http://{self.local_ip}:{self.web_port}")
 
+    @staticmethod
+    def _atomic_write_json(path: str, data: dict) -> None:
+        """Power-loss-safe JSON write: temp file + fsync + atomic rename."""
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        try:
+            dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except Exception:
+            pass
+
     def _load_locations_store(self) -> dict:
         """Loads all named location profiles from JSON with migration from legacy format."""
         if os.path.exists(self.locations_file):
@@ -203,8 +221,7 @@ class NTRIPBaseCaster:
     def _save_locations_store(self, store: dict) -> None:
         """Persists location profiles to disk."""
         try:
-            with open(self.locations_file, "w") as f:
-                json.dump(store, f, indent=2)
+            self._atomic_write_json(self.locations_file, store)
         except Exception as e:
             self._add_log(f"Failed to save locations: {e}", "ERROR")
 
@@ -240,15 +257,14 @@ class NTRIPBaseCaster:
 
         # Also write legacy single config for backward compatibility
         try:
-            with open(self.config_file, "w") as f:
-                json.dump({
-                    "is_locked": True,
-                    "lat": round(lat, 8),
-                    "lon": round(lon, 8),
-                    "alt": round(alt, 2),
-                    "samples": len(self.coord_samples) or 100,
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }, f, indent=2)
+            self._atomic_write_json(self.config_file, {
+                "is_locked": True,
+                "lat": round(lat, 8),
+                "lon": round(lon, 8),
+                "alt": round(alt, 2),
+                "samples": len(self.coord_samples) or 100,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
         except Exception:
             pass
 
@@ -491,15 +507,14 @@ class NTRIPBaseCaster:
 
         # Save to disk
         try:
-            with open(self.config_file, "w") as f:
-                json.dump({
-                    "is_locked": True,
-                    "lat": round(mean_lat, 8),
-                    "lon": round(mean_lon, 8),
-                    "alt": round(mean_alt, 2),
-                    "samples": len(self.coord_samples),
-                    "timestamp": self.locked_timestamp
-                }, f, indent=2)
+            self._atomic_write_json(self.config_file, {
+                "is_locked": True,
+                "lat": round(mean_lat, 8),
+                "lon": round(mean_lon, 8),
+                "alt": round(mean_alt, 2),
+                "samples": len(self.coord_samples),
+                "timestamp": self.locked_timestamp
+            })
             self._add_log(f"💾 Saved permanent static coordinates to {os.path.basename(self.config_file)}")
 
             # Also update locations store active position
