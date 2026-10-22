@@ -1,0 +1,1390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ConeRobot RTK Base Station Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(23, 32, 54, 0.75);
+      --card-border: rgba(56, 189, 248, 0.15);
+      --accent: #38bdf8;
+      --accent-glow: rgba(56, 189, 248, 0.35);
+      --success: #10b981;
+      --success-glow: rgba(16, 185, 129, 0.3);
+      --warning: #f59e0b;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-icon { font-size: 32px; }
+    .brand-title { font-size: 24px; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
+    .brand-subtitle { font-size: 13px; color: var(--text-muted); }
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 9999px;
+      font-size: 14px;
+      font-weight: 600;
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--warning);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+    }
+    .status-badge.locked {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+      border-color: rgba(16, 185, 129, 0.3);
+      box-shadow: 0 0 15px var(--success-glow);
+    }
+    .status-badge.fixed {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border-color: rgba(56, 189, 248, 0.3);
+      box-shadow: 0 0 15px var(--accent-glow);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 20px;
+      backdrop-filter: blur(12px);
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .metric-value { font-size: 32px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+    .metric-unit { font-size: 16px; color: var(--text-muted); margin-left: 4px; }
+    .data-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 14px;
+    }
+    .data-row:last-child { border-bottom: none; }
+    .data-label { color: var(--text-muted); }
+    .data-val { font-weight: 600; font-family: ui-monospace, monospace; }
+    .progress-container { margin: 16px 0; }
+    .progress-bar-bg {
+      height: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #38bdf8, #818cf8);
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    .progress-bar-fill.complete {
+      background: linear-gradient(90deg, #10b981, #34d399);
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px 14px;
+      background: #0284c7;
+      color: #fff;
+      text-decoration: none;
+      border: none;
+      cursor: pointer;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #0369a1; }
+    .btn-warning { background: #d97706; }
+    .btn-warning:hover { background: #b45309; }
+    .btn-secondary { background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.15); }
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.2); }
+    .button-group { display: flex; gap: 10px; margin-top: 14px; }
+    .code-box {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      color: #38bdf8;
+      white-space: pre;
+      overflow-x: auto;
+      margin-top: 8px;
+    }
+    .terminal-box {
+      background: #050811;
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 12px;
+      font-family: ui-monospace, monospace;
+      font-size: 12px;
+      color: #a5f3fc;
+      height: 200px;
+      overflow-y: auto;
+    }
+    .log-line { margin-bottom: 4px; }
+    .log-time { color: #64748b; margin-right: 8px; }
+    .log-msg.error { color: #f87171; }
+    .log-msg.warn { color: #fbbf24; }
+
+    /* Collapsible Sections & Roll-down Panels */
+    .collapsible-card {
+      transition: all 0.25s ease;
+    }
+    .collapsible-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+      padding: 2px 0;
+      gap: 12px;
+    }
+    .collapsible-header:hover .collapsible-title {
+      color: #fff;
+    }
+    .collapsible-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: color 0.2s;
+    }
+    .toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 9999px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .toggle-btn:hover {
+      background: rgba(255, 255, 255, 0.16);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .collapsed-summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-muted);
+      background: rgba(0, 0, 0, 0.35);
+      padding: 4px 12px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      flex-wrap: wrap;
+    }
+    .sum-sep { color: rgba(255, 255, 255, 0.2); }
+
+    /* Satellite SNR Bar Chart */
+    .snr-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 18px 10px 10px 10px;
+      min-height: 195px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(56, 189, 248, 0.3) transparent;
+    }
+    .snr-col {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 36px;
+      flex: 0 0 auto;
+      position: relative;
+      cursor: pointer;
+    }
+    .snr-val {
+      font-size: 11px;
+      font-weight: 700;
+      font-family: ui-monospace, monospace;
+      margin-bottom: 5px;
+      color: #94a3b8;
+    }
+    .snr-bar-track {
+      width: 18px;
+      height: 120px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      display: flex;
+      align-items: flex-end;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      position: relative;
+    }
+    .snr-bar-fill {
+      width: 100%;
+      border-radius: 3px 3px 0 0;
+      transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .snr-sat-tag {
+      margin-top: 6px;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: ui-monospace, monospace;
+      padding: 1px 5px;
+      border-radius: 4px;
+      border: 1px solid transparent;
+      background: rgba(0, 0, 0, 0.4);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="brand">
+        <div class="brand-icon">📡</div>
+        <div>
+          <div class="brand-title">RTK Base Station</div>
+          <div class="brand-subtitle">Raspberry Pi Local Caster & Auto-Lock</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <div id="btnBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1);">
+          <span>🔘 D17:</span>
+          <span id="btnVal" style="font-family: ui-monospace, monospace; font-weight: 700; color: #94a3b8;">RELEASED</span>
+        </div>
+        <div id="batteryBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1); display: none;">
+          <span>🔋 Battery:</span>
+          <span id="batteryVal" style="color: #34d399; font-family: ui-monospace, monospace; font-weight: 700;">-- V</span>
+        </div>
+        <div id="cpuBadge" class="status-badge" style="background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border-color: rgba(255, 255, 255, 0.1);">
+          <span>🌡️ CPU:</span>
+          <span id="cpuTempVal" style="color: #34d399; font-family: ui-monospace, monospace; font-weight: 700;">-- °C</span>
+        </div>
+        <div id="statusBadge" class="status-badge">
+          <span id="statusIcon">⏳</span>
+          <span id="statusText">CALIBRATING</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">
+          <span>🎯 SURVEY-IN / STATIC CALIBRATION</span>
+          <span id="surveyPercent" class="data-val" style="color: var(--accent);">0%</span>
+        </div>
+        <div class="progress-container">
+          <div class="progress-bar-bg">
+            <div id="surveyProgressBar" class="progress-bar-fill"></div>
+          </div>
+        </div>
+        <div class="data-row">
+          <span class="data-label">⏳ Time Remaining:</span>
+          <span id="surveyRemaining" class="data-val">Calibrating...</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Elapsed Duration:</span>
+          <span id="surveyTime" class="data-val">0s / 3600s</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Live Accuracy StdDev (σ):</span>
+          <span id="surveyAcc" class="data-val">-- m</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Anchor Reference Status:</span>
+          <span id="anchorStatus" class="data-val" style="color: var(--warning);">Converging...</span>
+        </div>
+        <div class="button-group">
+          <button id="lockNowBtn" onclick="lockPositionNow()" class="btn btn-warning">🔒 Lock Position Now</button>
+          <button id="useSavedBtn" onclick="useSavedCoords()" class="btn btn-secondary" style="display: none;">📌 Use Saved Position</button>
+          <button id="recalBtn" onclick="recalibrateBase()" class="btn btn-secondary">🔄 Recalibrate</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🛰️ GNSS Satellite Lock</div>
+        <div style="display: flex; gap: 24px; margin-bottom: 12px;">
+          <div>
+            <div class="data-label">Satellites Tracked</div>
+            <div class="metric-value"><span id="satsCount">0</span><span class="metric-unit">sats</span></div>
+          </div>
+          <div>
+            <div class="data-label">HDOP Quality</div>
+            <div class="metric-value"><span id="hdopVal">--</span></div>
+          </div>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Constellations:</span>
+          <span class="data-val">GPS + GLO + GAL + BDS (L1/L5)</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Raw RTCM3 Ingested:</span>
+          <span id="rtcmIngested" class="data-val">0.0 KB</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Broadcasted Throughput:</span>
+          <span id="rtcmBroadcast" class="data-val">0.0 KB</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 📶 GNSS Satellite Signal Strength (SNR / C/N0) Section (Collapsible) -->
+    <div class="grid" id="snrGrid" style="margin-bottom: 20px;">
+      <div class="card collapsible-card" id="snrSection" style="grid-column: 1 / -1;">
+        <div class="collapsible-header" onclick="toggleSection('snr')">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span class="collapsible-title">📶 GNSS SATELLITE SIGNAL NOISE RATIO (SNR / C/N0)</span>
+            <span id="snrHealthBadge" class="status-badge" style="padding: 2px 10px; font-size: 11px; font-weight: 700; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">TRACKING...</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div id="snrCollapsedSummary" class="collapsed-summary">
+              <span id="sumSnrSats" style="color: var(--accent); font-weight: 700;">-- Sats Tracked</span>
+              <span class="sum-sep">•</span>
+              <span>Avg SNR: <strong id="sumAvgSnr">-- dB-Hz</strong></span>
+            </div>
+            <button class="toggle-btn" id="snrToggleBtn" type="button">
+              <span id="snrToggleIcon">▼</span> <span id="snrToggleText">Details</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="snrBody" class="collapsible-body" style="display: none; margin-top: 14px;">
+          <!-- 4-Metric Quick Glance Bar -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 16px;">
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Avg Signal Strength</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrAvgVal">--</span><span class="metric-unit" style="font-size: 14px;">dB-Hz</span></div>
+              <div id="snrAvgSubtext" style="font-size: 11px; color: var(--success); margin-top: 2px;">Optimal for RTK Base</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Active Satellites (C/N0)</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrSatCount">0</span><span class="metric-unit" style="font-size: 14px;">sats</span></div>
+              <div id="snrSatSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">-- Strong (&gt;38 dB)</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Top Satellite</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrTopVal">--</span><span class="metric-unit" style="font-size: 14px;">dB-Hz</span></div>
+              <div id="snrTopSubtext" style="font-size: 11px; color: var(--accent); margin-top: 2px;">--</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Active Constellations</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="snrConstCount">--</span></div>
+              <div id="snrConstSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">GPS, GAL, BDS, GLO</div>
+            </div>
+          </div>
+
+          <!-- Threshold Legend & Refresh Button -->
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text-muted);">
+            <div style="display: flex; gap: 14px; align-items: center; flex-wrap: wrap;">
+              <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: #10b981;"></span> ≥38 dB-Hz (Strong / Phase Lock)</span>
+              <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: #f59e0b;"></span> 28–37 dB-Hz (Good)</span>
+              <span style="display: inline-flex; align-items: center; gap: 6px;"><span style="width: 10px; height: 10px; border-radius: 2px; background: #ef4444;"></span> &lt;28 dB-Hz (Horizon / Weak)</span>
+            </div>
+            <button onclick="event.stopPropagation(); requestGsvStream();" class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px;" type="button">🔄 Poll / Request GSV</button>
+          </div>
+
+          <!-- Vertical Satellite SNR Bar Chart Grid -->
+          <div id="snrChartContainer" class="snr-chart" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 12px;">
+            <!-- Populated via Javascript -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 🔋 Dedicated Power, Battery & Hardware Thermal Health Box (Collapsible) -->
+    <div class="grid" id="powerHealthGrid" style="margin-bottom: 20px;">
+      <div class="card collapsible-card" id="powerHealthSection" style="grid-column: 1 / -1;">
+        <div class="collapsible-header" onclick="toggleSection('powerHealth')">
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <span class="collapsible-title">🔋 BATTERY, POWER & THERMAL HEALTH</span>
+            <span id="boxModeBadge" class="status-badge" style="padding: 2px 10px; font-size: 11px; font-weight: 700;">DETECTING...</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div id="powerHealthCollapsedSummary" class="collapsed-summary">
+              <span id="sumBattPct" style="color: var(--success); font-weight: 700;">--%</span>
+              <span class="sum-sep">•</span>
+              <span id="sumBattV" style="font-family: ui-monospace, monospace;">--V</span>
+              <span class="sum-sep">•</span>
+              <span id="sumBattCurrent" style="font-family: ui-monospace, monospace;">--mA</span>
+              <span class="sum-sep">•</span>
+              <span id="sumBattRuntime" style="color: var(--accent);">--</span>
+              <span class="sum-sep">•</span>
+              <span id="sumCpuTemp">--°C</span>
+            </div>
+            <button class="toggle-btn" id="powerHealthToggleBtn" type="button">
+              <span id="powerHealthToggleIcon">▼</span> <span id="powerHealthToggleText">Details</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="powerHealthBody" class="collapsible-body" style="display: none; margin-top: 14px;">
+          <!-- 5-Metric Quick Glance Bar -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin: 12px 0 16px 0;">
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Battery Level</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattPct">--</span><span class="metric-unit" style="font-size: 14px;">%</span></div>
+              <div id="boxBattSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Samsung 35E (1S)</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Terminal Voltage</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattV">--</span><span class="metric-unit" style="font-size: 14px;">V</span></div>
+              <div id="boxOcvSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Resting EMF: -- V</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Current Flow</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattCurrent">--</span><span class="metric-unit" style="font-size: 14px;">mA</span></div>
+              <div id="boxCurrentSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Net Battery Flow</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Live Power</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxBattPower">--</span><span class="metric-unit" style="font-size: 14px;">W</span></div>
+              <div id="boxPowerSubtext" style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Energy Rate</div>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
+              <div class="data-label">Pi Zero CPU Temp</div>
+              <div class="metric-value" style="font-size: 28px;"><span id="boxCpuTemp">--</span><span class="metric-unit" style="font-size: 14px;">°C</span></div>
+              <div id="boxCpuSubtext" style="font-size: 11px; color: #34d399; margin-top: 2px;">Cool & Optimal</div>
+            </div>
+          </div>
+
+          <!-- Animated Progress Bar -->
+          <div class="progress-container" style="margin: 6px 0 16px 0;">
+            <div class="progress-bar-bg" style="height: 10px;">
+              <div id="boxBattProgressBar" class="progress-bar-fill" style="width: 0%; transition: width 0.4s ease;"></div>
+            </div>
+          </div>
+
+          <!-- Telemetry Breakdown Table -->
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 4px 24px;">
+            <div class="data-row">
+              <span class="data-label">Power State:</span>
+              <span id="boxPowerState" class="data-val">Detecting...</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">Cell Chemistry / Profile:</span>
+              <span id="boxChemistry" class="data-val">Samsung 35E (1S 18650 Li-ion 3500mAh)</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">Charge / Discharge Phase:</span>
+              <span id="boxChargeStage" class="data-val">--</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">Estimated Runtime / Charge:</span>
+              <span id="boxEstRuntime" class="data-val" style="color: var(--accent);">--</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">CPU Thermal Health:</span>
+              <span id="boxThermalStatus" class="data-val" style="color: #34d399;">Normal</span>
+            </div>
+            <div class="data-row">
+              <span class="data-label">Hardware Button (GPIO 17 / D17):</span>
+              <span id="boxBtnStatus" class="data-val" style="color: #94a3b8;">⚪ Released (Open)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div class="card-title">📍 Base Station Coordinates</div>
+        <div class="data-row">
+          <span class="data-label">Latitude:</span>
+          <span id="baseLat" class="data-val">0.00000000°</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Longitude:</span>
+          <span id="baseLon" class="data-val">0.00000000°</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Elevation / Altitude:</span>
+          <span id="baseAlt" class="data-val">0.00 m</span>
+        </div>
+        <div style="margin-top: 14px;">
+          <a id="mapsBtn" href="#" target="_blank" class="btn">🗺️ Open in Google Maps</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">
+          <span>📡 Connected Rovers</span>
+          <span id="roversCount" class="data-val" style="color: var(--accent);">0 Active</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">NTRIP Caster Port:</span>
+          <span id="ntripPort" class="data-val">2101</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Mountpoint:</span>
+          <span id="mountpointVal" class="data-val">/BASE</span>
+        </div>
+        <div class="data-label" style="margin-top: 10px;">Rover Configuration Snippet:</div>
+        <div id="configSnippet" class="code-box">Loading...</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card" style="grid-column: 1 / -1;">
+        <div class="card-title">
+          <span>📍 Saved Benchmark Locations (Instant 0 mm Profiles)</span>
+          <span id="activePresetBadge" class="data-val" style="color: var(--accent); font-size: 13px;">No Preset Active</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 8px;">
+          <div style="flex: 1; min-width: 280px;">
+            <label class="data-label" style="display: block; margin-bottom: 6px;">Select Saved Base Spot:</label>
+            <select id="locationsSelect" style="width: 100%; padding: 9px 12px; background: rgba(0,0,0,0.6); border: 1px solid var(--card-border); border-radius: 8px; color: #fff; font-size: 13px; font-family: ui-monospace, monospace;">
+              <option value="">-- No Saved Locations --</option>
+            </select>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: flex-end; margin-top: 18px;">
+            <button onclick="loadSelectedLocation()" class="btn" style="background: #0284c7;">📌 Load Selected Spot</button>
+            <button onclick="saveCurrentLocationPrompt()" class="btn btn-warning">💾 Save Current Spot As...</button>
+            <button onclick="deleteSelectedLocation()" class="btn btn-secondary" style="color: #f87171;">🗑️ Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card" style="grid-column: 1 / -1;">
+        <div class="card-title">
+          <span>🖥️ Live Base Station Console & NMEA Logs</span>
+          <span class="data-val" style="font-size: 11px; opacity: 0.7;">Auto-refreshing</span>
+        </div>
+        <div id="terminalBox" class="terminal-box">
+          <div class="log-line"><span class="log-msg">Connecting to live log stream...</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let userScrolled = false;
+    const term = document.getElementById('terminalBox');
+    term.addEventListener('scroll', () => {
+      userScrolled = (term.scrollHeight - term.scrollTop - term.clientHeight) > 20;
+    });
+
+    async function loadSelectedLocation() {
+      const select = document.getElementById('locationsSelect');
+      const name = select.value;
+      if (!name) {
+        alert('Please select a saved location first.');
+        return;
+      }
+      if (confirm(`Instantly switch to saved benchmark '${name}' (0 mm drift)?`)) {
+        try {
+          const res = await fetch('/api/locations/load', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          const json = await res.json();
+          if (json.status === 'ok') {
+            updateDashboard();
+          } else {
+            alert('Failed to load location.');
+          }
+        } catch (e) {
+          alert('Error: ' + e);
+        }
+      }
+    }
+
+    async function saveCurrentLocationPrompt() {
+      const name = prompt('Enter a name for this benchmark position (e.g. Home Yard, University Rooftop, Test Track Spot A):');
+      if (!name || !name.trim()) return;
+      try {
+        const res = await fetch('/api/locations/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() })
+        });
+        const json = await res.json();
+        if (json.status === 'ok') {
+          updateDashboard();
+        } else {
+          alert('Failed to save location.');
+        }
+      } catch (e) {
+        alert('Error: ' + e);
+      }
+    }
+
+    async function deleteSelectedLocation() {
+      const select = document.getElementById('locationsSelect');
+      const name = select.value;
+      if (!name) {
+        alert('Please select a saved location to delete.');
+        return;
+      }
+      if (confirm(`Are you sure you want to delete preset '${name}'?`)) {
+        try {
+          const res = await fetch('/api/locations/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+          });
+          const json = await res.json();
+          if (json.status === 'ok') {
+            updateDashboard();
+          } else {
+            alert('Failed to delete location.');
+          }
+        } catch (e) {
+          alert('Error: ' + e);
+        }
+      }
+    }
+
+    async function lockPositionNow() {
+      if (confirm('Lock the current averaged position as the permanent static base coordinate (0 mm drift)?')) {
+        try {
+          await fetch('/api/lock_now', { method: 'POST' });
+          updateDashboard();
+        } catch (e) {
+          alert('Lock failed: ' + e);
+        }
+      }
+    }
+
+    async function useSavedCoords() {
+      if (confirm('Apply saved static base coordinates from previous session (0 mm drift)?')) {
+        try {
+          const res = await fetch('/api/use_saved', { method: 'POST' });
+          const json = await res.json();
+          if (json.status === 'ok') {
+            updateDashboard();
+          } else {
+            alert('Failed to apply saved coordinates.');
+          }
+        } catch (e) {
+          alert('Error: ' + e);
+        }
+      }
+    }
+
+    async function recalibrateBase() {
+      if (confirm('Clear saved coordinates and start a fresh 1-hour calibration survey?')) {
+        try {
+          await fetch('/api/recalibrate', { method: 'POST' });
+          updateDashboard();
+        } catch (e) {
+          alert('Recalibrate failed: ' + e);
+        }
+      }
+    }
+
+    async function updateDashboard() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        const badge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+        const statusIcon = document.getElementById('statusIcon');
+        const progressBar = document.getElementById('surveyProgressBar');
+        const anchorStatus = document.getElementById('anchorStatus');
+        const remainingEl = document.getElementById('surveyRemaining');
+        const lockBtn = document.getElementById('lockNowBtn');
+        const useSavedBtn = document.getElementById('useSavedBtn');
+
+        if (data.is_static_fixed) {
+          badge.className = 'status-badge fixed';
+          statusIcon.textContent = '🎯';
+          statusText.textContent = 'STATIC FIXED BASE (0 mm Drift)';
+          progressBar.className = 'progress-bar-fill complete';
+          progressBar.style.width = '100%';
+          document.getElementById('surveyPercent').textContent = '100%';
+          anchorStatus.textContent = 'PERMANENT STATIC LOCKED (0 mm)';
+          anchorStatus.style.color = 'var(--accent)';
+          remainingEl.textContent = `✅ Saved ${data.locked_timestamp || 'Active'}`;
+          remainingEl.style.color = 'var(--accent)';
+          lockBtn.style.display = 'none';
+          useSavedBtn.style.display = 'none';
+        } else if (data.survey_valid) {
+          badge.className = 'status-badge locked';
+          statusIcon.textContent = '🎯';
+          statusText.textContent = 'CALIBRATION COMPLETE';
+          progressBar.className = 'progress-bar-fill complete';
+          progressBar.style.width = '100%';
+          document.getElementById('surveyPercent').textContent = '100%';
+          anchorStatus.textContent = 'LOCKED & VALID';
+          anchorStatus.style.color = 'var(--success)';
+          remainingEl.textContent = '✅ Auto-Locking...';
+          remainingEl.style.color = 'var(--success)';
+          lockBtn.style.display = 'inline-flex';
+          useSavedBtn.style.display = 'none';
+        } else {
+          badge.className = 'status-badge';
+          statusIcon.textContent = '⏳';
+          statusText.textContent = `CALIBRATING (${data.remaining_str} left)`;
+          progressBar.className = 'progress-bar-fill';
+          const pct = Math.min(100, Math.round((data.survey_duration / data.survey_target_duration) * 100));
+          progressBar.style.width = pct + '%';
+          document.getElementById('surveyPercent').textContent = pct + '%';
+          anchorStatus.textContent = `Converging Samples (${data.survey_duration}s)...`;
+          anchorStatus.style.color = 'var(--warning)';
+          remainingEl.textContent = `${data.remaining_str} remaining`;
+          remainingEl.style.color = '#38bdf8';
+          lockBtn.style.display = 'inline-flex';
+
+          if (data.saved_coords) {
+            useSavedBtn.style.display = 'inline-flex';
+            useSavedBtn.textContent = `📌 Use Saved (${data.saved_coords.lat.toFixed(5)}°, ${data.saved_coords.lon.toFixed(5)}°)`;
+          } else {
+            useSavedBtn.style.display = 'none';
+          }
+        }
+
+        if (data.cpu_temp !== null && data.cpu_temp !== undefined) {
+          const tempEl = document.getElementById('cpuTempVal');
+          tempEl.textContent = `${data.cpu_temp.toFixed(1)} °C`;
+          if (data.cpu_temp >= 75) {
+            tempEl.style.color = '#f87171';
+          } else if (data.cpu_temp >= 60) {
+            tempEl.style.color = '#fbbf24';
+          } else {
+            tempEl.style.color = '#34d399';
+          }
+        }
+
+        if (data.battery_voltage !== null && data.battery_voltage !== undefined) {
+          const battBadge = document.getElementById('batteryBadge');
+          const battEl = document.getElementById('batteryVal');
+          battBadge.style.display = 'flex';
+          const v = data.battery_voltage;
+          const ma = data.battery_current_ma;
+          const isCharging = (ma !== null && ma !== undefined && ma < -15.0);
+
+          if (isCharging) {
+            const chargeMa = Math.round(Math.abs(ma));
+            let stage = "Charging";
+            if (v >= 4.18 && chargeMa < 250) {
+              stage = "Nearly Full (>95%)";
+            } else if (v >= 4.15) {
+              stage = "CV Saturation";
+            } else {
+              stage = "CC Fast Charge";
+            }
+            battEl.textContent = `⚡ ${stage} (+${chargeMa} mA) • ${v.toFixed(2)} V`;
+            battEl.style.color = '#38bdf8'; // Glowing blue during active charging
+          } else {
+            let txt = `${v.toFixed(2)} V`;
+            if (ma !== null && ma !== undefined && Math.abs(ma) > 5.0) {
+              txt += ` | ${Math.round(ma)} mA (${data.battery_power_w.toFixed(1)}W)`;
+            }
+            let pct = null;
+            if (v >= 9.0) {
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              const vOcv = Math.max(9.0, Math.min(12.6, v + (currentA * 0.40)));
+              pct = Math.round(Math.max(0, Math.min(100, (vOcv - 10.5) / 2.1 * 100)));
+            } else if (v >= 2.8 && v <= 4.3) {
+              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts/wiring ~0.30 = 0.457 ohm)
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              const vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.457)));
+              if (vOcv >= 4.15) pct = 95 + (vOcv - 4.15) * 100;
+              else if (vOcv >= 4.05) pct = 85 + (vOcv - 4.05) * 100;
+              else if (vOcv >= 3.95) pct = 75 + (vOcv - 3.95) * 100;
+              else if (vOcv >= 3.85) pct = 62 + (vOcv - 3.85) * 130;
+              else if (vOcv >= 3.75) pct = 45 + (vOcv - 3.75) * 170;
+              else if (vOcv >= 3.65) pct = 28 + (vOcv - 3.65) * 170;
+              else if (vOcv >= 3.50) pct = 12 + (vOcv - 3.50) * 106;
+              else pct = Math.max(0, (vOcv - 3.0) / 0.50 * 12);
+              pct = Math.round(Math.max(0, Math.min(100, pct)));
+            }
+            if (pct !== null) {
+              txt = `${pct}% • ${txt}`;
+            }
+            battEl.textContent = txt;
+            if (v >= 11.1 || (v >= 3.6 && v <= 4.3)) {
+              battEl.style.color = '#34d399';
+            } else if (v >= 10.5 || (v >= 3.2 && v < 3.6)) {
+              battEl.style.color = '#fbbf24';
+            } else if (v > 6.0 || v < 3.2) {
+              battEl.style.color = '#f87171';
+            } else {
+              battEl.style.color = '#34d399';
+            }
+          }
+        }
+
+        // Live update for Dedicated Power & Hardware Health Big Box
+        const boxSection = document.getElementById('powerHealthSection');
+        if (boxSection) {
+          const v = data.battery_voltage;
+          const ma = data.battery_current_ma;
+          const w = data.battery_power_w;
+          const temp = data.cpu_temp;
+
+          let pct = null;
+          let vOcv = (v !== null && v !== undefined) ? v : 0;
+          const isCharging = (ma !== null && ma !== undefined && ma < -15.0);
+          const isDischarging = (ma !== null && ma !== undefined && ma > 15.0);
+
+          if (v !== null && v !== undefined) {
+            const vEl = document.getElementById('boxBattV');
+            if (vEl) vEl.textContent = v.toFixed(2);
+            const curEl = document.getElementById('boxBattCurrent');
+            if (curEl) curEl.textContent = (ma !== null && ma !== undefined) ? (ma > 0 ? `+${ma.toFixed(0)}` : ma.toFixed(0)) : '--';
+            const powEl = document.getElementById('boxBattPower');
+            if (powEl) powEl.textContent = (w !== null && w !== undefined) ? w.toFixed(2) : '--';
+
+            const bar = document.getElementById('boxBattProgressBar');
+            const badge = document.getElementById('boxModeBadge');
+            const stateEl = document.getElementById('boxPowerState');
+            const stageEl = document.getElementById('boxChargeStage');
+            const estEl = document.getElementById('boxEstRuntime');
+            const pctEl = document.getElementById('boxBattPct');
+
+            if (v >= 9.0) {
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              vOcv = Math.max(9.0, Math.min(12.6, v + (currentA * 0.40)));
+              pct = Math.round(Math.max(0, Math.min(100, (vOcv - 10.5) / 2.1 * 100)));
+              const chemEl = document.getElementById('boxChemistry');
+              if (chemEl) chemEl.textContent = '3S LiPo Pack (10.5V - 12.6V)';
+              const subEl = document.getElementById('boxBattSubtext');
+              if (subEl) subEl.textContent = '3S LiPo';
+            } else if (v >= 2.8 && v <= 4.3) {
+              // Dynamic loop IR drop compensation (Shunt 0.10 + cell 0.06 + contacts/wiring ~0.30 = 0.457 ohm)
+              const currentA = (ma !== null && ma !== undefined) ? (ma / 1000.0) : 0;
+              vOcv = Math.max(3.0, Math.min(4.20, v + (currentA * 0.457)));
+
+              if (vOcv >= 4.15) pct = 95 + (vOcv - 4.15) * 100;
+              else if (vOcv >= 4.05) pct = 85 + (vOcv - 4.05) * 100;
+              else if (vOcv >= 3.95) pct = 75 + (vOcv - 3.95) * 100;
+              else if (vOcv >= 3.85) pct = 62 + (vOcv - 3.85) * 130;
+              else if (vOcv >= 3.75) pct = 45 + (vOcv - 3.75) * 170;
+              else if (vOcv >= 3.65) pct = 28 + (vOcv - 3.65) * 170;
+              else if (vOcv >= 3.50) pct = 12 + (vOcv - 3.50) * 106;
+              else pct = Math.max(0, (vOcv - 3.0) / 0.50 * 12);
+              pct = Math.round(Math.max(0, Math.min(100, pct)));
+
+              const chemEl = document.getElementById('boxChemistry');
+              if (chemEl) chemEl.textContent = 'Samsung INR18650-35E (3500mAh 1S)';
+              const subEl = document.getElementById('boxBattSubtext');
+              if (subEl) subEl.textContent = 'Samsung 35E (1S)';
+            } else {
+              pct = 100;
+              const chemEl = document.getElementById('boxChemistry');
+              if (chemEl) chemEl.textContent = 'Regulated 5V Rail / USB';
+              const subEl = document.getElementById('boxBattSubtext');
+              if (subEl) subEl.textContent = '5V Rail';
+            }
+
+            const ocvEl = document.getElementById('boxOcvSubtext');
+            if (ocvEl) ocvEl.textContent = `Resting EMF: ${vOcv.toFixed(2)} V`;
+            if (pctEl) pctEl.textContent = pct;
+            if (bar) bar.style.width = pct + '%';
+
+            if (isCharging) {
+              const chargeMa = Math.round(Math.abs(ma));
+              if (badge) {
+                badge.textContent = `⚡ CHARGING (+${chargeMa} mA)`;
+                badge.className = 'status-badge fixed';
+                badge.style.color = '#38bdf8';
+                badge.style.background = 'rgba(56, 189, 248, 0.15)';
+                badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+              }
+              if (bar) {
+                bar.className = 'progress-bar-fill';
+                bar.style.background = 'linear-gradient(90deg, #0284c7, #38bdf8)';
+              }
+
+              if (stateEl) {
+                stateEl.textContent = `🔌 External Power Active (Supplying +${chargeMa} mA to Cell)`;
+                stateEl.style.color = '#38bdf8';
+              }
+              const curSub = document.getElementById('boxCurrentSubtext');
+              if (curSub) curSub.textContent = 'Flowing INTO Battery';
+              const powSub = document.getElementById('boxPowerSubtext');
+              if (powSub) powSub.textContent = 'Charging Energy Delivery';
+
+              let stage = 'CC Fast Charge';
+              if (v >= 4.18 && chargeMa < 250) {
+                stage = 'Nearly Full / Float Topping Off (>95%)';
+              } else if (v >= 4.15) {
+                stage = 'Constant Voltage (CV) Saturation (~85-95%)';
+              } else {
+                stage = `Constant Current (CC) Fast Charge (~${pct}%)`;
+              }
+              if (stageEl) stageEl.textContent = stage;
+
+              const remMah = Math.max(0, (100 - pct) / 100 * 3500);
+              const estHours = chargeMa > 50 ? (remMah / chargeMa) : 0;
+              if (estEl) {
+                estEl.textContent = estHours > 0 ? `⚡ Full in ~${estHours.toFixed(1)} hours` : '⚡ Nearly Full';
+                estEl.style.color = '#38bdf8';
+              }
+            } else if (isDischarging) {
+              const drawMa = Math.round(ma);
+              if (badge) {
+                badge.textContent = `🔋 DISCHARGING (-${drawMa} mA)`;
+                badge.className = 'status-badge';
+                badge.style.color = '#34d399';
+                badge.style.background = 'rgba(16, 185, 129, 0.15)';
+                badge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+              }
+              if (bar) {
+                bar.className = 'progress-bar-fill';
+                bar.style.background = 'linear-gradient(90deg, #10b981, #34d399)';
+              }
+
+              if (stateEl) {
+                stateEl.textContent = `🔋 Battery Powered (Base Station Load: ${drawMa} mA)`;
+                stateEl.style.color = '#34d399';
+              }
+              const curSub = document.getElementById('boxCurrentSubtext');
+              if (curSub) curSub.textContent = 'Flowing OUT to System';
+              const powSub = document.getElementById('boxPowerSubtext');
+              if (powSub) powSub.textContent = 'Base Station Consumption';
+
+              if (stageEl) stageEl.textContent = pct > 20 ? 'Healthy Discharge Curve' : 'Low Battery (Charge Soon)';
+              const hoursLeft = drawMa > 20 ? ((pct / 100 * 3500) / drawMa) : 0;
+              if (estEl) {
+                estEl.textContent = hoursLeft > 0 ? `Est. Runtime: ~${hoursLeft.toFixed(1)} hours left` : 'Calculating runtime...';
+                estEl.style.color = pct > 20 ? 'var(--accent)' : '#f87171';
+              }
+            } else {
+              if (badge) {
+                badge.textContent = '🔌 STANDBY / IDLE';
+                badge.className = 'status-badge';
+                badge.style.color = 'var(--text-muted)';
+              }
+              if (stateEl) stateEl.textContent = 'Standby / Low Current Draw';
+              if (stageEl) stageEl.textContent = 'Stable';
+              if (estEl) {
+                estEl.textContent = 'Standby';
+                estEl.style.color = 'var(--text-muted)';
+              }
+            }
+          }
+
+          // Live CPU Temperature & Thermal Health (Pi Zero)
+          if (temp !== null && temp !== undefined) {
+            const cpuEl = document.getElementById('boxCpuTemp');
+            if (cpuEl) cpuEl.textContent = temp.toFixed(1);
+            const cpuSub = document.getElementById('boxCpuSubtext');
+            const cpuHealth = document.getElementById('boxThermalStatus');
+            if (temp >= 75) {
+              if (cpuSub) { cpuSub.textContent = '⚠️ Thermal Throttling Zone'; cpuSub.style.color = '#f87171'; }
+              if (cpuHealth) { cpuHealth.textContent = 'HOT (Throttled)'; cpuHealth.style.color = '#f87171'; }
+            } else if (temp >= 60) {
+              if (cpuSub) { cpuSub.textContent = 'Warm (Active Load)'; cpuSub.style.color = '#fbbf24'; }
+              if (cpuHealth) { cpuHealth.textContent = 'Warm'; cpuHealth.style.color = '#fbbf24'; }
+            } else {
+              if (cpuSub) { cpuSub.textContent = 'Cool & Optimal'; cpuSub.style.color = '#34d399'; }
+              if (cpuHealth) { cpuHealth.textContent = 'Cool & Healthy'; cpuHealth.style.color = '#34d399'; }
+            }
+          }
+
+          // Update collapsed summary for Power & Battery
+          const sumPct = document.getElementById('sumBattPct');
+          const sumV = document.getElementById('sumBattV');
+          const sumCur = document.getElementById('sumBattCurrent');
+          const sumRun = document.getElementById('sumBattRuntime');
+          const sumTemp = document.getElementById('sumCpuTemp');
+
+          if (sumPct) {
+            sumPct.textContent = (pct !== null) ? `${pct}%` : '--%';
+            sumPct.style.color = isCharging ? '#38bdf8' : (pct !== null && pct <= 20 ? '#f87171' : 'var(--success)');
+          }
+          if (sumV) {
+            if (v !== null && v !== undefined) {
+              sumV.textContent = `${v.toFixed(2)}V`;
+            } else {
+              sumV.textContent = '--V';
+            }
+          }
+          if (sumCur) {
+            if (ma !== null && ma !== undefined) {
+              sumCur.textContent = `${ma > 0 ? '+' : ''}${Math.round(ma)} mA`;
+              sumCur.style.color = isCharging ? '#38bdf8' : (isDischarging ? '#34d399' : 'var(--text-muted)');
+            } else {
+              sumCur.textContent = '-- mA';
+              sumCur.style.color = 'var(--text-muted)';
+            }
+          }
+          if (sumRun) {
+            if (isCharging) {
+              const chargeMa = (ma !== null && ma !== undefined) ? Math.round(Math.abs(ma)) : 0;
+              const curPct = (pct !== null) ? pct : 0;
+              const remMah = Math.max(0, (100 - curPct) / 100 * 3500);
+              const estHours = chargeMa > 50 ? (remMah / chargeMa) : 0;
+              sumRun.textContent = estHours > 0 ? `⚡ Full in ~${estHours.toFixed(1)}h` : '⚡ Full';
+              sumRun.style.color = '#38bdf8';
+            } else if (isDischarging) {
+              const drawMa = (ma !== null && ma !== undefined) ? Math.round(ma) : 0;
+              const curPct = (pct !== null) ? pct : 0;
+              const hoursLeft = drawMa > 20 ? ((curPct / 100 * 3500) / drawMa) : 0;
+              sumRun.textContent = hoursLeft > 0 ? `~${hoursLeft.toFixed(1)}h left` : '--';
+              sumRun.style.color = curPct > 20 ? 'var(--accent)' : '#f87171';
+            } else {
+              sumRun.textContent = 'Standby';
+              sumRun.style.color = 'var(--text-muted)';
+            }
+          }
+          if (sumTemp) {
+            if (temp !== null && temp !== undefined) {
+              sumTemp.textContent = `${temp.toFixed(1)}°C`;
+              sumTemp.style.color = temp >= 75 ? '#f87171' : (temp >= 60 ? '#fbbf24' : '#34d399');
+            } else {
+              sumTemp.textContent = '--°C';
+              sumTemp.style.color = 'var(--text-muted)';
+            }
+          }
+        }
+
+        // Live update for Satellite Signal Strength (SNR / C/N0)
+        const snrData = data.sat_snr_data;
+        const snrBadge = document.getElementById('snrHealthBadge');
+        const sumSnrSats = document.getElementById('sumSnrSats');
+        const sumAvgSnr = document.getElementById('sumAvgSnr');
+
+        if (snrData) {
+          const avg = snrData.avg_snr;
+          const count = snrData.count;
+          if (sumSnrSats) sumSnrSats.textContent = `${count} Sats (SNR)`;
+          if (sumAvgSnr) sumAvgSnr.textContent = `${avg.toFixed(1)} dB-Hz`;
+
+          if (snrBadge) {
+            if (avg >= 38) {
+              snrBadge.textContent = `🟢 EXCELLENT (${avg.toFixed(1)} dB-Hz)`;
+              snrBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+              snrBadge.style.color = '#34d399';
+              snrBadge.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+            } else if (avg >= 28) {
+              snrBadge.textContent = `🟡 GOOD (${avg.toFixed(1)} dB-Hz)`;
+              snrBadge.style.background = 'rgba(245, 158, 11, 0.15)';
+              snrBadge.style.color = '#fbbf24';
+              snrBadge.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+            } else if (count > 0) {
+              snrBadge.textContent = `🔴 LOW SIGNAL (${avg.toFixed(1)} dB-Hz)`;
+              snrBadge.style.background = 'rgba(239, 68, 68, 0.15)';
+              snrBadge.style.color = '#f87171';
+              snrBadge.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+            } else {
+              snrBadge.textContent = `${data.satellites || 0} SATS TRACKED (MSM)`;
+              snrBadge.style.background = 'rgba(56, 189, 248, 0.15)';
+              snrBadge.style.color = '#38bdf8';
+              snrBadge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+            }
+          }
+
+          const avgValEl = document.getElementById('snrAvgVal');
+          if (avgValEl) avgValEl.textContent = count > 0 ? avg.toFixed(1) : '--';
+          const avgSubEl = document.getElementById('snrAvgSubtext');
+          if (avgSubEl) {
+            if (avg >= 38) { avgSubEl.textContent = '🟢 Optimal for RTK Base Phase Lock'; avgSubEl.style.color = '#34d399'; }
+            else if (avg >= 28) { avgSubEl.textContent = '🟡 Good Satellite Signal Lock'; avgSubEl.style.color = '#fbbf24'; }
+            else { avgSubEl.textContent = 'Low Horizon / Obstructed Sky'; avgSubEl.style.color = '#f87171'; }
+          }
+
+          const satCountEl = document.getElementById('snrSatCount');
+          if (satCountEl) satCountEl.textContent = count;
+          const satSubEl = document.getElementById('snrSatSubtext');
+          if (satSubEl) satSubEl.textContent = `${snrData.strong_count || 0} Strong (>38 dB), ${snrData.good_count || 0} Good`;
+
+          const topValEl = document.getElementById('snrTopVal');
+          if (topValEl) topValEl.textContent = count > 0 ? snrData.max_snr.toFixed(1) : '--';
+          const topSubEl = document.getElementById('snrTopSubtext');
+          if (topSubEl) {
+            const topSat = (snrData.sats && snrData.sats.length > 0) ? snrData.sats[0] : null;
+            topSubEl.textContent = topSat ? `${topSat.constellation} ${topSat.id} (Elev ${topSat.elev !== null ? topSat.elev + '°' : '--'})` : '--';
+          }
+
+          const constCountEl = document.getElementById('snrConstCount');
+          if (constCountEl) {
+            const constKeys = Object.keys(snrData.constellations || {});
+            constCountEl.textContent = constKeys.length > 0 ? `${constKeys.length} Bands` : 'Multi-Const.';
+            const constSubEl = document.getElementById('snrConstSubtext');
+            if (constSubEl) {
+              if (constKeys.length > 0) {
+                constSubEl.textContent = constKeys.map(k => `${k}: ${snrData.constellations[k]}`).join(' • ');
+              } else {
+                constSubEl.textContent = 'GPS, GAL, BDS, GLO';
+              }
+            }
+          }
+
+          renderSnrBars(snrData.sats);
+        }
+
+        // Live update for Hardware Button (GPIO 17)
+        if (data.button_pressed !== undefined) {
+          const btnBadge = document.getElementById('btnBadge');
+          const btnVal = document.getElementById('btnVal');
+          const boxBtn = document.getElementById('boxBtnStatus');
+
+          if (data.button_shutting_down) {
+            btnBadge.style.background = 'rgba(239, 68, 68, 0.3)';
+            btnBadge.style.borderColor = 'rgba(239, 68, 68, 0.8)';
+            btnBadge.style.boxShadow = '0 0 20px rgba(239, 68, 68, 0.6)';
+            btnVal.textContent = 'SHUTTING DOWN';
+            btnVal.style.color = '#ef4444';
+
+            if (boxBtn) {
+              boxBtn.textContent = '🛑 SHUTTING DOWN (Wait for Green LED, then switch OFF)';
+              boxBtn.style.color = '#ef4444';
+              boxBtn.style.fontWeight = '700';
+            }
+          } else if (data.button_held_sec >= 0.5) {
+            btnBadge.style.background = 'rgba(245, 158, 11, 0.3)';
+            btnBadge.style.borderColor = 'rgba(245, 158, 11, 0.8)';
+            btnBadge.style.boxShadow = '0 0 15px rgba(245, 158, 11, 0.5)';
+            btnVal.textContent = `HOLD: ${data.button_held_sec.toFixed(1)}s / 3.0s`;
+            btnVal.style.color = '#f59e0b';
+
+            if (boxBtn) {
+              boxBtn.textContent = `⚠️ Holding for Safe Shutdown (${data.button_held_sec.toFixed(1)}s / 3.0s)...`;
+              boxBtn.style.color = '#f59e0b';
+              boxBtn.style.fontWeight = '700';
+            }
+          } else if (data.button_pressed) {
+            btnBadge.style.background = 'rgba(16, 185, 129, 0.25)';
+            btnBadge.style.borderColor = 'rgba(16, 185, 129, 0.6)';
+            btnBadge.style.boxShadow = '0 0 15px rgba(16, 185, 129, 0.4)';
+            btnVal.textContent = 'PUSHED';
+            btnVal.style.color = '#10b981';
+
+            if (boxBtn) {
+              boxBtn.textContent = '🟢 PUSHED (GND Active)';
+              boxBtn.style.color = '#10b981';
+              boxBtn.style.fontWeight = '700';
+            }
+          } else {
+            btnBadge.style.background = 'rgba(255, 255, 255, 0.05)';
+            btnBadge.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+            btnBadge.style.boxShadow = 'none';
+            btnVal.textContent = 'RELEASED';
+            btnVal.style.color = '#94a3b8';
+
+            if (boxBtn) {
+              boxBtn.textContent = '⚪ Released (Open)';
+              boxBtn.style.color = '#94a3b8';
+              boxBtn.style.fontWeight = '600';
+            }
+          }
+        }
+
+        const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        setTxt('surveyTime', `${data.survey_duration}s / ${data.survey_target_duration}s`);
+        setTxt('surveyAcc', `${data.survey_accuracy.toFixed(2)} m`);
+        setTxt('satsCount', data.satellites);
+        setTxt('hdopVal', data.hdop.toFixed(2));
+        setTxt('rtcmIngested', `${data.rtcm_ingested_kb.toFixed(1)} KB`);
+        setTxt('rtcmBroadcast', `${data.rtcm_broadcasted_kb.toFixed(1)} KB`);
+
+        setTxt('baseLat', data.latitude.toFixed(8) + '°');
+        setTxt('baseLon', data.longitude.toFixed(8) + '°');
+        setTxt('baseAlt', data.altitude.toFixed(2) + ' m');
+        const mapsBtn = document.getElementById('mapsBtn');
+        if (mapsBtn) mapsBtn.href = `https://www.google.com/maps?q=${data.latitude},${data.longitude}`;
+
+        setTxt('roversCount', `${data.active_rovers_count} Active`);
+        setTxt('ntripPort', data.ntrip_port);
+        setTxt('mountpointVal', `/${data.mountpoint}`);
+
+        setTxt('configSnippet', `ntrip_caster: "${data.local_ip}"\nntrip_port: ${data.ntrip_port}\nntrip_mountpoint: "${data.mountpoint}"`);
+
+        // Populate Saved Benchmark Locations dropdown
+        const locSelect = document.getElementById('locationsSelect');
+        const activeBadge = document.getElementById('activePresetBadge');
+        if (locSelect && activeBadge) {
+          const savedLocs = data.saved_locations || {};
+          const locKeys = Object.keys(savedLocs);
+
+          if (data.active_location) {
+            activeBadge.textContent = `🎯 Active Benchmark: ${data.active_location}`;
+            activeBadge.style.color = 'var(--success)';
+          } else {
+            activeBadge.textContent = 'No Preset Active (Calibrating)';
+            activeBadge.style.color = 'var(--text-muted)';
+          }
+
+          const prevKeys = Array.from(locSelect.options).map(o => o.value).filter(v => v !== '');
+          const keysMatch = prevKeys.length === locKeys.length && prevKeys.every((v, i) => v === locKeys[i]);
+
+          if (!keysMatch || locSelect.options.length === 0) {
+            const currentVal = locSelect.value;
+            locSelect.innerHTML = '';
+            if (locKeys.length === 0) {
+              locSelect.innerHTML = '<option value="">-- No Saved Locations Yet --</option>';
+            } else {
+              locKeys.forEach(k => {
+                const loc = savedLocs[k];
+                const opt = document.createElement('option');
+                opt.value = k;
+                opt.textContent = `${k} [${loc.lat.toFixed(6)}°, ${loc.lon.toFixed(6)}° | ${loc.alt}m]`;
+                if (k === (data.active_location || currentVal)) {
+                  opt.selected = true;
+                }
+                locSelect.appendChild(opt);
+              });
+            }
+          }
+        }
+
+        if (data.logs && data.logs.length > 0) {
+          term.innerHTML = data.logs.map(l => {
+            const cls = l.level === 'ERROR' ? 'error' : (l.level === 'WARN' ? 'warn' : '');
+            return `<div class="log-line"><span class="log-time">[${l.time}]</span><span class="log-msg ${cls}">${l.msg}</span></div>`;
+          }).join('');
+          if (!userScrolled) {
+            term.scrollTop = term.scrollHeight;
+          }
+        }
+
+      } catch (err) {
+        console.error('Failed to fetch status:', err);
+      }
+    }
+
+    function toggleSection(secName) {
+      const body = document.getElementById(secName + 'Body');
+      const sum = document.getElementById(secName + 'CollapsedSummary');
+      const icon = document.getElementById(secName + 'ToggleIcon');
+      const text = document.getElementById(secName + 'ToggleText');
+
+      if (!body) return;
+      const isHidden = (body.style.display === 'none');
+      if (isHidden) {
+        body.style.display = 'block';
+        if (sum) sum.style.display = 'none';
+        if (icon) icon.textContent = '▲';
+        if (text) text.textContent = 'Hide';
+        localStorage.setItem(secName + '_collapsed', 'false');
+      } else {
+        body.style.display = 'none';
+        if (sum) sum.style.display = 'flex';
+        if (icon) icon.textContent = '▼';
+        if (text) text.textContent = 'Details';
+        localStorage.setItem(secName + '_collapsed', 'true');
+      }
+    }
+
+    function initCollapsibleState() {
+      ['powerHealth', 'snr'].forEach(sec => {
+        const saved = localStorage.getItem(sec + '_collapsed');
+        // Default to collapsed for clean & uncluttered initial presentation
+        const shouldCollapse = (saved === null) ? true : (saved === 'true');
+        const body = document.getElementById(sec + 'Body');
+        const sum = document.getElementById(sec + 'CollapsedSummary');
+        const icon = document.getElementById(sec + 'ToggleIcon');
+        const text = document.getElementById(sec + 'ToggleText');
+        if (body) {
+          body.style.display = shouldCollapse ? 'none' : 'block';
+          if (sum) sum.style.display = shouldCollapse ? 'flex' : 'none';
+          if (icon) icon.textContent = shouldCollapse ? '▼' : '▲';
+          if (text) text.textContent = shouldCollapse ? 'Details' : 'Hide';
+        }
+      });
+    }
+
+    async function requestGsvStream() {
+      try {
+        await fetch('/api/gsv/enable', { method: 'POST' });
+        updateDashboard();
+      } catch (e) {
+        console.error('Failed to request GSV stream:', e);
+      }
+    }
+
+    function renderSnrBars(satList) {
+      const container = document.getElementById('snrChartContainer');
+      if (!container) return;
+
+      if (!satList || satList.length === 0) {
+        container.innerHTML = `
+          <div style="width: 100%; text-align: center; padding: 24px; color: var(--text-muted);">
+            <div style="font-size: 26px; margin-bottom: 6px;">🛰️</div>
+            <div style="font-weight: 600;">Waiting for NMEA GSV satellite signal stream from LC29H...</div>
+            <div style="font-size: 12px; margin-top: 4px; color: #64748b;">(Click "🔄 Poll / Request GSV" above to trigger stream)</div>
+          </div>
+        `;
+        return;
+      }
+
+      const constColors = {
+        'GPS': '#38bdf8',     // Sky blue
+        'Galileo': '#34d399', // Emerald
+        'BeiDou': '#c084fc',  // Purple
+        'GLONASS': '#fb7185', // Rose
+        'QZSS': '#fbbf24'     // Amber
+      };
+
+      let html = '';
+      satList.forEach(sat => {
+        const snr = sat.snr || 0;
+        const heightPct = Math.min(100, Math.max(8, (snr / 50.0) * 100));
+        let barGrad = 'linear-gradient(to top, #059669, #10b981)';
+        let valColor = '#34d399';
+        if (snr < 28) {
+          barGrad = 'linear-gradient(to top, #dc2626, #ef4444)';
+          valColor = '#ef4444';
+        } else if (snr < 38) {
+          barGrad = 'linear-gradient(to top, #d97706, #f59e0b)';
+          valColor = '#fbbf24';
+        }
+        const tagColor = constColors[sat.constellation] || '#94a3b8';
+        const elevStr = (sat.elev !== null && sat.elev !== undefined) ? `${sat.elev}°` : '--';
+        const azStr = (sat.az !== null && sat.az !== undefined) ? `${sat.az}°` : '--';
+        const tooltip = `${sat.constellation} ${sat.id}&#10;SNR: ${snr.toFixed(1)} dB-Hz&#10;Elevation: ${elevStr}&#10;Azimuth: ${azStr}`;
+
+        html += `
+          <div class="snr-col" title="${tooltip}">
+            <div class="snr-val" style="color: ${valColor};">${Math.round(snr)}</div>
+            <div class="snr-bar-track">
+              <div class="snr-bar-fill" style="height: ${heightPct.toFixed(0)}%; background: ${barGrad};"></div>
+            </div>
+            <div class="snr-sat-tag" style="color: ${tagColor}; border-color: ${tagColor}40;">${sat.id}</div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    initCollapsibleState();
+    setInterval(updateDashboard, 400);
+    updateDashboard();
+  </script>
+</body>
+</html>

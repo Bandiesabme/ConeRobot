@@ -92,7 +92,83 @@ git clone https://github.com/Bandiesabme/ConeRobot.git ~/github/ConeRobot
 
 ---
 
-## 5. Reboot & Verify Hardware UART
+## 5. Power-Loss Protection (Hard Power Cuts)
+
+The base station is often powered off by simply cutting power (about twice a day). These steps protect the SD card and the saved base coordinates. **They add no meaningful power consumption** (well under 1 mA; several actually reduce SD activity).
+
+> [!NOTE]
+> `base_station_caster.py` already saves `base_station_fixed_coords.json` and `base_station_locations.json` **atomically** (temp file + `fsync` + atomic rename), so a power cut mid-save cannot corrupt your locked coordinates. Run `git pull` in `~/github/ConeRobot` to get this version.
+
+### Step 5.1: Keep System Logs in RAM
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/volatile.conf << 'EOF'
+[Journal]
+Storage=volatile
+RuntimeMaxUse=20M
+EOF
+sudo systemctl restart systemd-journald
+```
+
+### Step 5.2: Disable Disk-Based Swap (if present)
+```bash
+swapon --show
+```
+- **No output**, or only `/dev/zram0` (RAM-based): nothing to do.
+- **A swap file on the SD card** (e.g. `/var/swap`): run `sudo swapoff -a` and comment out any swap line in `/etc/fstab`. On older images you can also run `sudo systemctl disable --now dphys-swapfile`.
+
+> [!NOTE]
+> Newer Raspberry Pi OS images may not have `dphys-swapfile` at all (`Unit dphys-swapfile.service does not exist`). That is fine.
+
+### Step 5.3: Reduce SD Writes (`noatime`, `commit=60`, tmpfs `/tmp`)
+```bash
+# Backup, then add commit=60 (and noatime if missing) to the root (/) ext4 entry
+sudo cp /etc/fstab /etc/fstab.bak
+sudo sed -i -E '/^\S+\s+\/\s+ext4\s/ { /noatime/! s/defaults/defaults,noatime/ }' /etc/fstab
+sudo sed -i -E '/^\S+\s+\/\s+ext4\s/ { /commit=/! s/defaults,noatime/defaults,noatime,commit=60/ }' /etc/fstab
+
+# Add tmpfs for /tmp (only if not already present)
+grep -q '^tmpfs /tmp ' /etc/fstab || echo 'tmpfs /tmp tmpfs defaults,noatime,nosuid,size=32m 0 0' | sudo tee -a /etc/fstab
+
+# Reload, verify (root line must contain noatime,commit=60) and test for errors
+sudo systemctl daemon-reload
+grep ' / ' /etc/fstab
+sudo findmnt --verify
+```
+> [!NOTE]
+> If your `/` line uses a different option than `defaults` (e.g. `PARTUUID=... / ext4 rw,...`), the `sed` won't change it. In that case edit manually with `sudo nano /etc/fstab`. To undo: `sudo cp /etc/fstab.bak /etc/fstab`.
+
+
+### Step 5.4: Auto-Repair the Filesystem at Boot
+```bash
+# Run only ONCE (appends to the single line in cmdline.txt)
+sudo sed -i '1 s/$/ fsck.repair=yes/' /boot/firmware/cmdline.txt
+```
+
+### Step 5.5: Enable the Hardware Watchdog
+```bash
+echo "dtparam=watchdog=on" | sudo tee -a /boot/firmware/config.txt
+sudo sed -i 's/^#\?RuntimeWatchdogSec=.*/RuntimeWatchdogSec=15/' /etc/systemd/system.conf
+```
+A hung Pi now reboots itself automatically.
+
+### Step 5.6 (Optional): Lower Power Consumption
+```bash
+# Disable unused onboard audio (small saving)
+grep -q '^dtparam=audio=off' /boot/firmware/config.txt || echo "dtparam=audio=off" | sudo tee -a /boot/firmware/config.txt
+
+# Headless base station: disable HDMI output (about 20-25 mA saving)
+grep -q '^hdmi_blanking=1' /boot/firmware/config.txt || echo "hdmi_blanking=1" | sudo tee -a /boot/firmware/config.txt
+```
+> [!NOTE]
+> Keep the green ACT LED enabled: the end-of-shutdown blink pattern is used in the safe power-down procedure.
+
+> [!TIP]
+> A hard power cut is now safe, but the **3-second button hold** safe shutdown is still the best way to power down when possible.
+
+---
+
+## 6. Reboot & Verify Hardware UART
 
 ```bash
 sudo reboot
@@ -106,6 +182,13 @@ ls -l /dev/ttyAMA0
 *Expected Output:*
 ```text
 crw-rw---- 1 root dialout 204, 64 ... /dev/ttyAMA0
+```
+
+Verify the power-loss protection settings:
+
+```bash
+findmnt /      # options should include noatime
+free -h        # Swap should show 0B
 ```
 
 Your Raspberry Pi Zero is now fully prepared. Continue with the **[RTK Base Station Setup Guide](BASE_STATION_SETUP.md)** to test the caster and configure it to **[Auto-Start on Boot](BASE_STATION_SETUP.md#5-auto-start-on-boot-systemd-background-service)** whenever the Pi receives power.
