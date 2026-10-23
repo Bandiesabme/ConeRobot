@@ -1367,7 +1367,10 @@
         const tagColor = constColors[sat.constellation] || '#94a3b8';
         const elevStr = (sat.elev !== null && sat.elev !== undefined) ? `${sat.elev}°` : '--';
         const azStr = (sat.az !== null && sat.az !== undefined) ? `${sat.az}°` : '--';
-        const tooltip = `${sat.constellation} ${sat.id}&#10;SNR: ${snr.toFixed(1)} dB-Hz&#10;Elevation: ${elevStr}&#10;Azimuth: ${azStr}`;
+        const bandStr = (sat.bands && Object.keys(sat.bands).length > 0)
+          ? Object.entries(sat.bands).map(([b, v]) => `${b}: ${Number(v).toFixed(1)} dB-Hz`).join(' | ')
+          : `${snr.toFixed(1)} dB-Hz`;
+        const tooltip = `${sat.constellation} ${sat.id}&#10;SNR: ${bandStr}&#10;Elevation: ${elevStr}&#10;Azimuth: ${azStr}`;
 
         html += `
           <div class="snr-col" title="${tooltip}">

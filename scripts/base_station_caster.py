@@ -132,6 +132,7 @@ class NTRIPBaseCaster:
         self.last_serial_time: Optional[float] = None
         self.rtcm_crc_errors = 0
         self._last_gga_time = 0.0
+        self._last_msm_time = 0.0
 
         # RTCM 1005 verification (what the hardware actually broadcasts vs. what we locked)
         self._locked_ecef: Optional[Tuple[float, float, float]] = None
@@ -237,20 +238,38 @@ class NTRIPBaseCaster:
         except Exception as e:
             self._add_log(f"Failed to save locations: {e}", "ERROR")
 
+    def _get_trimmed_average_coords(self) -> Tuple[float, float, float]:
+        """Returns the 5%-trimmed multi-sample average during calibration, or the locked static position."""
+        if not self.is_static_fixed and self.coord_samples:
+            lats = sorted([s[0] for s in self.coord_samples])
+            lons = sorted([s[1] for s in self.coord_samples])
+            alts = sorted([s[2] for s in self.coord_samples])
+            trim = max(1, int(len(lats) * 0.05)) if len(lats) > 20 else 0
+            if trim > 0:
+                lats = lats[trim:-trim]
+                lons = lons[trim:-trim]
+                alts = alts[trim:-trim]
+            return (
+                sum(lats) / len(lats),
+                sum(lons) / len(lons),
+                sum(alts) / len(alts),
+            )
+        if self.survey_lat != 0.0 and self.survey_lon != 0.0:
+            return self.survey_lat, self.survey_lon, self.survey_alt
+        if self.coord_samples:
+            lats = [s[0] for s in self.coord_samples]
+            lons = [s[1] for s in self.coord_samples]
+            alts = [s[2] for s in self.coord_samples]
+            return sum(lats) / len(lats), sum(lons) / len(lons), sum(alts) / len(alts)
+        return 0.0, 0.0, 0.0
+
     def save_named_location(self, name: str) -> bool:
         """Saves current surveyed or fixed coordinates under a custom preset name."""
         if not name or not name.strip():
             return False
         name = name.strip()
 
-        lat, lon, alt = self.survey_lat, self.survey_lon, self.survey_alt
-        if (lat == 0.0 or lon == 0.0) and self.coord_samples:
-            lats = [s[0] for s in self.coord_samples]
-            lons = [s[1] for s in self.coord_samples]
-            alts = [s[2] for s in self.coord_samples]
-            lat = sum(lats) / len(lats)
-            lon = sum(lons) / len(lons)
-            alt = sum(alts) / len(alts)
+        lat, lon, alt = self._get_trimmed_average_coords()
 
         if lat == 0.0 or lon == 0.0:
             self._add_log("Cannot save preset: No valid GNSS coordinates available yet!", "WARN")
@@ -446,25 +465,40 @@ class NTRIPBaseCaster:
                 except Exception as e:
                     self._add_log(f"Failed to write GNSS command: {e}", "WARN")
 
+    def _enable_rtcm_and_nmea_outputs(self) -> None:
+        """Enables RTCM 1005, MSM7, NMEA GGA, and NMEA GSV outputs on the LC29H(BS)."""
+        # Enable RTCM 1005 (Station Coordinates at 1 Hz)
+        self._send_gnss_cmd("PAIR434,1")
+        time.sleep(0.05)
+        # Enable RTCM MSM7 multi-constellation observations
+        self._send_gnss_cmd("PAIR432,1")
+        time.sleep(0.05)
+        # Enable NMEA GGA sentence output (1 Hz) for live telemetry
+        self._send_gnss_cmd("PAIR062,0,1")
+        time.sleep(0.05)
+        # Enable NMEA GSV sentence output (1 Hz) for satellite C/N0 SNR telemetry
+        self._send_gnss_cmd("PAIR062,3,1")
+        time.sleep(0.05)
+
+    def _restart_gnss_subsystem(self) -> None:
+        """Restarts the LC29H GNSS engine so saved PQTMCFGSVIN ARP / mode changes take effect immediately."""
+        self._send_gnss_cmd("PAIR513")
+        time.sleep(0.05)
+        self._send_gnss_cmd("PAIR003")
+        time.sleep(0.15)
+        self._send_gnss_cmd("PAIR002")
+        time.sleep(0.15)
+        self._enable_rtcm_and_nmea_outputs()
+
     def _init_base_gnss_hardware(self) -> None:
         """Initializes the Waveshare LC29H(BS) HAT with proper RTK Base mode & RTCM outputs."""
         self._add_log("🔧 Configuring LC29H(BS) Hardware: Enabling Base Mode & RTCM 1005/MSM7...")
         # 1. Set receiver mode to Base Station (2)
         self._send_gnss_cmd("PQTMCFGRCVRMODE,W,2")
         time.sleep(0.05)
-        # 2. Enable RTCM 1005 (Station Coordinates at 1 Hz)
-        self._send_gnss_cmd("PAIR434,1")
-        time.sleep(0.05)
-        # 3. Enable RTCM MSM7 multi-constellation observations
-        self._send_gnss_cmd("PAIR432,1")
-        time.sleep(0.05)
-        # 4. Enable NMEA GGA sentence output (1 Hz) for live telemetry
-        self._send_gnss_cmd("PAIR062,0,1")
-        time.sleep(0.05)
-        # 5. Enable NMEA GSV sentence output (1 Hz) for satellite C/N0 SNR telemetry
-        self._send_gnss_cmd("PAIR062,3,1")
-        time.sleep(0.05)
-        # 4. If static coordinates are locked, send fixed position to hardware
+        # 2. Enable RTCM & NMEA streams
+        self._enable_rtcm_and_nmea_outputs()
+        # 3. If static coordinates are locked, send fixed position to hardware
         if self.is_static_fixed and self.survey_lat != 0.0 and self.survey_lon != 0.0:
             self._send_hardware_fixed_coords(self.survey_lat, self.survey_lon, self.survey_alt)
         else:
@@ -472,9 +506,13 @@ class NTRIPBaseCaster:
 
     def _send_hardware_survey_in(self) -> None:
         """Configures the LC29H(BS) HAT into dynamic Survey-In mode using target duration and accuracy."""
+        if not self.ser or not self.ser.is_open:
+            return
         self._send_gnss_cmd(f"PQTMCFGSVIN,W,1,{self.survey_target_duration},{self.survey_target_accuracy:.2f},0,0,0")
         time.sleep(0.05)
         self._send_gnss_cmd("PQTMSAVEPAR")
+        time.sleep(0.05)
+        self._restart_gnss_subsystem()
         self._add_log(f"🛰️ LC29H Hardware Survey-In Configured: Target {self.survey_target_duration}s, Accuracy <={self.survey_target_accuracy:.2f}m")
 
     def _send_hardware_fixed_coords(self, lat: float, lon: float, alt: float) -> None:
@@ -483,9 +521,15 @@ class NTRIPBaseCaster:
             return
         x, y, z = self._lla_to_ecef(lat, lon, alt)
         self._locked_ecef = (x, y, z)
+        self._last_1005_ecef = None
+        self.base_1005_offset_m = None
+        if not self.ser or not self.ser.is_open:
+            return
         self._send_gnss_cmd(f"PQTMCFGSVIN,W,2,0,0,{x:.4f},{y:.4f},{z:.4f}")
         time.sleep(0.05)
         self._send_gnss_cmd("PQTMSAVEPAR")
+        time.sleep(0.05)
+        self._restart_gnss_subsystem()
         self._add_log(f"🎯 LC29H Hardware Locked to ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m) [ECEF: {x:.2f}, {y:.2f}, {z:.2f}]")
 
     def _apply_fixed_coords(self, lat: float, lon: float, alt: float, source: str) -> None:
@@ -503,25 +547,10 @@ class NTRIPBaseCaster:
 
     def lock_now(self) -> bool:
         """Immediately locks current accumulated average position and writes to disk."""
-        if not self.coord_samples:
-            if self.survey_lat != 0.0 and self.survey_lon != 0.0:
-                mean_lat, mean_lon, mean_alt = self.survey_lat, self.survey_lon, self.survey_alt
-            else:
-                self._add_log("Cannot lock: No GPS coordinates collected yet!", "WARN")
-                return False
-        else:
-            # Robust median / trimmed average
-            lats = sorted([s[0] for s in self.coord_samples])
-            lons = sorted([s[1] for s in self.coord_samples])
-            alts = sorted([s[2] for s in self.coord_samples])
-            trim = max(1, int(len(lats) * 0.05)) if len(lats) > 20 else 0
-            if trim > 0:
-                lats = lats[trim:-trim]
-                lons = lons[trim:-trim]
-                alts = alts[trim:-trim]
-            mean_lat = sum(lats) / len(lats)
-            mean_lon = sum(lons) / len(lons)
-            mean_alt = sum(alts) / len(alts)
+        mean_lat, mean_lon, mean_alt = self._get_trimmed_average_coords()
+        if mean_lat == 0.0 or mean_lon == 0.0:
+            self._add_log("Cannot lock: No GPS coordinates collected yet!", "WARN")
+            return False
 
         self._apply_fixed_coords(mean_lat, mean_lon, mean_alt, "Manual Lock")
 
@@ -802,47 +831,54 @@ class NTRIPBaseCaster:
         self.survey_duration = int(now - self.survey_start_time)
         self.coord_samples.append((lat, lon, alt))
 
-        # Keep a rolling window of recent samples (last 300 samples)
-        # to ensure old cold-start / satellite acquisition jumps don't corrupt accuracy
-        if len(self.coord_samples) > 500:
-            self.coord_samples = self.coord_samples[-300:]
+        # Retain samples across the full survey target window (e.g. 3600s = 1 hour at 1 Hz,
+        # up to 1.5x target duration) instead of truncating to the last 5 minutes
+        max_samples = max(3600, int(self.survey_target_duration * 1.5))
+        if len(self.coord_samples) > max_samples + 200:
+            self.coord_samples = self.coord_samples[-max_samples:]
 
-        if len(self.coord_samples) >= 5:
-            lats = [s[0] for s in self.coord_samples]
-            lons = [s[1] for s in self.coord_samples]
+        if len(self.coord_samples) < 5:
+            self.survey_lat = lat
+            self.survey_lon = lon
+            self.survey_alt = alt
+            self.survey_status = "CALIBRATING"
+            return
 
-            # Use median to filter out wild initial startup outliers (> 30 meters from median)
-            median_lat = sorted(lats)[len(lats) // 2]
-            median_lon = sorted(lons)[len(lons) // 2]
+        lats = [s[0] for s in self.coord_samples]
+        lons = [s[1] for s in self.coord_samples]
 
-            lat_m = 111132.0
-            lon_m = 111412.0 * math.cos(math.radians(median_lat))
+        # Use median to filter out wild initial startup outliers (> 30 meters from median)
+        median_lat = sorted(lats)[len(lats) // 2]
+        median_lon = sorted(lons)[len(lons) // 2]
 
-            valid_samples = [
-                s for s in self.coord_samples
-                if math.sqrt(((s[1] - median_lon) * lon_m)**2 + ((s[0] - median_lat) * lat_m)**2) < 30.0
-            ]
+        lat_m = 111132.0
+        lon_m = 111412.0 * math.cos(math.radians(median_lat))
 
-            if len(valid_samples) >= 5:
-                v_lats = [s[0] for s in valid_samples]
-                v_lons = [s[1] for s in valid_samples]
-                mean_lat = sum(v_lats) / len(v_lats)
-                mean_lon = sum(v_lons) / len(v_lons)
+        valid_samples = [
+            s for s in self.coord_samples
+            if math.sqrt(((s[1] - median_lon) * lon_m)**2 + ((s[0] - median_lat) * lat_m)**2) < 30.0
+        ]
 
-                dx = [(ln - mean_lon) * lon_m for ln in v_lons]
-                dy = [(lt - mean_lat) * lat_m for lt in v_lats]
-                sigma_2d = math.sqrt((sum(x**2 for x in dx) + sum(y**2 for y in dy)) / len(dx))
-                self.survey_accuracy = round(sigma_2d, 2)
-                self.survey_lat = mean_lat
-                self.survey_lon = mean_lon
-                self.survey_alt = sum(s[2] for s in valid_samples) / len(valid_samples)
+        if len(valid_samples) >= 5:
+            v_lats = [s[0] for s in valid_samples]
+            v_lons = [s[1] for s in valid_samples]
+            mean_lat = sum(v_lats) / len(v_lats)
+            mean_lon = sum(v_lons) / len(v_lons)
 
-                # Auto-Lock condition reached
-                if (self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy) or (self.survey_duration >= self.survey_target_duration * 1.5):
-                    self._add_log(f"🎯 Auto-Calibration COMPLETE! (Duration: {self.survey_duration}s, Acc: {self.survey_accuracy:.2f}m)")
-                    self.lock_now()
-                else:
-                    self.survey_status = "CALIBRATING"
+            dx = [(ln - mean_lon) * lon_m for ln in v_lons]
+            dy = [(lt - mean_lat) * lat_m for lt in v_lats]
+            sigma_2d = math.sqrt((sum(x**2 for x in dx) + sum(y**2 for y in dy)) / len(dx))
+            self.survey_accuracy = round(sigma_2d, 2)
+            self.survey_lat = mean_lat
+            self.survey_lon = mean_lon
+            self.survey_alt = sum(s[2] for s in valid_samples) / len(valid_samples)
+
+            # Auto-Lock condition reached
+            if (self.survey_duration >= self.survey_target_duration and self.survey_accuracy <= self.survey_target_accuracy) or (self.survey_duration >= self.survey_target_duration * 1.5):
+                self._add_log(f"🎯 Auto-Calibration COMPLETE! (Duration: {self.survey_duration}s, Acc: {self.survey_accuracy:.2f}m)")
+                self.lock_now()
+            else:
+                self.survey_status = "CALIBRATING"
 
     @staticmethod
     def _ecef_to_lla(x: float, y: float, z: float) -> Tuple[float, float, float]:
@@ -906,11 +942,8 @@ class NTRIPBaseCaster:
                     self._check_1005_consistency(x, y, z)
                     lat, lon, alt = self._ecef_to_lla(x, y, z)
                     if not self.is_static_fixed:
-                        self.survey_lat = lat
-                        self.survey_lon = lon
-                        self.survey_alt = alt
-                        # Only use 1005 as a fallback sample source when GGA isn't flowing,
-                        # so the survey average isn't a mix of two different position sources.
+                        # Only use 1005 as a fallback sample source when GGA isn't flowing;
+                        # never overwrite self.survey_lat/lon/alt directly with a single-epoch reading.
                         if time.time() - self._last_gga_time > 5.0:
                             self._update_survey_statistics(lat, lon, alt)
 
@@ -922,6 +955,7 @@ class NTRIPBaseCaster:
                 self.msm_sats[constellation] = num_sats
                 total_sats = sum(self.msm_sats.values())
                 if total_sats > 0:
+                    self._last_msm_time = time.time()
                     self.satellites_tracked = total_sats
         except Exception:
             pass
@@ -950,11 +984,12 @@ class NTRIPBaseCaster:
             if offset > 0.05 and warn_ok:
                 msg = (
                     f"⚠️ Hardware broadcasts a base position {offset:.2f} m away from the locked coordinates. "
-                    f"The fixed-position command was not applied (module may need a restart/power-cycle)."
+                    f"Re-applying fixed-position command and restarting GNSS subsystem..."
                 )
                 self._add_log(msg, "WARN")
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
                 self._last_1005_warn_time = now
+                self._send_hardware_fixed_coords(self.survey_lat, self.survey_lon, self.survey_alt)
 
     def _parse_survey_line(self, line: str) -> None:
         """Parses Quectel LC29H Survey-In sentences and standard NMEA sentences."""
@@ -964,32 +999,48 @@ class NTRIPBaseCaster:
                 if len(parts) >= 10:
                     lat = self._parse_nmea_coordinate(parts[2], parts[3], False)
                     lon = self._parse_nmea_coordinate(parts[4], parts[5], True)
-                    if not self.is_static_fixed and lat and lon:
-                        self.survey_lat = lat
-                        self.survey_lon = lon
-                    if parts[7].isdigit():
-                        self.satellites_tracked = int(parts[7])
+                    gga_sats = int(parts[7]) if parts[7].isdigit() else 0
+                    # Standard NMEA 0183 GGA caps satellite count at 12; only use it when
+                    # multi-constellation RTCM MSM7 counts are not actively arriving
+                    if gga_sats > 0 and (time.time() - self._last_msm_time > 10.0):
+                        with self.sat_snr_lock:
+                            snr_sats = len(self.sat_snr_map)
+                        self.satellites_tracked = max(gga_sats, snr_sats)
                     if parts[8].replace('.', '', 1).isdigit():
                         self.hdop = float(parts[8])
-                    if not self.is_static_fixed and parts[9]:
+                    alt = self.survey_alt
+                    if parts[9]:
                         try:
                             msl_alt = float(parts[9])
                             geoid_sep = float(parts[11]) if len(parts) > 11 and parts[11] else 0.0
                             # GGA altitude is above mean sea level; ECEF / RTCM 1005 needs WGS-84
                             # ellipsoidal height = MSL height + geoid separation (~+44 m in Hungary)
-                            self.survey_alt = msl_alt + geoid_sep
+                            alt = msl_alt + geoid_sep
                         except ValueError:
                             pass
 
-                    if lat and lon and self.satellites_tracked >= 4:
+                    if lat and lon and max(gga_sats, self.satellites_tracked) >= 4:
                         self._last_gga_time = time.time()
-                        self._update_survey_statistics(lat, lon, self.survey_alt)
+                        self._update_survey_statistics(lat, lon, alt)
 
             elif 'GSV' in line:
                 self._parse_gsv(line)
 
         except Exception:
             pass
+
+    @staticmethod
+    def _resolve_gsv_band(talker: str, signal_id: str) -> str:
+        """Resolves NMEA 4.10 GSV signal ID to a carrier frequency band label (e.g. L1, L5)."""
+        band_table = {
+            'GP': {'1': 'L1', '6': 'L2', '7': 'L5', '8': 'L5'},
+            'GQ': {'1': 'L1', '6': 'L2', '7': 'L5', '8': 'L5'},
+            'GL': {'1': 'G1', '3': 'G2'},
+            'GA': {'1': 'E5a', '2': 'E5b', '7': 'E1'},
+            'GB': {'1': 'B1I', '3': 'B1C', '5': 'B2a', 'B': 'B2I'},
+            'BD': {'1': 'B1I', '3': 'B1C', '5': 'B2a', 'B': 'B2I'},
+        }
+        return band_table.get(talker, {}).get(signal_id, 'L1' if signal_id in ('', '1') else f'S{signal_id}')
 
     def _parse_gsv(self, line: str) -> None:
         """Parses multi-constellation NMEA GSV sentences for per-satellite SNR (C/N0), elevation, azimuth."""
@@ -1005,16 +1056,15 @@ class NTRIPBaseCaster:
             prefix = prefix_map.get(talker, 'S')
             constellation = const_map.get(talker, 'GNSS')
 
-            if parts[3].isdigit():
-                in_view = int(parts[3])
-                if in_view > 0:
-                    self.satellites_tracked = max(self.satellites_tracked, in_view)
-
             n_fields = len(parts) - 4
+            n_sat_blocks = n_fields // 4
+            signal_id = parts[4 + n_sat_blocks * 4].strip().upper() if (n_fields % 4 >= 1) else '1'
+            band = self._resolve_gsv_band(talker, signal_id)
+
             now = time.time()
             self._last_gsv_time = now
 
-            for i in range(4, 4 + (n_fields // 4) * 4, 4):
+            for i in range(4, 4 + n_sat_blocks * 4, 4):
                 prn_str = parts[i].strip()
                 if not prn_str or not prn_str.isdigit():
                     continue
@@ -1043,18 +1093,40 @@ class NTRIPBaseCaster:
                         pass
 
                 with self.sat_snr_lock:
+                    existing = self.sat_snr_map.get(sat_id)
+                    sig_state: Dict[str, dict] = {}
+                    if existing and isinstance(existing.get("band_state"), dict):
+                        sig_state = {
+                            b: info for b, info in existing["band_state"].items()
+                            if now - info.get("last_seen", 0) <= 5.0
+                        }
+
                     if snr is not None and snr > 0:
+                        sig_state[band] = {"snr": round(snr, 1), "last_seen": now}
+                    elif band in sig_state:
+                        sig_state[band]["last_seen"] = now
+
+                    if sig_state:
+                        best_snr = max(info["snr"] for info in sig_state.values())
                         self.sat_snr_map[sat_id] = {
                             "id": sat_id,
                             "constellation": constellation,
                             "prn": prn,
-                            "elev": int(elev) if elev is not None else None,
-                            "az": int(az) if az is not None else None,
-                            "snr": round(snr, 1),
+                            "elev": int(elev) if elev is not None else (existing.get("elev") if existing else None),
+                            "az": int(az) if az is not None else (existing.get("az") if existing else None),
+                            "snr": best_snr,
+                            "bands": {b: info["snr"] for b, info in sig_state.items()},
+                            "band_state": sig_state,
                             "last_seen": now
                         }
-                    elif sat_id in self.sat_snr_map:
-                        self.sat_snr_map[sat_id]["last_seen"] = now
+                    elif existing:
+                        existing["last_seen"] = now
+
+            if time.time() - self._last_msm_time > 10.0:
+                with self.sat_snr_lock:
+                    snr_sats = len(self.sat_snr_map)
+                if snr_sats > 0:
+                    self.satellites_tracked = max(self.satellites_tracked, snr_sats)
         except Exception:
             pass
 
@@ -1409,7 +1481,22 @@ class NTRIPBaseCaster:
 
         now = time.time()
         with self.sat_snr_lock:
-            stale_keys = [k for k, v in self.sat_snr_map.items() if now - v.get("last_seen", 0) > 5.0]
+            stale_keys = []
+            for k, v in self.sat_snr_map.items():
+                if now - v.get("last_seen", 0) > 5.0:
+                    stale_keys.append(k)
+                    continue
+                if isinstance(v.get("band_state"), dict):
+                    fresh_bands = {
+                        b: info for b, info in v["band_state"].items()
+                        if now - info.get("last_seen", 0) <= 5.0
+                    }
+                    if not fresh_bands:
+                        stale_keys.append(k)
+                    else:
+                        v["band_state"] = fresh_bands
+                        v["bands"] = {b: info["snr"] for b, info in fresh_bands.items()}
+                        v["snr"] = max(info["snr"] for info in fresh_bands.values())
             for k in stale_keys:
                 del self.sat_snr_map[k]
             sat_list = list(self.sat_snr_map.values())
