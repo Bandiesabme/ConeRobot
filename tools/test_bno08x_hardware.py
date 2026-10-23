@@ -90,9 +90,11 @@ print("\n[Step 3/4] Initializing BNO08x over I2C...")
 i2c = None
 sensor = None
 try:
+    target_addr = 0x4B if (0x4B in detected_addrs and 0x4A not in detected_addrs) else 0x4A
     i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
-    sensor = BNO08X_I2C(i2c, address=0x4A)
-    print("  ✓ SHTP transport established with BNO08x at 0x4A.")
+    print(f"  Connecting to BNO08x at I2C address 0x{target_addr:02X}...")
+    sensor = BNO08X_I2C(i2c, address=target_addr)
+    print(f"  ✓ SHTP transport established with BNO08x at 0x{target_addr:02X}.")
     
     # Settle time
     time.sleep(0.8)
