@@ -37,6 +37,8 @@ class MDD10MotorController(Node):
         self.declare_parameter('dir2_pin', 25)   # Right Motor Direction (GPIO 25 / Pin 22)
         
         self.declare_parameter('wheel_track', 0.20)     # Distance between wheels in meters
+        self.declare_parameter('max_linear_speed', 1.0) # Maximum linear speed (m/s) for scaling
+        self.declare_parameter('max_angular_speed', 3.0)# Maximum angular speed (rad/s) for scaling
         self.declare_parameter('cmd_timeout', 0.5)     # Fail-safe timeout in seconds
 
         # Read parameters
