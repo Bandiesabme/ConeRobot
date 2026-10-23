@@ -24,6 +24,7 @@ Usage:
 import argparse
 import base64
 from collections import deque
+import copy
 from datetime import datetime
 import errno
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -112,10 +113,25 @@ class NTRIPBaseCaster:
         self.is_static_fixed = False
         self.locked_timestamp = ""
 
-        # Persistence file paths
+        # Persistence file paths & in-memory caches
         self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_station_fixed_coords.json")
         self.locations_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "base_station_locations.json")
         self.active_location: Optional[str] = None
+        self._persistence_lock = threading.RLock()
+        self._locations_cache: Optional[dict] = None
+        self._saved_coords_cache: Optional[dict] = None
+
+        # Network IP caching
+        self._cached_ip: Optional[str] = None
+        self._cached_ip_time: float = 0.0
+        self._ip_lock = threading.Lock()
+
+        # Telemetry & Sensor Caching (I2C + Sysfs)
+        self._i2c_lock = threading.Lock()
+        self._cached_battery: Optional[dict] = None
+        self._cached_battery_time: float = 0.0
+        self._cached_cpu_temp: Optional[float] = None
+        self._cached_cpu_temp_time: float = 0.0
 
         # Coordinate sample history (for averaging)
         self.coord_samples: List[Tuple[float, float, float]] = []
@@ -205,38 +221,51 @@ class NTRIPBaseCaster:
         except Exception:
             pass
 
-    def _load_locations_store(self) -> dict:
-        """Loads all named location profiles from JSON with migration from legacy format."""
-        if os.path.exists(self.locations_file):
-            try:
-                with open(self.locations_file, "r") as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and "locations" in data:
-                    return data
-            except Exception:
-                pass
+    def _load_locations_store(self, force_reload: bool = False) -> dict:
+        """Loads all named location profiles from JSON (in-memory cached) with migration from legacy format."""
+        with self._persistence_lock:
+            if not force_reload and self._locations_cache is not None:
+                return copy.deepcopy(self._locations_cache)
 
-        # Migration from legacy single-config file if exists
-        store = {"active_location": None, "locations": {}}
-        legacy = self._get_saved_coords_info()
-        if legacy:
-            name = "Default Benchmark"
-            store["active_location"] = name
-            store["locations"][name] = {
-                "lat": legacy["lat"],
-                "lon": legacy["lon"],
-                "alt": legacy.get("alt", 0.0),
-                "timestamp": legacy.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-            }
-            self._save_locations_store(store)
-        return store
+            store = None
+            if os.path.exists(self.locations_file):
+                try:
+                    with open(self.locations_file, "r") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and "locations" in data:
+                        store = data
+                except Exception:
+                    pass
+
+            if store is None:
+                # Migration from legacy single-config file if exists
+                store = {"active_location": None, "locations": {}}
+                legacy = self._get_saved_coords_info(force_reload=True)
+                if legacy:
+                    name = "Default Benchmark"
+                    store["active_location"] = name
+                    store["locations"][name] = {
+                        "lat": legacy["lat"],
+                        "lon": legacy["lon"],
+                        "alt": legacy.get("alt", 0.0),
+                        "timestamp": legacy.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    }
+                    try:
+                        self._atomic_write_json(self.locations_file, store)
+                    except Exception as e:
+                        self._add_log(f"Failed to migrate locations: {e}", "ERROR")
+
+            self._locations_cache = copy.deepcopy(store)
+            return copy.deepcopy(self._locations_cache)
 
     def _save_locations_store(self, store: dict) -> None:
-        """Persists location profiles to disk."""
-        try:
-            self._atomic_write_json(self.locations_file, store)
-        except Exception as e:
-            self._add_log(f"Failed to save locations: {e}", "ERROR")
+        """Persists location profiles to disk and updates in-memory cache."""
+        with self._persistence_lock:
+            try:
+                self._atomic_write_json(self.locations_file, store)
+                self._locations_cache = copy.deepcopy(store)
+            except Exception as e:
+                self._add_log(f"Failed to save locations: {e}", "ERROR")
 
     def _get_trimmed_average_coords(self) -> Tuple[float, float, float]:
         """Returns the 5%-trimmed multi-sample average during calibration, or the locked static position."""
@@ -288,14 +317,17 @@ class NTRIPBaseCaster:
 
         # Also write legacy single config for backward compatibility
         try:
-            self._atomic_write_json(self.config_file, {
+            legacy_data = {
                 "is_locked": True,
                 "lat": round(lat, 8),
                 "lon": round(lon, 8),
                 "alt": round(alt, 2),
                 "samples": len(self.coord_samples) or 100,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
+            }
+            with self._persistence_lock:
+                self._atomic_write_json(self.config_file, legacy_data)
+                self._saved_coords_cache = copy.deepcopy(legacy_data)
         except Exception:
             pass
 
@@ -334,17 +366,23 @@ class NTRIPBaseCaster:
             return True
         return False
 
-    def _get_saved_coords_info(self) -> Optional[dict]:
-        """Returns saved coordinates dictionary if present on disk."""
-        if os.path.exists(self.config_file):
-            try:
-                with open(self.config_file, "r") as f:
-                    data = json.load(f)
-                if data.get("is_locked"):
-                    return data
-            except Exception:
-                pass
-        return None
+    def _get_saved_coords_info(self, force_reload: bool = False) -> Optional[dict]:
+        """Returns saved coordinates dictionary from cache or disk if present."""
+        with self._persistence_lock:
+            if not force_reload and self._saved_coords_cache is not None:
+                return copy.deepcopy(self._saved_coords_cache)
+
+            if os.path.exists(self.config_file):
+                try:
+                    with open(self.config_file, "r") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and data.get("is_locked"):
+                        self._saved_coords_cache = copy.deepcopy(data)
+                        return copy.deepcopy(self._saved_coords_cache)
+                except Exception:
+                    pass
+            self._saved_coords_cache = None
+            return None
 
     def use_saved_now(self) -> bool:
         """Explicitly applies previously saved static coordinates upon user request."""
@@ -361,33 +399,53 @@ class NTRIPBaseCaster:
         with self.logs_lock:
             self.logs.append(entry)
 
-    def _get_local_ip(self) -> str:
-        """Helper to get primary network IP address across any router, hotspot, or offline network."""
-        for target in ["8.8.8.8", "192.168.0.1", "192.168.1.1", "192.168.137.1", "10.0.0.1", "1.1.1.1"]:
+    def _get_local_ip(self, max_age_sec: float = 10.0) -> str:
+        """Helper to get primary network IP address across any router, hotspot, or offline network (cached with 10s TTL)."""
+        now = time.time()
+        if self._cached_ip and (now - self._cached_ip_time < max_age_sec):
+            return self._cached_ip
+
+        with self._ip_lock:
+            now = time.time()
+            if self._cached_ip and (now - self._cached_ip_time < max_age_sec):
+                return self._cached_ip
+
+            for target in ["8.8.8.8", "192.168.0.1", "192.168.1.1", "192.168.137.1", "10.0.0.1", "1.1.1.1"]:
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.connect((target, 80))
+                    ip = s.getsockname()[0]
+                    s.close()
+                    if ip and not ip.startswith("127."):
+                        self._cached_ip = ip
+                        self._cached_ip_time = now
+                        self.local_ip = ip
+                        return ip
+                except Exception:
+                    pass
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect((target, 80))
-                ip = s.getsockname()[0]
-                s.close()
-                if ip and not ip.startswith("127."):
-                    return ip
+                import subprocess
+                out = subprocess.check_output(["hostname", "-I"], timeout=1.0).decode('ascii').strip()
+                ips = [i for i in out.split() if not i.startswith("127.")]
+                if ips:
+                    self._cached_ip = ips[0]
+                    self._cached_ip_time = now
+                    self.local_ip = ips[0]
+                    return ips[0]
             except Exception:
                 pass
-        try:
-            import subprocess
-            out = subprocess.check_output(["hostname", "-I"], timeout=1.0).decode('ascii').strip()
-            ips = [i for i in out.split() if not i.startswith("127.")]
-            if ips:
-                return ips[0]
-        except Exception:
-            pass
-        try:
-            host_ip = socket.gethostbyname(socket.gethostname())
-            if host_ip and not host_ip.startswith("127."):
-                return host_ip
-        except Exception:
-            pass
-        return "127.0.0.1"
+            try:
+                host_ip = socket.gethostbyname(socket.gethostname())
+                if host_ip and not host_ip.startswith("127."):
+                    self._cached_ip = host_ip
+                    self._cached_ip_time = now
+                    self.local_ip = host_ip
+                    return host_ip
+            except Exception:
+                pass
+            self._cached_ip = "127.0.0.1"
+            self._cached_ip_time = now
+            return "127.0.0.1"
 
     def _udp_beacon_loop(self) -> None:
         """Broadcasts a periodic UDP discovery beacon every 1 second on port 2102 for zero-config rover pairing."""
@@ -563,14 +621,17 @@ class NTRIPBaseCaster:
 
         # Save to disk
         try:
-            self._atomic_write_json(self.config_file, {
+            cfg_data = {
                 "is_locked": True,
                 "lat": round(mean_lat, 8),
                 "lon": round(mean_lon, 8),
                 "alt": round(mean_alt, 2),
                 "samples": len(self.coord_samples),
                 "timestamp": self.locked_timestamp
-            })
+            }
+            with self._persistence_lock:
+                self._atomic_write_json(self.config_file, cfg_data)
+                self._saved_coords_cache = copy.deepcopy(cfg_data)
             self._add_log(f"💾 Saved permanent static coordinates to {os.path.basename(self.config_file)}")
 
             # Also update locations store active position
@@ -591,15 +652,17 @@ class NTRIPBaseCaster:
 
     def recalibrate(self) -> bool:
         """Clears saved fixed position and restarts a fresh 1-hour calibration survey."""
-        try:
-            if os.path.exists(self.config_file):
-                os.remove(self.config_file)
-            store = self._load_locations_store()
-            store["active_location"] = None
-            self._save_locations_store(store)
-            self.active_location = None
-        except Exception:
-            pass
+        with self._persistence_lock:
+            try:
+                if os.path.exists(self.config_file):
+                    os.remove(self.config_file)
+                self._saved_coords_cache = None
+                store = self._load_locations_store()
+                store["active_location"] = None
+                self._save_locations_store(store)
+                self.active_location = None
+            except Exception:
+                pass
 
         self.is_static_fixed = False
         self._locked_ecef = None
@@ -1411,75 +1474,93 @@ class NTRIPBaseCaster:
                 self._send_gnss_cmd("PAIR062,3,1")
                 self._send_gnss_cmd("PQTMCFGMSGRATE,W,GSV,1")
 
-    def _get_battery_data(self) -> Optional[dict]:
-        """Reads INA219 battery bus voltage, shunt current, and power with hardware 128x averaging and sliding window filter."""
-        try:
+    def _get_battery_data(self, max_age_sec: float = 1.0) -> Optional[dict]:
+        """Reads INA219 battery bus voltage, shunt current, and power with hardware 128x averaging, caching, and thread-safe bus access."""
+        now = time.time()
+        if self._cached_battery is not None and (now - self._cached_battery_time < max_age_sec):
+            return self._cached_battery
+
+        with self._i2c_lock:
+            now = time.time()
+            if self._cached_battery is not None and (now - self._cached_battery_time < max_age_sec):
+                return self._cached_battery
+
             try:
-                import smbus
-            except ImportError:
-                import smbus2 as smbus  # type: ignore
-            bus = smbus.SMBus(1)
-            try:
-                # 1. Enable Hardware 128-sample ADC averaging in INA219 config register (0x00)
-                if not self._ina219_configured:
-                    try:
-                        # 0x3FFF: 32V FSR, 320mV shunt, 128x averaging (68.1ms), continuous mode
-                        bus.write_word_data(0x40, 0x00, ((0x3F) | (0xFF << 8)))
-                        self._ina219_configured = True
-                    except Exception:
-                        pass
+                try:
+                    import smbus
+                except ImportError:
+                    import smbus2 as smbus  # type: ignore
+                bus = smbus.SMBus(1)
+                try:
+                    # 1. Enable Hardware 128-sample ADC averaging in INA219 config register (0x00)
+                    if not self._ina219_configured:
+                        try:
+                            # 0x3FFF: 32V FSR, 320mV shunt, 128x averaging (68.1ms), continuous mode
+                            bus.write_word_data(0x40, 0x00, ((0x3F) | (0xFF << 8)))
+                            self._ina219_configured = True
+                        except Exception:
+                            pass
 
-                # 2. Register 0x02: Bus Voltage (LSB = 4 mV)
-                raw_v = bus.read_word_data(0x40, 0x02)
-                raw_v_swapped = ((raw_v & 0xFF) << 8) | (raw_v >> 8)
-                raw_v_val = ((raw_v_swapped >> 3) & 0x1FFF) * 0.004
+                    # 2. Register 0x02: Bus Voltage (LSB = 4 mV)
+                    raw_v = bus.read_word_data(0x40, 0x02)
+                    raw_v_swapped = ((raw_v & 0xFF) << 8) | (raw_v >> 8)
+                    raw_v_val = ((raw_v_swapped >> 3) & 0x1FFF) * 0.004
 
-                # 3. Register 0x01: Shunt Current (signed 16-bit, 10 µV LSB / 0.1 Ω = 0.1 mA)
-                raw_s = bus.read_word_data(0x40, 0x01)
-                raw_s_swapped = ((raw_s & 0xFF) << 8) | (raw_s >> 8)
-                if raw_s_swapped >= 32768:
-                    raw_s_swapped -= 65536
-                raw_ma_val = raw_s_swapped * 0.1
+                    # 3. Register 0x01: Shunt Current (signed 16-bit, 10 µV LSB / 0.1 Ω = 0.1 mA)
+                    raw_s = bus.read_word_data(0x40, 0x01)
+                    raw_s_swapped = ((raw_s & 0xFF) << 8) | (raw_s >> 8)
+                    if raw_s_swapped >= 32768:
+                        raw_s_swapped -= 65536
+                    raw_ma_val = raw_s_swapped * 0.1
 
-                # 4. Step-change detection: Flush window immediately if charger is plugged/unplugged
-                if self._batt_ma_history:
-                    last_avg_ma = sum(self._batt_ma_history) / len(self._batt_ma_history)
-                    if (last_avg_ma < -100 and raw_ma_val > 50) or (last_avg_ma > 50 and raw_ma_val < -100):
-                        self._batt_v_history.clear()
-                        self._batt_ma_history.clear()
+                    # 4. Step-change detection: Flush window immediately if charger is plugged/unplugged
+                    if self._batt_ma_history:
+                        last_avg_ma = sum(self._batt_ma_history) / len(self._batt_ma_history)
+                        if (last_avg_ma < -100 and raw_ma_val > 50) or (last_avg_ma > 50 and raw_ma_val < -100):
+                            self._batt_v_history.clear()
+                            self._batt_ma_history.clear()
 
-                self._batt_v_history.append(raw_v_val)
-                self._batt_ma_history.append(raw_ma_val)
+                    self._batt_v_history.append(raw_v_val)
+                    self._batt_ma_history.append(raw_ma_val)
 
-                # 5. Sliding window moving average (~3 seconds smooth)
-                avg_v = round(sum(self._batt_v_history) / len(self._batt_v_history), 2)
-                avg_ma = round(sum(self._batt_ma_history) / len(self._batt_ma_history), 1)
-                power_w = round(avg_v * (abs(avg_ma) / 1000.0), 2)
+                    # 5. Sliding window moving average (~3 seconds smooth)
+                    avg_v = round(sum(self._batt_v_history) / len(self._batt_v_history), 2)
+                    avg_ma = round(sum(self._batt_ma_history) / len(self._batt_ma_history), 1)
+                    power_w = round(avg_v * (abs(avg_ma) / 1000.0), 2)
 
-                return {
-                    "voltage": avg_v,
-                    "current_ma": avg_ma,
-                    "power_w": power_w,
-                    "raw_voltage": round(raw_v_val, 2),
-                    "raw_current_ma": round(raw_ma_val, 1)
-                }
-            finally:
-                bus.close()
-        except Exception:
-            return None
+                    result = {
+                        "voltage": avg_v,
+                        "current_ma": avg_ma,
+                        "power_w": power_w,
+                        "raw_voltage": round(raw_v_val, 2),
+                        "raw_current_ma": round(raw_ma_val, 1)
+                    }
+                    self._cached_battery = result
+                    self._cached_battery_time = now
+                    return result
+                finally:
+                    bus.close()
+            except Exception:
+                if self._cached_battery is not None and (now - self._cached_battery_time < 5.0):
+                    return self._cached_battery
+                return None
 
-    @staticmethod
-    def _get_cpu_temp() -> Optional[float]:
-        """Reads Raspberry Pi CPU temperature in Celsius."""
+    def _get_cpu_temp(self, max_age_sec: float = 1.0) -> Optional[float]:
+        """Reads Raspberry Pi CPU temperature in Celsius (cached with 1.0s TTL)."""
+        now = time.time()
+        if self._cached_cpu_temp is not None and (now - self._cached_cpu_temp_time < max_age_sec):
+            return self._cached_cpu_temp
         try:
             thermal_path = "/sys/class/thermal/thermal_zone0/temp"
             if os.path.exists(thermal_path):
                 with open(thermal_path, "r") as f:
                     temp_raw = f.read().strip()
-                return round(float(temp_raw) / 1000.0, 1)
+                self._cached_cpu_temp = round(float(temp_raw) / 1000.0, 1)
+                self._cached_cpu_temp_time = now
+                return self._cached_cpu_temp
         except Exception:
             pass
-        return None
+        return self._cached_cpu_temp
 
     def _init_button(self) -> None:
         """Initializes GPIO 17 button input with internal pull-up resistor (Active-LOW)."""
