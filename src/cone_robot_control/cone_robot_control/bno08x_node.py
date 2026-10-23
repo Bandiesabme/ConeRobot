@@ -88,7 +88,6 @@ class BNO08xNode(Node):
         self.declare_parameter('publish_tf', True)
         self.declare_parameter('parent_frame_id', 'odom')
         self.declare_parameter('child_frame_id', 'base_link')
-        self.declare_parameter('mock_hardware', False)
 
         # --- Read Parameters ---
         self.i2c_address = self.get_parameter('i2c_address').value
@@ -99,7 +98,6 @@ class BNO08xNode(Node):
         self.publish_tf = self.get_parameter('publish_tf').value
         self.parent_frame_id = self.get_parameter('parent_frame_id').value
         self.child_frame_id = self.get_parameter('child_frame_id').value
-        self.mock_hardware = self.get_parameter('mock_hardware').value
 
         # --- INA219 Battery Monitor Parameters (Shares I2C Bus, 0 MB Extra RAM) ---
         self.declare_parameter('enable_battery_monitor', True)
@@ -182,51 +180,117 @@ class BNO08xNode(Node):
             f'Publish TF: {self.publish_tf and TF2_AVAILABLE})'
         )
 
-    def _init_sensor(self):
-        """Initialize connection to physical BNO08x sensor."""
-        if self.mock_hardware or not HARDWARE_LIBS_AVAILABLE:
-            if not self.mock_hardware:
+    def _drain_packets(self, max_packets=15, delay_s=0.01):
+        """Drain queued SHTP packets from the BNO08x buffer."""
+        if not self.sensor:
+            return
+        for _ in range(max_packets):
+            try:
+                self.sensor._process_available_packets()
+            except Exception:
+                pass
+            time.sleep(delay_s)
+
+    def _enable_feature_safe(self, feature_id, feature_name="feature", max_attempts=5):
+        """
+        Enable a feature on BNO08x with queue draining and retries.
+        Adafruit's stock enable_feature only checks 3 times (150ms total), which
+        frequently times out when startup or advertisement packets are queued.
+        """
+        if not self.sensor:
+            return False
+
+        if hasattr(self.sensor, '_enabled_features') and feature_id in self.sensor._enabled_features:
+            return True
+
+        self._drain_packets(max_packets=10, delay_s=0.02)
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self.sensor.enable_feature(feature_id)
+                self.get_logger().info(f'BNO08x: {feature_name} (ID 0x{feature_id:02X}) enabled.')
+                return True
+            except Exception as e:
                 self.get_logger().warn(
-                    'adafruit-circuitpython-bno08x or hardware bus not available. Running in MOCK mode.'
+                    f'BNO08x: attempt {attempt}/{max_attempts} to enable {feature_name} (ID 0x{feature_id:02X}) failed: {e}'
                 )
-            self.mock_hardware = True
+                self._drain_packets(max_packets=6, delay_s=0.03)
+                time.sleep(0.15)
+
+        return False
+
+    def _init_sensor(self):
+        """Initialize connection to physical BNO08x sensor with automatic retries and fallback."""
+        if not HARDWARE_LIBS_AVAILABLE:
+            self.get_logger().error(
+                'adafruit-circuitpython-bno08x or hardware bus not available. '
+                'Please install dependencies: pip3 install adafruit-circuitpython-bno08x adafruit-blinka'
+            )
+            self.sensor = None
             return
 
-        try:
-            self.get_logger().info(
-                f'Connecting to BNO08x at I2C address 0x{self.i2c_address:02X}...'
-            )
-            i2c = busio.I2C(board.SCL, board.SDA)
-            self.i2c_bus = i2c
-            self.sensor = BNO08X_I2C(i2c, address=self.i2c_address)
-            time.sleep(0.5)
+        max_init_attempts = 3
+        for init_attempt in range(1, max_init_attempts + 1):
+            try:
+                self.get_logger().info(
+                    f'Connecting to BNO08x at I2C address 0x{self.i2c_address:02X} '
+                    f'(attempt {init_attempt}/{max_init_attempts})...'
+                )
 
-            # Enable desired SHTP reports
-            if self.use_game_rotation:
-                self.sensor.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR)
-            else:
-                self.sensor.enable_feature(BNO_REPORT_ROTATION_VECTOR)
-            time.sleep(0.1)
+                if self.i2c_bus is None:
+                    self.i2c_bus = busio.I2C(board.SCL, board.SDA)
 
-            self.sensor.enable_feature(BNO_REPORT_GYROSCOPE)
-            time.sleep(0.1)
+                self.sensor = BNO08X_I2C(self.i2c_bus, address=self.i2c_address)
+                # Allow BNO08x SH-2 internal processor to settle after initialization
+                time.sleep(0.8)
 
-            self.sensor.enable_feature(BNO_REPORT_ACCELEROMETER)
-            time.sleep(0.1)
+                # Drain startup advertisement and reset packets
+                self._drain_packets(max_packets=15, delay_s=0.02)
 
-            self.get_logger().info('BNO08x hardware initialized successfully.')
-            self.mock_hardware = False
-        except Exception as e:
-            self.get_logger().error(f'Failed to initialize BNO08x over I2C: {e}')
-            self.get_logger().warn('Falling back to MOCK hardware mode for stability.')
-            self.mock_hardware = True
+                # Determine primary and fallback rotation features
+                if self.use_game_rotation:
+                    primary_feat = BNO_REPORT_GAME_ROTATION_VECTOR
+                    primary_name = "Game Rotation Vector (6-DOF)"
+                    fallback_feat = BNO_REPORT_ROTATION_VECTOR
+                    fallback_name = "Absolute Rotation Vector (9-DOF / Compass)"
+                else:
+                    primary_feat = BNO_REPORT_ROTATION_VECTOR
+                    primary_name = "Absolute Rotation Vector (9-DOF / Compass)"
+                    fallback_feat = BNO_REPORT_GAME_ROTATION_VECTOR
+                    fallback_name = "Game Rotation Vector (6-DOF)"
+
+                rot_ok = self._enable_feature_safe(primary_feat, primary_name)
+                if not rot_ok:
+                    self.get_logger().warn(
+                        f'{primary_name} failed. Attempting fallback to {fallback_name}...'
+                    )
+                    rot_ok = self._enable_feature_safe(fallback_feat, fallback_name)
+                    if rot_ok:
+                        self.use_game_rotation = not self.use_game_rotation
+                        self.get_logger().info(
+                            f'Successfully activated fallback {fallback_name} (use_game_rotation={self.use_game_rotation}).'
+                        )
+                    else:
+                        raise RuntimeError(f'Could not enable {primary_name} or {fallback_name}.')
+
+                time.sleep(0.05)
+                self._enable_feature_safe(BNO_REPORT_GYROSCOPE, "Gyroscope", max_attempts=3)
+                time.sleep(0.05)
+                self._enable_feature_safe(BNO_REPORT_ACCELEROMETER, "Accelerometer", max_attempts=3)
+
+                self.get_logger().info('✅ BNO08x hardware initialized successfully.')
+                return
+
+            except Exception as e:
+                self.get_logger().error(f'BNO08x init attempt {init_attempt}/{max_init_attempts} failed: {e}')
+                if init_attempt < max_init_attempts:
+                    time.sleep(1.0)
+
+        self.get_logger().error('❌ BNO08x hardware failed to initialize. Sensor will remain offline.')
+        self.sensor = None
 
     def _init_battery_monitor(self):
         """Initialize INA219 battery monitor interface on the shared I2C bus."""
-        if self.mock_hardware:
-            self.get_logger().info('INA219 Battery Monitor: running in MOCK mode.')
-            return
-
         # Method 1: SMBus (native Linux kernel I2C locking - fastest & most reliable)
         if SMBUS_AVAILABLE:
             try:
@@ -250,24 +314,7 @@ class BNO08xNode(Node):
         """Low-frequency (1 Hz) timer reading INA219 bus voltage and publishing BatteryState."""
         if not self.enable_battery_monitor or self.battery_pub is None:
             return
-
-        now = self.get_clock().now()
-        stamp = now.to_msg()
-        msg = BatteryState()
-        msg.header.stamp = stamp
-        msg.header.frame_id = 'base_link'
-        msg.present = True
-        msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
-
-        # Mock Mode
-        if self.mock_hardware:
-            mock_voltage = 12.25  # Simulated healthy 3S LiPo
-            span = max(self.battery_max_v - self.battery_min_v, 0.1)
-            pct = max(0.0, min(1.0, (mock_voltage - self.battery_min_v) / span))
-            msg.voltage = float(mock_voltage)
-            msg.percentage = float(pct)
-            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
-            self.battery_pub.publish(msg)
+        if self.smbus_bus is None and self.i2c_bus is None:
             return
 
         voltage_v = None
@@ -332,6 +379,9 @@ class BNO08xNode(Node):
 
     def _publish_imu_data(self):
         """Timer callback reading sensor, publishing ROS 2 IMU messages and TF."""
+        if self.sensor is None:
+            return
+
         now = self.get_clock().now()
         stamp = now.to_msg()
 
@@ -342,24 +392,6 @@ class BNO08xNode(Node):
         msg.angular_velocity_covariance = self.angular_velocity_covariance
         msg.linear_acceleration_covariance = self.linear_acceleration_covariance
 
-        if self.mock_hardware:
-            msg.orientation.x = 0.0
-            msg.orientation.y = 0.0
-            msg.orientation.z = 0.0
-            msg.orientation.w = 1.0
-            msg.angular_velocity.x = 0.0
-            msg.angular_velocity.y = 0.0
-            msg.angular_velocity.z = 0.0
-            msg.linear_acceleration.x = 0.0
-            msg.linear_acceleration.y = 0.0
-            msg.linear_acceleration.z = 9.81
-
-            self.imu_pub.publish(msg)
-            heading_msg = Float32()
-            heading_msg.data = 0.0
-            self.heading_pub.publish(heading_msg)
-            return
-
         try:
             if self.use_game_rotation:
                 quat_raw = self.sensor.game_quaternion
@@ -369,12 +401,12 @@ class BNO08xNode(Node):
             gyro_raw = self.sensor.gyro
             accel_raw = self.sensor.acceleration
 
-            if quat_raw is None or gyro_raw is None or accel_raw is None:
+            if quat_raw is None:
                 return
 
             qx, qy, qz, qw = quat_raw[0], quat_raw[1], quat_raw[2], quat_raw[3]
-            gx, gy, gz = gyro_raw[0], gyro_raw[1], gyro_raw[2]
-            ax, ay, az = accel_raw[0], accel_raw[1], accel_raw[2]
+            gx, gy, gz = (gyro_raw[0], gyro_raw[1], gyro_raw[2]) if gyro_raw is not None else (0.0, 0.0, 0.0)
+            ax, ay, az = (accel_raw[0], accel_raw[1], accel_raw[2]) if accel_raw is not None else (0.0, 0.0, 9.81)
 
             # Apply Flip Correction if mounted upside down
             if self.mount_flipped:

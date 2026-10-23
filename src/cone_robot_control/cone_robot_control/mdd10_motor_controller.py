@@ -37,11 +37,7 @@ class MDD10MotorController(Node):
         self.declare_parameter('dir2_pin', 25)   # Right Motor Direction (GPIO 25 / Pin 22)
         
         self.declare_parameter('wheel_track', 0.20)     # Distance between wheels in meters
-        self.declare_parameter('max_linear_speed', 1.0) # Maximum linear speed (m/s) for scaling
-        self.declare_parameter('max_angular_speed', 3.0)# Maximum angular speed (rad/s) for scaling
-        
         self.declare_parameter('cmd_timeout', 0.5)     # Fail-safe timeout in seconds
-        self.declare_parameter('mock_hardware', False)  # Enable to run node without GPIO hardware
 
         # Read parameters
         self.pwm1_pin = self.get_parameter('pwm1_pin').value
@@ -54,18 +50,16 @@ class MDD10MotorController(Node):
         self.max_angular_speed = self.get_parameter('max_angular_speed').value
 
         self.cmd_timeout = self.get_parameter('cmd_timeout').value
-        self.mock_hardware = self.get_parameter('mock_hardware').value or not HAS_GPIO
-
         self.last_cmd_time = self.get_clock().now()
-        self._last_mock_log = None
 
         # --- Hardware Initialization ---
-        if self.mock_hardware:
-            self.get_logger().info("Running in MOCK HARDWARE mode (GPIO calls simulated).")
-            self.pwm_left = None
-            self.dir_left = None
-            self.pwm_right = None
-            self.dir_right = None
+        self.pwm_left = None
+        self.dir_left = None
+        self.pwm_right = None
+        self.dir_right = None
+
+        if not HAS_GPIO:
+            self.get_logger().error("gpiozero is not installed. Motors cannot be initialized.")
         else:
             self.get_logger().info(f"Initializing Cytron MDD10 GPIO pins: "
                                    f"Left (PWM:{self.pwm1_pin}, DIR:{self.dir1_pin}), "
@@ -76,8 +70,7 @@ class MDD10MotorController(Node):
                 self.pwm_right = PWMOutputDevice(self.pwm2_pin, frequency=1000)
                 self.dir_right = OutputDevice(self.dir2_pin)
             except Exception as e:
-                self.get_logger().error(f"Failed to initialize GPIO pins: {e}. Switching to mock hardware.")
-                self.mock_hardware = True
+                self.get_logger().error(f"Failed to initialize GPIO pins: {e}")
 
         # --- ROS 2 Interfaces ---
         self.subscription = self.create_subscription(
@@ -127,18 +120,10 @@ class MDD10MotorController(Node):
         dir_right_val = right_duty >= 0
         speed_right_val = abs(right_duty)
 
-        if self.mock_hardware:
-            # Only print log if motor speeds change (prevents watchdog timer terminal spam)
-            current_state = (dir_left_val, round(speed_left_val, 2), dir_right_val, round(speed_right_val, 2))
-            if self._last_mock_log != current_state:
-                self._last_mock_log = current_state
-                self.get_logger().info(
-                    f"[MOCK MOTOR] Left: DIR={'FWD' if dir_left_val else 'REV'}, Speed={speed_left_val:.2f} | "
-                    f"Right: DIR={'FWD' if dir_right_val else 'REV'}, Speed={speed_right_val:.2f}"
-                )
+        # Drive Physical GPIO Pins if initialized
+        if self.dir_left is None or self.pwm_left is None or self.dir_right is None or self.pwm_right is None:
             return
 
-        # Drive Physical GPIO Pins
         # Set Direction Pins
         self.dir_left.value = dir_left_val
         self.dir_right.value = dir_right_val
@@ -160,14 +145,12 @@ class MDD10MotorController(Node):
     def destroy_node(self):
         """Clean up GPIO resources on shutdown."""
         self.stop_motors()
-        if not self.mock_hardware:
-            try:
-                self.pwm_left.close()
-                self.dir_left.close()
-                self.pwm_right.close()
-                self.dir_right.close()
-            except Exception:
-                pass
+        for device in (self.pwm_left, self.dir_left, self.pwm_right, self.dir_right):
+            if device is not None:
+                try:
+                    device.close()
+                except Exception:
+                    pass
         super().destroy_node()
 
 

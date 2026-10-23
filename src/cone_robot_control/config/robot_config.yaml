@@ -16,7 +16,6 @@ mdd10_motor_controller:
     max_linear_speed: 1.0      # Maximum forward/reverse speed (m/s)
     max_angular_speed: 3.0     # Maximum turning speed (rad/s)
     cmd_timeout: 0.5           # Safety timeout (seconds)
-    mock_hardware: false       # Set true for simulation / laptop dry-run
 
 # 2. BNO08x IMU Sensor Settings (MikroE Click / I2C)
 bno08x_node:
@@ -26,7 +25,6 @@ bno08x_node:
     publish_rate_hz: 50.0      # Output publication frequency (Hz)
     mount_flipped: true        # Sensor mounted upside down (applies 180-deg roll rotation)
     use_game_rotation: true    # 6-DOF fused orientation (immune to motor magnetic noise)
-    mock_hardware: false       # Set true for simulation / dry-run without I2C hardware
 
     # --- INA219 Battery Monitor Settings (Shares I2C Bus, 0 MB Extra RAM) ---
     enable_battery_monitor: true   # Enable 0-RAM battery monitor on shared I2C bus
@@ -43,7 +41,6 @@ lc29h_gps_node:
     baud_rate: 115200
     frame_id: "gps_link"
     publish_rate_hz: 10.0
-    mock_hardware: false
 
     # --- NTRIP RTK Correction Stream Configuration ---
     ntrip_enable: true
@@ -85,7 +82,6 @@ step_motion_controller:
     # Options: 'auto' (detects odom -> gps -> time), 'odom', 'gps', 'time'
     distance_source: "auto"
     gps_require_rtk: true             # Require RTK Fix/Float to use GPS distance
-    mock_mode: false
 
 # 5. High-Level Primitive Motion Controller (Straight, Turn, Arc)
 primitive_motion_controller:

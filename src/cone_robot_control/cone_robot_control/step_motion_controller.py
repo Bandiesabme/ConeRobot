@@ -112,9 +112,6 @@ class StepMotionController(Node):
         self.declare_parameter('distance_source', 'auto')   # 'auto', 'odom', 'gps', 'time'
         self.declare_parameter('gps_require_rtk', True)     # Only use GPS if RTK Fix/Float is active
 
-        # Mock / Simulation Mode
-        self.declare_parameter('mock_mode', False)
-
         # --- Read Parameters ---
         self.control_rate_hz = self.get_parameter('control_rate_hz').value
         self.turn_kp = self.get_parameter('turn_kp').value
@@ -129,7 +126,6 @@ class StepMotionController(Node):
 
         self.distance_source = self.get_parameter('distance_source').value
         self.gps_require_rtk = self.get_parameter('gps_require_rtk').value
-        self.mock_mode = self.get_parameter('mock_mode').value
 
         # --- Publishers & Subscribers ---
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -191,7 +187,7 @@ class StepMotionController(Node):
           - msg.x: Distance in centimeters (+ forward, - backward)
           - msg.z: Turn angle in degrees (+ clockwise/right, - counter-clockwise/left)
         """
-        if self.current_heading is None and not self.mock_mode:
+        if self.current_heading is None:
             self.get_logger().warn("[STEP] Cannot start motion: waiting for first /imu/heading data!")
             return
 

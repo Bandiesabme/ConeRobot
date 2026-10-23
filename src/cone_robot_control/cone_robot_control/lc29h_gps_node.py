@@ -62,7 +62,6 @@ class LC29HGPSNode(Node):
         self.declare_parameter('baud_rate', 115200)
         self.declare_parameter('frame_id', 'gps_link')
         self.declare_parameter('publish_rate_hz', 10.0)
-        self.declare_parameter('mock_hardware', False)
 
         # Signal-quality diagnostics (all optional, off by default)
         self.declare_parameter('debug_signal_log', False)         # detailed [SIGDIAG] lines
@@ -85,7 +84,6 @@ class LC29HGPSNode(Node):
         self.baud_rate = self.get_parameter('baud_rate').get_parameter_value().integer_value
         self.frame_id = self.get_parameter('frame_id').get_parameter_value().string_value
         self.publish_rate_hz = self.get_parameter('publish_rate_hz').get_parameter_value().double_value
-        self.mock_hardware = self.get_parameter('mock_hardware').get_parameter_value().bool_value
         self.debug_signal_log = self.get_parameter('debug_signal_log').get_parameter_value().bool_value
         self.debug_signal_log_period_s = self.get_parameter('debug_signal_log_period_s').get_parameter_value().double_value
         self.record_nmea = self.get_parameter('record_nmea').get_parameter_value().bool_value
@@ -151,23 +149,17 @@ class LC29HGPSNode(Node):
         self.get_logger().info(f" NTRIP Client: {'Enabled' if self.ntrip_enable else 'Disabled'}")
         if self.ntrip_enable:
             self.get_logger().info(f" NTRIP Caster: {self.ntrip_caster}:{self.ntrip_port}/{self.ntrip_mountpoint}")
-        self.get_logger().info(f" Mock Mode   : {self.mock_hardware}")
         self.get_logger().info("==================================================")
 
-        # Initialize Hardware or Mock
-        if not self.mock_hardware:
-            self._init_serial()
-            # Start background serial read thread
-            self.serial_thread = threading.Thread(target=self._serial_read_loop, daemon=True)
-            self.serial_thread.start()
+        # Initialize Hardware Serial and Background Threads
+        self._init_serial()
+        self.serial_thread = threading.Thread(target=self._serial_read_loop, daemon=True)
+        self.serial_thread.start()
 
-            # Start background NTRIP client thread if enabled
-            if self.ntrip_enable:
-                self.ntrip_thread = threading.Thread(target=self._ntrip_client_loop, daemon=True)
-                self.ntrip_thread.start()
-        else:
-            self.get_logger().warn("Mock hardware enabled: generating simulated RTK GPS fix data.")
-            self.mock_timer = self.create_timer(1.0 / self.publish_rate_hz, self._publish_mock_data)
+        # Start background NTRIP client thread if enabled
+        if self.ntrip_enable:
+            self.ntrip_thread = threading.Thread(target=self._ntrip_client_loop, daemon=True)
+            self.ntrip_thread.start()
 
         # Periodic status publisher timer (1 Hz for real-time dashboard telemetry)
         self.status_timer = self.create_timer(1.0, self._publish_diagnostic_status)
@@ -729,16 +721,6 @@ class LC29HGPSNode(Node):
                     f"[RTK] Correction age {self.current_diff_age:.1f}s is high - RTCM link is lagging/stalling (check Wi-Fi to base)."
                 )
 
-    def _publish_mock_data(self) -> None:
-        """Simulate realistic RTK Float / RTK Fix data in mock mode."""
-        self.current_lat = 49.0054911 + 0.000005 * math.sin(time.time() * 0.2)
-        self.current_lon = 8.2457705 + 0.000005 * math.cos(time.time() * 0.2)
-        self.current_alt = 135.0
-        self.current_fix_quality = 5  # RTK Float
-        self.current_num_sats = 35
-        self.current_hdop = 0.43
-        self.ntrip_connected = True
-        self._publish_navsat_fix()
 
     def destroy_node(self) -> None:
         """Clean up serial connection on node shutdown."""
