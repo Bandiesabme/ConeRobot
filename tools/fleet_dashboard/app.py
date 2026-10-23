@@ -54,8 +54,9 @@ def save_config(cfg):
         print(f"[ERROR] Failed to save config: {e}")
         return False
 
-# Discovered robots cache
+# Discovered robots cache & lock
 discovered_cache = {}
+discovered_lock = threading.Lock()
 
 def get_primary_subnet():
     try:
@@ -117,10 +118,26 @@ def scan_network_job():
         cfg = load_config()
         robot_port = cfg.get("server", {}).get("robot_port", 8765)
 
+        # 0. Health-check previously discovered robots & prune offline ones
+        with discovered_lock:
+            cached_items = list(discovered_cache.items())
+        for slot_id, r_info in cached_items:
+            r_ip = r_info.get("ip")
+            r_port = r_info.get("port", robot_port)
+            if not check_robot_host(r_ip, r_port, timeout=0.3):
+                print(f"[DISCOVERY] Robot {slot_id:02d} ({r_ip}:{r_port}) is offline. Removing from active cache.")
+                with discovered_lock:
+                    discovered_cache.pop(slot_id, None)
+
         # 1. Candidate hostnames
         candidate_hosts = ["conerobot.local", "conerobot", "raspberrypi.local"]
         for i in range(1, 14):
             candidate_hosts.extend([f"conerobot{i:02d}.local", f"conerobot{i}.local", f"robot{i:02d}.local", f"robot{i}.local"])
+        for r in cfg.get("robots", []):
+            if r.get("host") and r["host"] not in candidate_hosts:
+                candidate_hosts.append(r["host"])
+            if r.get("ip") and r["ip"] not in candidate_hosts:
+                candidate_hosts.append(r["ip"])
 
         with ThreadPoolExecutor(max_workers=20) as executor:
             host_futures = {executor.submit(check_robot_host, h, robot_port, 0.5): h for h in candidate_hosts}
@@ -128,28 +145,29 @@ def scan_network_job():
                 h = host_futures[fut]
                 res_ip = fut.result()
                 if res_ip:
-                    used_ips = {v["ip"] for v in discovered_cache.values()}
-                    if res_ip in used_ips:
-                        continue  # Prevent adding duplicate cards for the same physical robot
+                    with discovered_lock:
+                        used_ips = {v["ip"] for v in discovered_cache.values()}
+                        if res_ip in used_ips:
+                            continue  # Prevent adding duplicate cards for the same physical robot
 
-                    # Extract numeric robot ID from hostname if present
-                    import re
-                    match = re.search(r'(\d+)', h)
-                    if match and 1 <= int(match.group(1)) <= 13:
-                        slot_id = int(match.group(1))
-                    else:
-                        free_slots = [r["id"] for r in cfg.get("robots", []) if r["id"] not in discovered_cache]
-                        slot_id = free_slots[0] if free_slots else 1
+                        # Extract numeric robot ID from hostname if present
+                        import re
+                        match = re.search(r'(\d+)', h)
+                        if match and 1 <= int(match.group(1)) <= 13:
+                            slot_id = int(match.group(1))
+                        else:
+                            free_slots = [r["id"] for r in cfg.get("robots", []) if r["id"] not in discovered_cache]
+                            slot_id = free_slots[0] if free_slots else 1
 
-                    print(f"[DISCOVERY] Found ConeRobot via '{h}' -> {res_ip}:{robot_port} (Assigned to Robot {slot_id:02d})")
-                    discovered_cache[slot_id] = {
-                        "id": slot_id,
-                        "name": f"ConeRobot {slot_id:02d}",
-                        "host": h,
-                        "ip": res_ip,
-                        "port": robot_port,
-                        "online": True
-                    }
+                        print(f"[DISCOVERY] Found ConeRobot via '{h}' -> {res_ip}:{robot_port} (Assigned to Robot {slot_id:02d})")
+                        discovered_cache[slot_id] = {
+                            "id": slot_id,
+                            "name": f"ConeRobot {slot_id:02d}",
+                            "host": h,
+                            "ip": res_ip,
+                            "port": robot_port,
+                            "online": True
+                        }
 
         # 2. Local subnet sweep (Scans primary Wi-Fi AND Windows Mobile Hotspot 192.168.137.X)
         all_subnets = get_all_subnets()
@@ -162,24 +180,39 @@ def scan_network_job():
             for fut in ip_futures:
                 res_ip = fut.result()
                 if res_ip:
-                    used_ips = {v["ip"] for v in discovered_cache.values()}
-                    free_slots = [r["id"] for r in cfg.get("robots", []) if r["id"] not in discovered_cache]
-                    if res_ip not in used_ips and free_slots:
-                        slot_id = free_slots.pop(0)
-                        print(f"[DISCOVERY] Found Unit on IP {res_ip}:{robot_port} -> Assigned to Slot {slot_id:02d}")
-                        discovered_cache[slot_id] = {
-                            "id": slot_id,
-                            "name": f"ConeRobot {slot_id:02d}",
-                            "host": f"robot-{res_ip.replace('.', '-')}",
-                            "ip": res_ip,
-                            "port": robot_port,
-                            "online": True
-                        }
+                    with discovered_lock:
+                        used_ips = {v["ip"] for v in discovered_cache.values()}
+                        free_slots = [r["id"] for r in cfg.get("robots", []) if r["id"] not in discovered_cache]
+                        if res_ip not in used_ips and free_slots:
+                            slot_id = free_slots.pop(0)
+                            print(f"[DISCOVERY] Found Unit on IP {res_ip}:{robot_port} -> Assigned to Slot {slot_id:02d}")
+                            discovered_cache[slot_id] = {
+                                "id": slot_id,
+                                "name": f"ConeRobot {slot_id:02d}",
+                                "host": f"robot-{res_ip.replace('.', '-')}",
+                                "ip": res_ip,
+                                "port": robot_port,
+                                "online": True
+                            }
 
+        with discovered_lock:
+            act_count = len(discovered_cache)
         elapsed = round(time.time() - start_t, 2)
-        print(f"[DISCOVERY] Scan complete ({elapsed}s). Active robots: {len(discovered_cache)}")
+        print(f"[DISCOVERY] Scan complete ({elapsed}s). Active robots: {act_count}")
     finally:
         is_scanning = False
+
+def background_scanner_loop():
+    """Periodically triggers network scans based on scan_interval_sec."""
+    time.sleep(1.0)
+    while True:
+        try:
+            cfg = load_config()
+            interval = max(5, cfg.get("server", {}).get("scan_interval_sec", 10))
+            scan_network_job()
+            time.sleep(interval)
+        except Exception:
+            time.sleep(5)
 
 class FleetDashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -205,23 +238,44 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
             cfg = load_config()
             cfg_robots = {r["id"]: r for r in cfg.get("robots", []) if "id" in r}
             robot_port = cfg.get("server", {}).get("robot_port", 8765)
+            
+            with discovered_lock:
+                cache_snapshot = dict(discovered_cache)
+
             for r_id in range(1, 14):
-                if r_id in discovered_cache:
-                    robots_list[r_id] = discovered_cache[r_id]
+                if r_id in cache_snapshot and cache_snapshot[r_id].get("online"):
+                    robots_list[r_id] = cache_snapshot[r_id]
                 elif r_id in cfg_robots and cfg_robots[r_id].get("ip"):
+                    # For statically configured IP, verify reachability before claiming online
+                    st_ip = cfg_robots[r_id]["ip"]
+                    is_alive = bool(check_robot_host(st_ip, robot_port, timeout=0.2))
                     robots_list[r_id] = {
                         "id": r_id,
                         "name": cfg_robots[r_id].get("name", f"ConeRobot {r_id:02d}"),
                         "host": cfg_robots[r_id].get("host", f"conerobot{r_id:02d}.local"),
-                        "ip": cfg_robots[r_id].get("ip", ""),
+                        "ip": st_ip,
                         "port": robot_port,
-                        "online": True
+                        "online": is_alive
                     }
+                    if is_alive:
+                        with discovered_lock:
+                            discovered_cache[r_id] = robots_list[r_id]
                 else:
-                    robots_list[r_id] = {"id": r_id, "name": f"ConeRobot {r_id:02d}", "online": False}
+                    cfg_r = cfg_robots.get(r_id, {})
+                    robots_list[r_id] = {
+                        "id": r_id,
+                        "name": cfg_r.get("name", f"ConeRobot {r_id:02d}"),
+                        "host": cfg_r.get("host", f"conerobot{r_id:02d}.local"),
+                        "ip": cfg_r.get("ip", ""),
+                        "port": robot_port,
+                        "online": False
+                    }
+
+            with discovered_lock:
+                disc_count = len(discovered_cache)
 
             response_data = {
-                "discovered_count": len(discovered_cache),
+                "discovered_count": disc_count,
                 "topics": cfg.get("topics", {}),
                 "robots": robots_list
             }
@@ -280,8 +334,8 @@ def main():
     port = cfg.get("server", {}).get("port", 8000)
     host = cfg.get("server", {}).get("host", "0.0.0.0")
 
-    # Initial background scan on startup
-    threading.Thread(target=scan_network_job, daemon=True).start()
+    # Start periodic background scanner
+    threading.Thread(target=background_scanner_loop, daemon=True).start()
 
     print("\n" + "=" * 70)
     print("  🚀 ConeRobot 13-Robot Fleet Monitoring Server")

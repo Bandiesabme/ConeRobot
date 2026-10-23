@@ -288,6 +288,19 @@ async function startDiscoveryLoop() {
             if (!activeWebSockets[i] && !reconnectTimers[i]) {
               connectToRobotWebSocket(i, rob.ip, rob.port || 8765);
             }
+          } else {
+            // Robot is offline: cancel pending reconnect timer and close dead socket
+            if (reconnectTimers[i]) {
+              clearTimeout(reconnectTimers[i]);
+              delete reconnectTimers[i];
+            }
+            if (activeWebSockets[i]) {
+              try { activeWebSockets[i].close(); } catch(e) {}
+              delete activeWebSockets[i];
+            }
+            if (realTelemetry[i]) {
+              realTelemetry[i].online = false;
+            }
           }
         }
       }
@@ -437,9 +450,15 @@ function connectToRobotWebSocket(robotId, ip, port) {
 
 function scheduleReconnect(robotId, ip, port) {
   if (reconnectTimers[robotId]) return;
+  // If robot is known to be offline from fleet polling, don't spam reconnect
+  if (realTelemetry[robotId] && realTelemetry[robotId].online === false) {
+    return;
+  }
   reconnectTimers[robotId] = setTimeout(() => {
     delete reconnectTimers[robotId];
-    connectToRobotWebSocket(robotId, ip, port);
+    if (realTelemetry[robotId] && realTelemetry[robotId].online !== false) {
+      connectToRobotWebSocket(robotId, ip, port);
+    }
   }, 4000);
 }
 
