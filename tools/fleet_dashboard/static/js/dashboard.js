@@ -545,11 +545,15 @@ function parseSnrAndCorrFromStatus(r, str) {
 }
 
 function cdrAlign(ptr, alignment) {
-  // CDR stream starts at byte 13 (after 13-byte Foxglove header: op:1, subId:4, stamp:8).
-  // All CDR primitive alignments are calculated relative to byte 13.
-  const cdrOffset = ptr - 13;
-  const alignedCdrOffset = (cdrOffset + (alignment - 1)) & ~(alignment - 1);
-  return 13 + alignedCdrOffset;
+  // Foxglove binary message has a 13-byte envelope (op:1, subId:4, stamp:8).
+  // ROS 2 CDR encapsulation header is 4 bytes (offset 13..16).
+  // The CDR serialized data payload starts at byte 17.
+  // In OMG CDR specification, all primitive type alignments (2, 4, 8)
+  // are calculated relative to the start of the serialized data stream (byte 17).
+  const dataStart = 17;
+  const offset = Math.max(0, ptr - dataStart);
+  const aligned = (offset + (alignment - 1)) & ~(alignment - 1);
+  return dataStart + aligned;
 }
 
 function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToTopic) {
@@ -699,10 +703,11 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
       else if (normTopic === configuredTopics.heading || normTopic === '/imu/heading' || normTopic.endsWith('/heading')) {
         if (ptr + 4 <= buffer.byteLength) {
           let val = view.getFloat32(ptr, true);
-          val = ((val % 360) + 360) % 360;
-          const rounded = Number(val.toFixed(1));
-          if (r.imu.heading !== rounded) {
+          if (!isNaN(val) && isFinite(val)) {
+            val = ((val % 360) + 360) % 360;
+            const rounded = Number(val.toFixed(1));
             r.imu.heading = rounded;
+            r.imu.last_heading_topic_time = Date.now();
           }
         }
       }
@@ -848,41 +853,54 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
       }
 
       // 5. sensor_msgs/msg/Imu (/imu/data)
-      else if (topic === configuredTopics.imu_data || topic === '/imu/data') {
+      else if (normTopic === configuredTopics.imu_data || normTopic === '/imu/data' || normTopic.endsWith('/imu/data')) {
+        const isLE = buffer.byteLength > 14 ? (view.getUint8(14) === 1) : true;
         // Skip Header: sec (4), nsec (4)
         ptr += 8;
-        const frameLen = view.getUint32(ptr, true);
-        ptr += 4 + frameLen;
-        
-        // Align to 8 bytes relative to CDR buffer start
-        ptr = cdrAlign(ptr, 8);
+        if (ptr + 4 <= buffer.byteLength) {
+          const frameLen = view.getUint32(ptr, isLE);
+          if (frameLen < 256 && ptr + 4 + frameLen <= buffer.byteLength) {
+            ptr += 4 + frameLen;
+            
+            // Align to 8 bytes relative to start of CDR data payload (byte 17)
+            ptr = cdrAlign(ptr, 8);
 
-        if (ptr + 32 <= buffer.byteLength) {
-          const x = view.getFloat64(ptr, true); ptr += 8;
-          const y = view.getFloat64(ptr, true); ptr += 8;
-          const z = view.getFloat64(ptr, true); ptr += 8;
-          const w = view.getFloat64(ptr, true); ptr += 8;
+            if (ptr + 32 <= buffer.byteLength) {
+              const x = view.getFloat64(ptr, isLE); ptr += 8;
+              const y = view.getFloat64(ptr, isLE); ptr += 8;
+              const z = view.getFloat64(ptr, isLE); ptr += 8;
+              const w = view.getFloat64(ptr, isLE); ptr += 8;
 
-          const sinr_cosp = 2 * (w * x + y * z);
-          const cosr_cosp = 1 - 2 * (x * x + y * y);
-          const roll = Math.atan2(sinr_cosp, cosr_cosp) * (180 / Math.PI);
+              const normSq = x * x + y * y + z * z + w * w;
+              // Guard against uninitialized or all-zero quaternion buffers
+              if (!isNaN(normSq) && normSq > 0.0001 && normSq < 4.0) {
+                const sinr_cosp = 2 * (w * x + y * z);
+                const cosr_cosp = 1 - 2 * (x * x + y * y);
+                const roll = Math.atan2(sinr_cosp, cosr_cosp) * (180 / Math.PI);
 
-          const sinp = 2 * (w * y - z * x);
-          let pitch;
-          if (Math.abs(sinp) >= 1) pitch = Math.sign(sinp) * 90;
-          else pitch = Math.asin(sinp) * (180 / Math.PI);
+                const sinp = 2 * (w * y - z * x);
+                let pitch;
+                if (Math.abs(sinp) >= 1) pitch = Math.sign(sinp) * 90;
+                else pitch = Math.asin(sinp) * (180 / Math.PI);
 
-          const siny_cosp = 2 * (w * z + x * y);
-          const cosy_cosp = 1 - 2 * (y * y + z * z);
-          let yaw = Math.atan2(siny_cosp, cosy_cosp) * (180 / Math.PI);
-          yaw = ((yaw % 360) + 360) % 360;
-          if (yaw >= 359.95) yaw = 0.0;
+                const siny_cosp = 2 * (w * z + x * y);
+                const cosy_cosp = 1 - 2 * (y * y + z * z);
+                let yaw = Math.atan2(siny_cosp, cosy_cosp) * (180 / Math.PI);
+                yaw = ((yaw % 360) + 360) % 360;
+                if (yaw >= 359.95) yaw = 0.0;
 
-          r.imu.roll = Number(roll.toFixed(1));
-          r.imu.pitch = Number(pitch.toFixed(1));
-          r.imu.yaw = Number(yaw.toFixed(1));
-          
-          r.imu.heading = Number(yaw.toFixed(1));
+                r.imu.roll = Number(roll.toFixed(1));
+                r.imu.pitch = Number(pitch.toFixed(1));
+                r.imu.yaw = Number(yaw.toFixed(1));
+                
+                // Only use /imu/data yaw as fallback if dedicated /imu/heading topic is not actively streaming
+                const hasFreshHeadingTopic = r.imu.last_heading_topic_time && (Date.now() - r.imu.last_heading_topic_time < 2000);
+                if (!hasFreshHeadingTopic) {
+                  r.imu.heading = Number(yaw.toFixed(1));
+                }
+              }
+            }
+          }
         }
       }
 
@@ -1070,31 +1088,39 @@ function handleParsedRobotMessage(robotId, topic, data) {
   }
 
   // 4. IMU Heading (/imu/heading)
-  if (topic === configuredTopics.heading || topic === '/imu/heading') {
+  if (topic === configuredTopics.heading || topic === '/imu/heading' || (topic && topic.endsWith('/heading'))) {
     const val = typeof data === 'number' ? data : (data.data !== undefined ? Number(data.data) : null);
-    if (val !== null && !isNaN(val)) {
-      r.imu.heading = Number(val.toFixed(1));
+    if (val !== null && !isNaN(val) && isFinite(val)) {
+      r.imu.heading = Number((((val % 360) + 360) % 360).toFixed(1));
+      r.imu.last_heading_topic_time = Date.now();
     }
   }
 
   // 5. IMU Data Orientation (/imu/data)
-  if (topic === configuredTopics.imu_data || topic === '/imu/data') {
+  if (topic === configuredTopics.imu_data || topic === '/imu/data' || (topic && topic.endsWith('/imu/data'))) {
     if (data.orientation) {
       const { x, y, z, w } = data.orientation;
-      const sinr_cosp = 2 * (w * x + y * z);
-      const cosr_cosp = 1 - 2 * (x * x + y * y);
-      r.imu.roll = (Math.atan2(sinr_cosp, cosr_cosp) * (180 / Math.PI)).toFixed(1);
+      const normSq = x * x + y * y + z * z + w * w;
+      if (!isNaN(normSq) && normSq > 0.0001 && normSq < 4.0) {
+        const sinr_cosp = 2 * (w * x + y * z);
+        const cosr_cosp = 1 - 2 * (x * x + y * y);
+        r.imu.roll = (Math.atan2(sinr_cosp, cosr_cosp) * (180 / Math.PI)).toFixed(1);
 
-      const sinp = 2 * (w * y - z * x);
-      if (Math.abs(sinp) >= 1) r.imu.pitch = (Math.sign(sinp) * 90).toFixed(1);
-      else r.imu.pitch = (Math.asin(sinp) * (180 / Math.PI)).toFixed(1);
+        const sinp = 2 * (w * y - z * x);
+        if (Math.abs(sinp) >= 1) r.imu.pitch = (Math.sign(sinp) * 90).toFixed(1);
+        else r.imu.pitch = (Math.asin(sinp) * (180 / Math.PI)).toFixed(1);
 
-      const siny_cosp = 2 * (w * z + x * y);
-      const cosy_cosp = 1 - 2 * (y * y + z * z);
-      let yaw = (Math.atan2(siny_cosp, cosy_cosp) * (180 / Math.PI));
-      if (yaw < 0) yaw += 360;
-      r.imu.yaw = yaw.toFixed(1);
-      if (r.imu.heading === null) r.imu.heading = Number(yaw.toFixed(1));
+        const siny_cosp = 2 * (w * z + x * y);
+        const cosy_cosp = 1 - 2 * (y * y + z * z);
+        let yaw = (Math.atan2(siny_cosp, cosy_cosp) * (180 / Math.PI));
+        if (yaw < 0) yaw += 360;
+        r.imu.yaw = yaw.toFixed(1);
+
+        const hasFreshHeadingTopic = r.imu.last_heading_topic_time && (Date.now() - r.imu.last_heading_topic_time < 2000);
+        if (!hasFreshHeadingTopic) {
+          r.imu.heading = Number(yaw.toFixed(1));
+        }
+      }
     }
   }
 

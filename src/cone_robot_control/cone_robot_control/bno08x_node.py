@@ -100,11 +100,11 @@ try:
             )
             self._send_packet(2, set_feature_report)
             self._enabled_features.add(feature_id)
-            if hasattr(self, "_readings") and feature_id not in self._readings:
-                if feature_id in (BNO_REPORT_GAME_ROTATION_VECTOR, BNO_REPORT_ROTATION_VECTOR):
-                    self._readings[feature_id] = (0.0, 0.0, 0.0, 1.0)
-                else:
-                    self._readings[feature_id] = (0.0, 0.0, 0.0)
+            pass
+            # Do not seed dummy readings to prevent false 0.0 deg orientation
+            pass
+            pass
+            pass
             time.sleep(0.04)
             for _ in range(5):
                 try:
@@ -482,6 +482,8 @@ class BNO08xNode(Node):
                 return
 
             qx, qy, qz, qw = quat_raw[0], quat_raw[1], quat_raw[2], quat_raw[3]
+            if (qx * qx + qy * qy + qz * qz + qw * qw) < 0.0001:
+                return
             gx, gy, gz = (gyro_raw[0], gyro_raw[1], gyro_raw[2]) if gyro_raw is not None else (0.0, 0.0, 0.0)
             ax, ay, az = (accel_raw[0], accel_raw[1], accel_raw[2]) if accel_raw is not None else (0.0, 0.0, 9.81)
 
