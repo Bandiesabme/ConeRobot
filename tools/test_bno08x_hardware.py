@@ -81,8 +81,22 @@ class ReliableBNO08X_I2C(BNO08X_I2C):
 
         self._tx_seq[channel] = (self._tx_seq[channel] + 1) % 256
 
-    def enable_feature(self, feature_id, report_interval=50000):
-        """Send SET_FEATURE_COMMAND (0xFD) on Channel 2 and register feature."""
+    def drain_queue(self, max_packets=20, delay=0.01):
+        """Drains any pending SHTP packets (e.g. startup advertisements, product ID fragments)."""
+        count = 0
+        for _ in range(max_packets):
+            try:
+                if not self._data_ready:
+                    break
+                self._process_available_packets(max_packets=1)
+                count += 1
+            except Exception:
+                pass
+            time.sleep(delay)
+        return count
+
+    def enable_feature(self, feature_id, report_interval=50000, timeout_s=1.5):
+        """Send SET_FEATURE_COMMAND (0xFD) on Channel 2 with retries until sensor reports begin arriving."""
         set_feature_report = bytearray(17)
         pack_into(
             "<BBBHIII",
@@ -96,20 +110,27 @@ class ReliableBNO08X_I2C(BNO08X_I2C):
             0,               # Batch interval
             0,               # Sensor-specific configuration
         )
-        self._send_packet(2, set_feature_report)
-        self._enabled_features.add(feature_id)
-        if hasattr(self, "_readings") and feature_id not in self._readings:
-            if feature_id in (BNO_REPORT_GAME_ROTATION_VECTOR, BNO_REPORT_ROTATION_VECTOR):
-                self._readings[feature_id] = (0.0, 0.0, 0.0, 1.0)
-            else:
-                self._readings[feature_id] = (0.0, 0.0, 0.0)
-        time.sleep(0.04)
-        for _ in range(5):
-            try:
-                self._process_available_packets()
-            except Exception:
-                pass
-            time.sleep(0.01)
+
+        start_t = time.time()
+        while time.time() - start_t < timeout_s:
+            # Drain any pending output packets before sending to prevent queue collision
+            self.drain_queue(max_packets=5, delay=0.005)
+            self._send_packet(2, set_feature_report)
+
+            # Wait and poll for incoming sensor reports on Channel 3
+            poll_start = time.time()
+            while time.time() - poll_start < 0.25:
+                try:
+                    self._process_available_packets()
+                except Exception:
+                    pass
+                if feature_id in self._enabled_features:
+                    return True
+                time.sleep(0.01)
+
+        if feature_id not in self._enabled_features:
+            raise RuntimeError(f"Sensor did not start streaming reports for feature 0x{feature_id:02X}")
+        return True
 
     def _handle_sensor_report(self, report_id, report_bytes):
         # Acknowledge feature active when data packets arrive on Channel 3
@@ -177,38 +198,33 @@ try:
     sensor = ReliableBNO08X_I2C(i2c, address=target_addr, debug=debug_mode)
     print(f"  ✓ SHTP transport established with BNO08x at 0x{target_addr:02X}.")
     
-    # Allow sensor hub to settle after ID query
-    time.sleep(0.3)
+    # Drain any remaining Product ID slices from initialization
+    drained = sensor.drain_queue(max_packets=15, delay=0.02)
+    time.sleep(0.1)
 
     # Test Enabling Rotation Reports
     print("  Enabling Game Rotation Vector (6-DOF, Feature 0x08)...")
     game_ok = False
-    for attempt in range(1, 6):
+    for attempt in range(1, 4):
         try:
             sensor.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR)
             game_ok = True
-            print(f"  ✓ Game Rotation Vector enabled on attempt {attempt}!")
+            print(f"  ✓ Game Rotation Vector active and streaming (attempt {attempt})!")
             break
         except Exception as e:
-            if debug_mode or attempt == 5:
+            if debug_mode or attempt == 3:
                 print(f"    Attempt {attempt} failed: {e}")
-            for _ in range(5):
-                try:
-                    sensor._process_available_packets()
-                except Exception:
-                    pass
-                time.sleep(0.02)
             time.sleep(0.15)
     
     if not game_ok:
-        print("  ⚠️ Could not enable Game Rotation. Trying Absolute Rotation Vector (9-DOF / Compass, Feature 0x05)...")
-        for attempt in range(1, 6):
+        print("  ⚠️ Game Rotation Vector did not stream. Trying Absolute Rotation Vector (9-DOF / Compass, Feature 0x05)...")
+        for attempt in range(1, 4):
             try:
                 sensor.enable_feature(BNO_REPORT_ROTATION_VECTOR)
-                print(f"  ✓ Absolute Rotation Vector enabled on attempt {attempt}!")
+                print(f"  ✓ Absolute Rotation Vector active and streaming (attempt {attempt})!")
                 break
             except Exception as e:
-                if debug_mode or attempt == 5:
+                if debug_mode or attempt == 3:
                     print(f"    Attempt {attempt} failed: {e}")
                 time.sleep(0.15)
 

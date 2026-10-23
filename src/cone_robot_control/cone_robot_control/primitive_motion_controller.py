@@ -646,6 +646,15 @@ class PrimitiveMotionController(Node):
             self._set_state(ControllerState.STUCK)
             return
 
+        # Settle completion for near-target: if commanding movement within 5cm/4° of goal but stationary for > stuck_detect_time_s
+        if is_commanding_movement and is_near_target and (now - self.last_moved_time > self.stuck_detect_time_s):
+            self.get_logger().info(
+                f"[NEAR-TARGET SETTLE] Robot reached within 5cm / 4° of target and motion settled. Completing primitive."
+            )
+            self._publish_cmd_vel(0.0, 0.0)
+            self._set_state(ControllerState.COMPLETED)
+            return
+
         # 4. Completion & Feedback Control
         dist_remaining = abs(self.target_dist_m) - abs(actual_dist)
         yaw_error_to_target = abs(shortest_angular_diff_rad(self.target_yaw_rad, actual_yaw))
@@ -741,16 +750,24 @@ class PrimitiveMotionController(Node):
         d_yaw = -0.25 * self.current_yaw_rate  # Active gyro rate damping to prevent snaking/veering
         yaw_trim = max(-0.90, min(0.90, p_yaw + i_yaw + d_yaw))
 
-        # Closed-loop distance braking for Straight driving: smoothly ramp speed down into target
+        # Closed-loop distance braking for Straight & Arc driving: smoothly ramp speed down into target
         cmd_v = v_ref
-        if self.active_motion_type == "STRAIGHT":
+        if self.active_motion_type in ["STRAIGHT", "ARC"]:
+            crawl_speed = max(0.06, self.min_linear_speed * 0.75)
+            direction_sign = 1.0 if self.target_dist_m >= 0 else -1.0
+
             if abs(self.target_dist_m) > 0.10 and dist_remaining < 0.60:
                 # Linear approach ramp: decel from v_ref at 0.60m down to gentle crawl speed at target
-                crawl_speed = max(0.05, self.min_linear_speed * 0.70)
                 speed_ratio = max(0.0, (dist_remaining - self.distance_tolerance_m) / 0.55)
                 v_ramp = crawl_speed + (abs(v_ref) - crawl_speed) * speed_ratio
                 if abs(cmd_v) > v_ramp:
                     cmd_v = math.copysign(v_ramp, cmd_v)
+
+            # Track slip / late finish recovery: if open-loop profile finished (or ramped below crawl speed)
+            # but sensor distance is still short of target, creep at minimum crawl speed to close the gap.
+            if not motion_complete and dist_remaining > self.distance_tolerance_m:
+                if abs(cmd_v) < crawl_speed:
+                    cmd_v = direction_sign * crawl_speed
 
             # Hard stop command when target distance is reached
             if dist_remaining <= self.distance_tolerance_m or actual_dist >= abs(self.target_dist_m) - 0.01:
