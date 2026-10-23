@@ -33,17 +33,51 @@ try:
 except ImportError:
     TF2_AVAILABLE = False
 
-# Try importing hardware libraries
 try:
     import board
     import busio
+    from struct import pack_into
     from adafruit_bno08x import (
         BNO_REPORT_ACCELEROMETER,
         BNO_REPORT_GYROSCOPE,
         BNO_REPORT_GAME_ROTATION_VECTOR,
         BNO_REPORT_ROTATION_VECTOR,
+        Packet,
     )
     from adafruit_bno08x.i2c import BNO08X_I2C
+
+    class ReliableBNO08X_I2C(BNO08X_I2C):
+        """
+        Subclass of BNO08X_I2C that strictly maintains independent Host TX sequence numbers.
+        The stock CircuitPython driver overwrites self._sequence_number with the sensor's
+        incoming sequence numbers, causing outgoing SET_FEATURE packets to jump sequence numbers
+        (e.g., from 0 directly to 5), which causes the BNO080 sensor hub to reject the packet.
+        """
+        def __init__(self, i2c_bus, reset=None, address=0x4A, debug=False):
+            self._tx_seq = [0, 0, 0, 0, 0, 0]
+            super().__init__(i2c_bus, reset=reset, address=address, debug=debug)
+
+        def _send_packet(self, channel, data):
+            data_length = len(data)
+            write_length = data_length + 4
+
+            pack_into("<H", self._data_buffer, 0, write_length)
+            self._data_buffer[2] = channel
+            self._data_buffer[3] = self._tx_seq[channel]
+            for idx, send_byte in enumerate(data):
+                self._data_buffer[4 + idx] = send_byte
+            packet = Packet(self._data_buffer)
+            self._dbg(f"Sending packet (Host TX Seq {self._tx_seq[channel]} on Ch {channel}):")
+            self._dbg(packet)
+            with self.bus_device_obj as i2c:
+                i2c.write(self._data_buffer, end=write_length)
+
+            self._tx_seq[channel] = (self._tx_seq[channel] + 1) % 256
+
+        def _handle_sensor_report(self, report_id, report_bytes):
+            self._enabled_features.add(report_id)
+            super()._handle_sensor_report(report_id, report_bytes)
+
     HARDWARE_LIBS_AVAILABLE = True
 except (ImportError, NotImplementedError):
     HARDWARE_LIBS_AVAILABLE = False
@@ -196,17 +230,15 @@ class BNO08xNode(Node):
                 pass
             time.sleep(delay_s)
 
-    def _enable_feature_safe(self, feature_id, feature_name="feature", max_attempts=2):
+    def _enable_feature_safe(self, feature_id, feature_name="feature", max_attempts=3):
         """
-        Enable a feature on BNO08x with queue draining and retries.
+        Enable a feature on BNO08x with retries.
         """
         if not self.sensor:
             return False
 
         if hasattr(self.sensor, '_enabled_features') and feature_id in self.sensor._enabled_features:
             return True
-
-        self._drain_packets(max_packets=5, delay_s=0.02)
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -217,7 +249,7 @@ class BNO08xNode(Node):
                 self.get_logger().warn(
                     f'BNO08x: attempt {attempt}/{max_attempts} to enable {feature_name} (ID 0x{feature_id:02X}) failed: {e}'
                 )
-                self._drain_packets(max_packets=5, delay_s=0.02)
+                self._drain_packets(max_packets=3, delay_s=0.02)
                 time.sleep(0.10)
 
         return False
@@ -243,12 +275,9 @@ class BNO08xNode(Node):
                 if self.i2c_bus is None:
                     self.i2c_bus = busio.I2C(board.SCL, board.SDA, frequency=100000)
 
-                self.sensor = BNO08X_I2C(self.i2c_bus, address=self.i2c_address)
+                self.sensor = ReliableBNO08X_I2C(self.i2c_bus, address=self.i2c_address)
                 # Allow BNO08x SH-2 internal processor to settle after initialization
-                time.sleep(0.8)
-
-                # Drain startup advertisement and reset packets
-                self._drain_packets(max_packets=15, delay_s=0.02)
+                time.sleep(0.3)
 
                 # Determine primary and fallback rotation features
                 if self.use_game_rotation:
