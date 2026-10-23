@@ -850,7 +850,11 @@ class PrimitiveMotionController(Node):
             pass
 
     def destroy_node(self) -> None:
-        self._publish_cmd_vel(0.0, 0.0)
+        try:
+            if rclpy.ok():
+                self._publish_cmd_vel(0.0, 0.0)
+        except Exception:
+            pass
         super().destroy_node()
 
 
@@ -866,7 +870,8 @@ def main(args=None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

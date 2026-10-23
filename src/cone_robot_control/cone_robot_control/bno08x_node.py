@@ -55,6 +55,7 @@ try:
         """
         def __init__(self, i2c_bus, reset=None, address=0x4A, debug=False):
             self._tx_seq = [0, 0, 0, 0, 0, 0]
+            self._enabled_features = set()
             super().__init__(i2c_bus, reset=reset, address=address, debug=debug)
 
         def _dbg(self, *args, **kwargs):
@@ -99,6 +100,11 @@ try:
             )
             self._send_packet(2, set_feature_report)
             self._enabled_features.add(feature_id)
+            if hasattr(self, "_readings") and feature_id not in self._readings:
+                if feature_id in (BNO_REPORT_GAME_ROTATION_VECTOR, BNO_REPORT_ROTATION_VECTOR):
+                    self._readings[feature_id] = (0.0, 0.0, 0.0, 1.0)
+                else:
+                    self._readings[feature_id] = (0.0, 0.0, 0.0)
             time.sleep(0.04)
             for _ in range(5):
                 try:
@@ -556,7 +562,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
