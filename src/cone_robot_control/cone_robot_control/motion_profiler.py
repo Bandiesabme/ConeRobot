@@ -176,8 +176,8 @@ class MotionPrimitiveProfiler:
         self.target_dist = distance_m
         self.target_yaw = delta_yaw_rad
 
-        dist_abs = max(1e-4, abs(distance_m))
-        self.curvature = delta_yaw_rad / dist_abs
+        signed_dist = math.copysign(max(1e-4, abs(distance_m)), distance_m if distance_m != 0.0 else 1.0)
+        self.curvature = delta_yaw_rad / signed_dist
 
         v_limit = max_v if (max_v and max_v > 0) else self.default_linear_speed
         w_limit = max_w if (max_w and max_w > 0) else self.default_angular_speed
