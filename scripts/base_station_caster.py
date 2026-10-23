@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import base64
 from collections import deque
 from datetime import datetime
 import errno
@@ -85,6 +86,7 @@ class NTRIPBaseCaster:
         self.web_port = web_port
         self.mountpoint = mountpoint.strip("/")
         self.password = password
+        self.use_saved = use_saved
 
         # Mapping: client_socket -> (ip, port, connect_time, bytes_sent)
         self.clients_map: Dict[socket.socket, dict] = {}
@@ -159,6 +161,16 @@ class NTRIPBaseCaster:
         # Auto-restore saved coordinates by default on boot (prevents recalibration after power drops)
         if fixed_lat is not None and fixed_lon is not None:
             self._apply_fixed_coords(fixed_lat, fixed_lon, fixed_alt or 0.0, "Command-Line Arguments")
+        elif self.use_saved:
+            store = self._load_locations_store()
+            act = store.get("active_location")
+            if act and act in store.get("locations", {}):
+                self.load_named_location(act)
+                self._add_log(f"🚀 Loaded active preset '{act}' via --use-saved. Base station ready with 0 mm drift!")
+            elif self._load_saved_coords():
+                self._add_log("🚀 Loaded saved static coordinates via --use-saved. Base station ready with 0 mm drift!")
+            else:
+                self._add_log("⚠️ --use-saved requested but no saved coordinates found! Starting Survey-In calibration...", "WARN")
         elif not recalibrate:
             store = self._load_locations_store()
             act = store.get("active_location")
@@ -317,6 +329,10 @@ class NTRIPBaseCaster:
 
     def use_saved_now(self) -> bool:
         """Explicitly applies previously saved static coordinates upon user request."""
+        store = self._load_locations_store()
+        act = store.get("active_location")
+        if act and act in store.get("locations", {}):
+            return self.load_named_location(act)
         return self._load_saved_coords()
 
     def _add_log(self, text: str, level: str = "INFO") -> None:
@@ -452,10 +468,14 @@ class NTRIPBaseCaster:
         if self.is_static_fixed and self.survey_lat != 0.0 and self.survey_lon != 0.0:
             self._send_hardware_fixed_coords(self.survey_lat, self.survey_lon, self.survey_alt)
         else:
-            # Start Survey-In in hardware (300s target, 1.5m accuracy)
-            self._send_gnss_cmd("PQTMCFGSVIN,W,1,300,1.5,0,0,0")
+            self._send_hardware_survey_in()
+
+    def _send_hardware_survey_in(self) -> None:
+        """Configures the LC29H(BS) HAT into dynamic Survey-In mode using target duration and accuracy."""
+        self._send_gnss_cmd(f"PQTMCFGSVIN,W,1,{self.survey_target_duration},{self.survey_target_accuracy:.2f},0,0,0")
         time.sleep(0.05)
         self._send_gnss_cmd("PQTMSAVEPAR")
+        self._add_log(f"🛰️ LC29H Hardware Survey-In Configured: Target {self.survey_target_duration}s, Accuracy <={self.survey_target_accuracy:.2f}m")
 
     def _send_hardware_fixed_coords(self, lat: float, lon: float, alt: float) -> None:
         """Sends fixed ECEF coordinates to LC29H(BS) HAT to broadcast in RTCM Message 1005."""
@@ -554,6 +574,9 @@ class NTRIPBaseCaster:
         self.survey_duration = 0
         self.survey_accuracy = 99.9
         self.coord_samples.clear()
+
+        # Reset LC29H hardware back to dynamic Survey-In mode
+        self._send_hardware_survey_in()
         self._add_log("🔄 Recalibration triggered! Starting fresh Survey-In calibration...")
         return True
 
@@ -641,6 +664,33 @@ class NTRIPBaseCaster:
             lines = raw_req.split('\r\n')
             first_line = lines[0] if lines else ""
             self._add_log(f"Rover handshake from {ip}:{port}: {first_line}")
+
+            # If a password is required, authenticate incoming rover
+            if self.password and self.password.lower() != "none":
+                authorized = False
+                for line in lines:
+                    if line.lower().startswith("authorization: basic "):
+                        try:
+                            b64_val = line.split()[2]
+                            decoded = base64.b64decode(b64_val).decode('utf-8', errors='ignore')
+                            if ":" in decoded:
+                                _, pwd = decoded.split(":", 1)
+                                if pwd == self.password:
+                                    authorized = True
+                        except Exception:
+                            pass
+                        break
+                if not authorized:
+                    self._add_log(f"Rover handshake from {ip}:{port} REJECTED: invalid or missing password", "WARN")
+                    unauth_response = (
+                        "HTTP/1.0 401 Unauthorized\r\n"
+                        "WWW-Authenticate: Basic realm=\"NTRIP Caster\"\r\n"
+                        "Connection: close\r\n"
+                        "\r\n"
+                    )
+                    client_sock.sendall(unauth_response.encode('ascii'))
+                    client_sock.close()
+                    return
 
             # Send standard NTRIP Caster response
             response = (
