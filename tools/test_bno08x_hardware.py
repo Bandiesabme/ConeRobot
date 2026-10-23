@@ -47,7 +47,7 @@ except ImportError:
         import smbus
         print("  ✓ smbus found.")
     except ImportError:
-        missing_pkgs.append("smbus2")
+        missing_pkgs.append("smbus")
 
 if missing_pkgs:
     print(f"\n❌ Missing required packages: {', '.join(missing_pkgs)}")
@@ -59,8 +59,7 @@ if missing_pkgs:
 print("\n[Step 2/4] Scanning I2C Bus 1 (Pins 3 & 5: GPIO 2 SDA, GPIO 3 SCL)...")
 detected_addrs = []
 try:
-    import smbus2 as smbus_probe
-    bus = smbus_probe.SMBus(1)
+    bus = smbus.SMBus(1)
     for addr in range(0x03, 0x78):
         try:
             bus.read_byte(addr)
@@ -91,7 +90,7 @@ print("\n[Step 3/4] Initializing BNO08x over I2C...")
 i2c = None
 sensor = None
 try:
-    i2c = busio.I2C(board.SCL, board.SDA)
+    i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
     sensor = BNO08X_I2C(i2c, address=0x4A)
     print("  ✓ SHTP transport established with BNO08x at 0x4A.")
     
@@ -205,8 +204,7 @@ while time.time() - start_time < 10.0:
     # Read INA219 battery if available
     v_batt = None
     try:
-        import smbus2
-        bus = smbus2.SMBus(1)
+        bus = smbus.SMBus(1)
         raw = bus.read_word_data(0x40, 0x02)
         raw_swapped = ((raw & 0xFF) << 8) | (raw >> 8)
         v_batt = ((raw_swapped >> 3) & 0x1FFF) * 0.004

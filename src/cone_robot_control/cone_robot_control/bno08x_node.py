@@ -241,7 +241,7 @@ class BNO08xNode(Node):
                 )
 
                 if self.i2c_bus is None:
-                    self.i2c_bus = busio.I2C(board.SCL, board.SDA)
+                    self.i2c_bus = busio.I2C(board.SCL, board.SDA, frequency=100000)
 
                 self.sensor = BNO08X_I2C(self.i2c_bus, address=self.i2c_address)
                 # Allow BNO08x SH-2 internal processor to settle after initialization
