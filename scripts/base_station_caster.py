@@ -556,20 +556,19 @@ class NTRIPBaseCaster:
         self._enable_rtcm_and_nmea_outputs()
 
     def _init_base_gnss_hardware(self) -> None:
-        """Initializes the Waveshare LC29H(BS) HAT with proper RTK Base mode & RTCM outputs."""
-        self._add_log("🔧 Configuring LC29H(BS) Hardware: Enabling Base Mode & RTCM 1005/MSM7...")
+        """Initializes the Waveshare LC29H(BS) HAT with proper RTK Base mode & RTCM outputs in a single clean pass."""
+        self._add_log("🔧 Configuring LC29H(BS) Hardware: Setting Base Station Mode & RTCM 1005/MSM7...")
         # 1. Set receiver mode to Base Station (2)
         self._send_gnss_cmd("PQTMCFGRCVRMODE,W,2")
         time.sleep(0.05)
-        # 2. Enable RTCM & NMEA streams
-        self._enable_rtcm_and_nmea_outputs()
-        # 3. If static coordinates are locked, send fixed position to hardware
-        if self.is_static_fixed and self.survey_lat != 0.0 and self.survey_lon != 0.0:
-            self._send_hardware_fixed_coords(self.survey_lat, self.survey_lon, self.survey_alt)
-        else:
-            self._send_hardware_survey_in()
 
-    def _send_hardware_survey_in(self) -> None:
+        # 2. Configure Survey-In Mode: Static Fixed or Dynamic Calibration (restarts GNSS engine to commit mode & load RTCM)
+        if self.is_static_fixed and self.survey_lat != 0.0 and self.survey_lon != 0.0:
+            self._send_hardware_fixed_coords(self.survey_lat, self.survey_lon, self.survey_alt, restart_subsystem=True)
+        else:
+            self._send_hardware_survey_in(restart_subsystem=True)
+
+    def _send_hardware_survey_in(self, restart_subsystem: bool = True) -> None:
         """Configures the LC29H(BS) HAT into dynamic Survey-In mode using target duration and accuracy."""
         if not self.ser or not self.ser.is_open:
             return
@@ -577,10 +576,11 @@ class NTRIPBaseCaster:
         time.sleep(0.05)
         self._send_gnss_cmd("PQTMSAVEPAR")
         time.sleep(0.05)
-        self._restart_gnss_subsystem()
+        if restart_subsystem:
+            self._restart_gnss_subsystem()
         self._add_log(f"🛰️ LC29H Hardware Survey-In Configured: Target {self.survey_target_duration}s, Accuracy <={self.survey_target_accuracy:.2f}m")
 
-    def _send_hardware_fixed_coords(self, lat: float, lon: float, alt: float) -> None:
+    def _send_hardware_fixed_coords(self, lat: float, lon: float, alt: float, restart_subsystem: bool = True) -> None:
         """Sends fixed ECEF coordinates to LC29H(BS) HAT to broadcast in RTCM Message 1005."""
         if lat == 0.0 or lon == 0.0:
             return
@@ -594,7 +594,8 @@ class NTRIPBaseCaster:
         time.sleep(0.05)
         self._send_gnss_cmd("PQTMSAVEPAR")
         time.sleep(0.05)
-        self._restart_gnss_subsystem()
+        if restart_subsystem:
+            self._restart_gnss_subsystem()
         self._add_log(f"🎯 LC29H Hardware Locked to ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m) [ECEF: {x:.2f}, {y:.2f}, {z:.2f}]")
 
     def _apply_fixed_coords(self, lat: float, lon: float, alt: float, source: str) -> None:
@@ -608,7 +609,8 @@ class NTRIPBaseCaster:
         self.survey_accuracy = 0.00
         self.locked_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._add_log(f"🎯 LOCKED STATIC BASE ({source}): ({lat:.8f}°, {lon:.8f}°, {alt:.2f}m) [0 mm Drift]")
-        self._send_hardware_fixed_coords(lat, lon, alt)
+        if self.ser and self.ser.is_open:
+            self._send_hardware_fixed_coords(lat, lon, alt)
 
     def lock_now(self) -> bool:
         """Immediately locks current accumulated average position and writes to disk."""
@@ -1192,16 +1194,60 @@ class NTRIPBaseCaster:
             elif line.startswith('$PQTMSVINSTATUS'):
                 # Quectel LC29H(BS) Base Survey-In status sentence:
                 # $PQTMSVINSTATUS,<ver>,<tow>,<valid>,<res0>,<res1>,<obs>,<cfg_dur>,<mean_x>,<mean_y>,<mean_z>,<mean_acc>*cs
+                #   parts[0]       [1]   [2]    [3]     [4]    [5]   [6]     [7]       [8]      [9]      [10]     [11]
                 body = line.strip().split('*')[0]
                 parts = body.split(',')
                 if len(parts) >= 11 and not self.is_static_fixed:
                     try:
-                        mean_x = float(parts[8])
-                        mean_y = float(parts[9])
-                        mean_z = float(parts[10])
-                        if abs(mean_x) > 1000.0 and abs(mean_y) > 1000.0 and (time.time() - self._last_gga_time > 5.0):
+                        # 1. Parse Survey-In status & observation progress
+                        svin_valid = int(float(parts[3].strip())) if parts[3].strip() else 0
+                        obs = int(float(parts[6].strip())) if parts[6].strip() else 0
+                        if obs > 0:
+                            self.survey_duration = max(self.survey_duration, obs)
+                            if self.survey_start_time is None:
+                                self.survey_start_time = time.time() - obs
+
+                        # 2. Parse hardware ECEF mean position
+                        x_str = parts[8].strip().lstrip('X= :')
+                        y_str = parts[9].strip().lstrip('Y= :')
+                        z_str = parts[10].strip().lstrip('Z= :')
+                        mean_x = float(x_str)
+                        mean_y = float(y_str)
+                        mean_z = float(z_str)
+
+                        # 3. Parse hardware-calculated 3D mean accuracy (meters)
+                        mean_acc = None
+                        if len(parts) >= 12 and parts[11].strip():
+                            try:
+                                mean_acc = float(parts[11].strip())
+                            except ValueError:
+                                pass
+                        # Avoid flip-flopping accuracy: only use mean_acc if GGA is absent or accuracy is uninitialized
+                        if mean_acc is not None and mean_acc > 0.0:
+                            if (time.time() - self._last_gga_time > 5.0) or (self.survey_accuracy >= 99.0):
+                                self.survey_accuracy = round(mean_acc, 2)
+
+                        # 4. Update coordinates if valid ECEF
+                        if abs(mean_x) > 1000.0 and abs(mean_y) > 1000.0:
                             lat, lon, alt = self._ecef_to_lla(mean_x, mean_y, mean_z)
-                            self._update_survey_statistics(lat, lon, alt)
+                            # When GGA is active, GGA alone feeds _update_survey_statistics without duplicate sampling.
+                            # Fallback to ECEF coordinates only when GGA stream is missing or dead.
+                            if time.time() - self._last_gga_time > 5.0:
+                                self.survey_lat = lat
+                                self.survey_lon = lon
+                                self.survey_alt = alt
+                                self._update_survey_statistics(lat, lon, alt)
+
+                        # 5. Handle Hardware Survey-In completion (valid == 2)
+                        # Require survey_duration & accuracy targets to prevent premature locking on stale flash state
+                        if (svin_valid == 2 and not self.survey_valid and not self.is_static_fixed
+                                and self.survey_duration >= self.survey_target_duration
+                                and self.survey_accuracy <= self.survey_target_accuracy):
+                            self._add_log(f"🎯 LC29H Hardware Survey-In CONVERGED! (Valid: 2, Acc: {self.survey_accuracy:.2f}m, Obs: {self.survey_duration}s)")
+                            self.survey_valid = True
+                            self.lock_now()
+                        elif svin_valid == 1 and not self.is_static_fixed:
+                            self.survey_status = "CALIBRATING"
                     except ValueError:
                         pass
 
@@ -1312,6 +1358,19 @@ class NTRIPBaseCaster:
         except Exception:
             pass
 
+    @staticmethod
+    def _find_next_sync(stream: bytearray, start: int = 1) -> int:
+        """Finds index of the next RTCM3 (0xD3) or NMEA ($) preamble starting from offset."""
+        idx_rtcm = stream.find(b'\xd3', start)
+        idx_nmea = stream.find(b'$', start)
+        if idx_rtcm != -1 and idx_nmea != -1:
+            return min(idx_rtcm, idx_nmea)
+        if idx_rtcm != -1:
+            return idx_rtcm
+        if idx_nmea != -1:
+            return idx_nmea
+        return len(stream)
+
     def _serial_reader_loop(self) -> None:
         """Reads RTCM3 binary data + NMEA sentences and non-blocking multicasts to rovers."""
         import serial
@@ -1360,7 +1419,7 @@ class NTRIPBaseCaster:
                                 break  # Incomplete header; wait for next serial read
                             # The 6 reserved bits in byte 1 must be 0 for valid RTCM3
                             if (raw_byte_stream[1] & 0xFC) != 0:
-                                del raw_byte_stream[0]
+                                del raw_byte_stream[:self._find_next_sync(raw_byte_stream, 1)]
                                 continue
                             msg_len = ((raw_byte_stream[1] & 0x03) << 8) | raw_byte_stream[2]
                             frame_len = msg_len + 6
@@ -1368,7 +1427,7 @@ class NTRIPBaseCaster:
                                 break  # Full frame hasn't arrived yet; wait for remaining bytes
 
                             # Validate CRC-24Q: on mismatch this 0xD3 was a false sync (or corrupted
-                            # frame) -> skip one byte and resync instead of trusting a bogus length
+                            # frame) -> skip forward to next sync candidate instead of trusting a bogus length
                             expected_crc = (
                                 (raw_byte_stream[frame_len - 3] << 16)
                                 | (raw_byte_stream[frame_len - 2] << 8)
@@ -1376,7 +1435,7 @@ class NTRIPBaseCaster:
                             )
                             if crc24q(raw_byte_stream[:frame_len - 3]) != expected_crc:
                                 self.rtcm_crc_errors += 1
-                                del raw_byte_stream[0]
+                                del raw_byte_stream[:self._find_next_sync(raw_byte_stream, 1)]
                                 continue
 
                             frame = bytes(raw_byte_stream[:frame_len])
@@ -1396,10 +1455,24 @@ class NTRIPBaseCaster:
                         # 2. NMEA ASCII sentence starting with '$'
                         elif raw_byte_stream[0] == 0x24:  # ord('$')
                             nl_idx = raw_byte_stream.find(b'\n')
+                            d3_idx = raw_byte_stream.find(b'\xd3', 1)
+
+                            # If a 0xD3 RTCM3 preamble appears before the newline (or newline is missing/too far),
+                            # the 0x24 was a false sync / noise byte in binary data: discard up to the RTCM3 frame.
+                            if d3_idx != -1 and (nl_idx == -1 or d3_idx < nl_idx):
+                                del raw_byte_stream[:d3_idx]
+                                continue
+
                             if nl_idx == -1:
-                                if len(raw_byte_stream) > 256:
-                                    del raw_byte_stream[0]
+                                if len(raw_byte_stream) > 128:
+                                    del raw_byte_stream[:self._find_next_sync(raw_byte_stream, 1)]
                                 break
+
+                            if nl_idx > 128:
+                                # Overlong sentence is not valid NMEA; drop to next sync point
+                                del raw_byte_stream[:self._find_next_sync(raw_byte_stream, 1)]
+                                continue
+
                             nmea_bytes = bytes(raw_byte_stream[:nl_idx + 1])
                             del raw_byte_stream[:nl_idx + 1]
                             clean_str = nmea_bytes.decode('ascii', errors='ignore').strip()
@@ -1409,7 +1482,7 @@ class NTRIPBaseCaster:
 
                         # 3. Discard extraneous bytes (CR, LF, noise) outside frames
                         else:
-                            del raw_byte_stream[0]
+                            del raw_byte_stream[:self._find_next_sync(raw_byte_stream, 1)]
 
                     # Multicast ONLY valid, clean RTCM3 packets to all active rover clients (never raw NMEA).
                     # Non-blocking: frames go into each rover's queue; its own thread does the socket send.

@@ -597,6 +597,16 @@
   </div>
 
   <script>
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
     let userScrolled = false;
     const term = document.getElementById('terminalBox');
     term.addEventListener('scroll', () => {
@@ -1266,7 +1276,7 @@
         if (data.logs && data.logs.length > 0) {
           term.innerHTML = data.logs.map(l => {
             const cls = l.level === 'ERROR' ? 'error' : (l.level === 'WARN' ? 'warn' : '');
-            return `<div class="log-line"><span class="log-time">[${l.time}]</span><span class="log-msg ${cls}">${l.msg}</span></div>`;
+            return `<div class="log-line"><span class="log-time">[${escapeHtml(l.time)}]</span><span class="log-msg ${cls}">${escapeHtml(l.msg)}</span></div>`;
           }).join('');
           if (!userScrolled) {
             term.scrollTop = term.scrollHeight;
