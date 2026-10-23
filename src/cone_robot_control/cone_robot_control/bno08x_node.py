@@ -157,10 +157,8 @@ class BNO08xNode(Node):
         self.consecutive_errors = 0
         self._last_battery_warn_time = 0.0
 
-        # Initialize Hardware
-        self._init_sensor()
-        if self.enable_battery_monitor:
-            self._init_battery_monitor()
+        # Defer hardware initialization by 0.1s so ROS 2 node spins immediately
+        self._init_timer = self.create_timer(0.1, self._init_hardware_callback)
 
         # Start IMU publishing timer
         timer_period = 1.0 / self.publish_rate_hz
@@ -180,7 +178,14 @@ class BNO08xNode(Node):
             f'Publish TF: {self.publish_tf and TF2_AVAILABLE})'
         )
 
-    def _drain_packets(self, max_packets=15, delay_s=0.01):
+    def _init_hardware_callback(self):
+        """Asynchronously initialize hardware once ROS 2 executor is running."""
+        self._init_timer.cancel()
+        self._init_sensor()
+        if self.enable_battery_monitor:
+            self._init_battery_monitor()
+
+    def _drain_packets(self, max_packets=10, delay_s=0.01):
         """Drain queued SHTP packets from the BNO08x buffer."""
         if not self.sensor:
             return
@@ -191,11 +196,9 @@ class BNO08xNode(Node):
                 pass
             time.sleep(delay_s)
 
-    def _enable_feature_safe(self, feature_id, feature_name="feature", max_attempts=5):
+    def _enable_feature_safe(self, feature_id, feature_name="feature", max_attempts=2):
         """
         Enable a feature on BNO08x with queue draining and retries.
-        Adafruit's stock enable_feature only checks 3 times (150ms total), which
-        frequently times out when startup or advertisement packets are queued.
         """
         if not self.sensor:
             return False
@@ -203,7 +206,7 @@ class BNO08xNode(Node):
         if hasattr(self.sensor, '_enabled_features') and feature_id in self.sensor._enabled_features:
             return True
 
-        self._drain_packets(max_packets=10, delay_s=0.02)
+        self._drain_packets(max_packets=5, delay_s=0.02)
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -214,8 +217,8 @@ class BNO08xNode(Node):
                 self.get_logger().warn(
                     f'BNO08x: attempt {attempt}/{max_attempts} to enable {feature_name} (ID 0x{feature_id:02X}) failed: {e}'
                 )
-                self._drain_packets(max_packets=6, delay_s=0.03)
-                time.sleep(0.15)
+                self._drain_packets(max_packets=5, delay_s=0.02)
+                time.sleep(0.10)
 
         return False
 
@@ -229,7 +232,7 @@ class BNO08xNode(Node):
             self.sensor = None
             return
 
-        max_init_attempts = 3
+        max_init_attempts = 2
         for init_attempt in range(1, max_init_attempts + 1):
             try:
                 self.get_logger().info(
