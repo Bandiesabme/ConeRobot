@@ -233,6 +233,10 @@ function initCardsGridDOM() {
           <span class="metric-val" id="r${i}-gps">--</span>
         </div>
         <div class="metric-row">
+          <span class="metric-key">GNSS Signal (C/N0)</span>
+          <span class="metric-val" id="r${i}-snr">--</span>
+        </div>
+        <div class="metric-row">
           <span class="metric-key">IMU Heading</span>
           <span class="metric-val" id="r${i}-heading">--</span>
         </div>
@@ -259,7 +263,20 @@ function initCardsGridDOM() {
       ip: '',
       online: false,
       lidar: { present: false, freq_hz: 0, sample_count: 0, min_dist: null, last_scan_time: 0 },
-      gps: { present: false, mode: 'NO FIX', lat: null, lon: null, alt: null, sats: 0, hdop: null },
+      gps: {
+        present: false,
+        mode: 'NO FIX',
+        lat: null,
+        lon: null,
+        alt: null,
+        sats: 0,
+        hdop: null,
+        diff_age: null,
+        avg_snr: null,
+        strong_signals: 0,
+        total_signals: 0,
+        snr_sats: []
+      },
       imu: { heading: null, pitch: null, roll: null, yaw: null },
       motion: { state: 'Offline', step_progress: '--' },
       health: { cpu_temp: '--', cpu_load: '--', battery_v: '--' }
@@ -489,6 +506,44 @@ function handleSysInfoData(r, sys) {
   }
 }
 
+function parseSnrAndCorrFromStatus(r, str) {
+  if (!r || !str) return;
+  const ageMatch = str.match(/Corr\.\s*age:\s*([\d.]+s|-)/i);
+  if (ageMatch) {
+    r.gps.diff_age = ageMatch[1];
+  }
+
+  const cn0Match = str.match(/C\/N0:\s*avg\s*([\d.]+)\s*dB-Hz(?:,\s*(\d+)\/(\d+))?/i);
+  if (cn0Match) {
+    r.gps.avg_snr = parseFloat(cn0Match[1]);
+    if (cn0Match[2] !== undefined) r.gps.strong_signals = parseInt(cn0Match[2], 10);
+    if (cn0Match[3] !== undefined) r.gps.total_signals = parseInt(cn0Match[3], 10);
+  }
+
+  const snrListMatch = str.match(/SNR:\[([^\]]*)\]/i);
+  if (snrListMatch && snrListMatch[1].trim()) {
+    const constMap = { G: 'GPS', R: 'GLONASS', E: 'Galileo', B: 'BeiDou', Q: 'QZSS', S: 'GNSS' };
+    const sats = [];
+    snrListMatch[1].split(',').forEach(tok => {
+      const m = tok.trim().match(/^([A-Z]\d{2}):(\d+)(?:@(-?\d+))?$/i);
+      if (m) {
+        const sid = m[1].toUpperCase();
+        const snr = parseFloat(m[2]);
+        const elev = m[3] !== undefined ? parseInt(m[3], 10) : null;
+        sats.push({
+          id: sid,
+          constellation: constMap[sid[0]] || 'GNSS',
+          snr: snr,
+          elev: elev
+        });
+      }
+    });
+    if (sats.length > 0) {
+      r.gps.snr_sats = sats;
+    }
+  }
+}
+
 function cdrAlign(ptr, alignment) {
   // CDR stream starts at byte 13 (after 13-byte Foxglove header: op:1, subId:4, stamp:8).
   // All CDR primitive alignments are calculated relative to byte 13.
@@ -700,6 +755,8 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
             r.gps.ntrip = ntripMatch[1].trim();
             r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
           }
+
+          parseSnrAndCorrFromStatus(r, str);
 
           // Resilient Coordinate extraction from /gps/status
           let pMatch = str.match(/Pos:\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?\s*\)/i);
@@ -968,6 +1025,14 @@ function handleParsedRobotMessage(robotId, topic, data) {
       const hdopMatch = str.match(/HDOP:\s*([\d.]+)/i);
       if (hdopMatch) r.gps.hdop = hdopMatch[1];
 
+      const ntripMatch = str.match(/NTRIP:\s*([^(|]+)(?:\(([^)]+)\))?/i);
+      if (ntripMatch) {
+        r.gps.ntrip = ntripMatch[1].trim();
+        r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
+      }
+
+      parseSnrAndCorrFromStatus(r, str);
+
       // Resilient Coordinate extraction from /gps/status
       let pMatch = str.match(/Pos:\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?\s*\)/i);
       if (!pMatch) {
@@ -1092,6 +1157,7 @@ function renderUIUpdates() {
     const ipEl = document.getElementById(`r${i}-ip`);
     const lidarEl = document.getElementById(`r${i}-lidar`);
     const gpsEl = document.getElementById(`r${i}-gps`);
+    const snrEl = document.getElementById(`r${i}-snr`);
     const headEl = document.getElementById(`r${i}-heading`);
     const stepEl = document.getElementById(`r${i}-step`);
     const pingEl = document.getElementById(`r${i}-ping`);
@@ -1161,10 +1227,29 @@ function renderUIUpdates() {
           gpsEl.className = 'metric-val gps-none';
         }
         gpsEl.innerText = gpsTxt;
+        if (snrEl) {
+          if (r.gps.avg_snr !== null && !isNaN(r.gps.avg_snr)) {
+            const avg = r.gps.avg_snr;
+            const satCnt = (r.gps.snr_sats && r.gps.snr_sats.length > 0) ? r.gps.snr_sats.length : (r.gps.total_signals || r.gps.sats || 0);
+            const icon = avg >= 38 ? '🟢' : (avg >= 28 ? '🟡' : '🔴');
+            snrEl.innerText = `${icon} ${avg.toFixed(1)} dB-Hz (${satCnt} Sats)`;
+            snrEl.className = avg >= 38 ? 'metric-val gps-rtk' : (avg >= 28 ? 'metric-val gps-float' : 'metric-val gps-none');
+            snrEl.style.color = '';
+          } else {
+            snrEl.innerText = 'Waiting GSV...';
+            snrEl.className = 'metric-val';
+            snrEl.style.color = 'var(--text-muted)';
+          }
+        }
       } else {
         gpsEl.innerText = 'Not Equipped';
         gpsEl.className = 'metric-val';
         gpsEl.style.color = 'var(--text-muted)';
+        if (snrEl) {
+          snrEl.innerText = 'Not Equipped';
+          snrEl.className = 'metric-val';
+          snrEl.style.color = 'var(--text-muted)';
+        }
       }
 
       headEl.innerText = (r.imu.heading !== null) ? `${Number(r.imu.heading).toFixed(1)}°` : 'Waiting for IMU...';
@@ -1199,6 +1284,10 @@ function renderUIUpdates() {
       lidarEl.className = 'metric-val';
       gpsEl.innerText = '--';
       gpsEl.className = 'metric-val';
+      if (snrEl) {
+        snrEl.innerText = '--';
+        snrEl.className = 'metric-val';
+      }
       headEl.innerText = '--';
       stepEl.innerText = '--';
       pingEl.innerText = '⚪ Offline';
@@ -1294,6 +1383,11 @@ function updateModalContent(r) {
   document.getElementById('modal-alt').innerText = (r.gps.alt !== null && r.gps.alt !== undefined && !isNaN(r.gps.alt) && r.gps.alt !== '--') ? `${r.gps.alt} m` : '--';
   document.getElementById('modal-hdop').innerText = r.gps.hdop || '--';
 
+  const diffAgeEl = document.getElementById('modal-diff-age');
+  if (diffAgeEl) {
+    diffAgeEl.innerText = r.gps.diff_age || '--';
+  }
+
   const ntripEl = document.getElementById('modal-ntrip');
   if (ntripEl) {
     if (r.gps.mode === 'RTK FIX' || r.gps.mode === 'FLOAT' || (r.gps.ntrip && r.gps.ntrip.toLowerCase().includes('connected'))) {
@@ -1302,6 +1396,104 @@ function updateModalContent(r) {
     } else {
       ntripEl.innerText = '🔴 Disconnected (No Base Station Connected)';
       ntripEl.style.color = '#ef4444';
+    }
+  }
+
+  // Render Rover GNSS Satellite SNR (C/N0) Panel
+  const snrCard = document.getElementById('modal-snr-card');
+  if (snrCard) {
+    snrCard.style.display = r.gps.present ? 'block' : 'none';
+    const avg = r.gps.avg_snr;
+    const sats = r.gps.snr_sats || [];
+    const satCount = sats.length > 0 ? sats.length : (r.gps.total_signals || r.gps.sats || 0);
+    const badgeEl = document.getElementById('modal-snr-badge');
+    const sumEl = document.getElementById('modal-snr-summary');
+    const avgEl = document.getElementById('modal-snr-avg');
+    const cntEl = document.getElementById('modal-snr-count');
+    const topEl = document.getElementById('modal-snr-top');
+    const constsEl = document.getElementById('modal-snr-consts');
+    const barsEl = document.getElementById('modal-snr-bars');
+
+    if (avg !== null && !isNaN(avg)) {
+      if (avgEl) avgEl.innerText = avg.toFixed(1);
+      if (cntEl) cntEl.innerText = satCount;
+      if (sumEl) sumEl.innerText = `${satCount} Sats • Avg ${avg.toFixed(1)} dB-Hz`;
+      if (badgeEl) {
+        if (avg >= 38) {
+          badgeEl.innerText = `🟢 EXCELLENT (${avg.toFixed(1)} dB-Hz)`;
+          badgeEl.style.background = 'rgba(16, 185, 129, 0.15)';
+          badgeEl.style.color = '#34d399';
+          badgeEl.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+        } else if (avg >= 28) {
+          badgeEl.innerText = `🟡 GOOD (${avg.toFixed(1)} dB-Hz)`;
+          badgeEl.style.background = 'rgba(245, 158, 11, 0.15)';
+          badgeEl.style.color = '#fbbf24';
+          badgeEl.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+        } else {
+          badgeEl.innerText = `🔴 LOW SIGNAL (${avg.toFixed(1)} dB-Hz)`;
+          badgeEl.style.background = 'rgba(239, 68, 68, 0.15)';
+          badgeEl.style.color = '#f87171';
+          badgeEl.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+        }
+      }
+    } else {
+      if (avgEl) avgEl.innerText = '--';
+      if (cntEl) cntEl.innerText = r.gps.sats || 0;
+      if (sumEl) sumEl.innerText = `${r.gps.sats || 0} Sats • Waiting C/N0...`;
+    }
+
+    if (sats.length > 0) {
+      const topSat = sats[0];
+      if (topEl) {
+        topEl.innerText = `${topSat.id} (${topSat.snr} dB)`;
+      }
+      const constCounts = {};
+      sats.forEach(s => {
+        constCounts[s.constellation] = (constCounts[s.constellation] || 0) + 1;
+      });
+      if (constsEl) {
+        constsEl.innerText = Object.keys(constCounts).map(k => `${k}:${constCounts[k]}`).join(' ');
+      }
+      if (barsEl) {
+        const constColors = {
+          GPS: '#38bdf8',
+          Galileo: '#34d399',
+          BeiDou: '#c084fc',
+          GLONASS: '#fb7185',
+          QZSS: '#fbbf24'
+        };
+        barsEl.innerHTML = sats.map(sat => {
+          const snr = sat.snr || 0;
+          const heightPct = Math.min(100, Math.max(8, (snr / 50.0) * 100));
+          let barGrad = 'linear-gradient(to top, #059669, #10b981)';
+          let valColor = '#34d399';
+          if (snr < 28) {
+            barGrad = 'linear-gradient(to top, #dc2626, #ef4444)';
+            valColor = '#ef4444';
+          } else if (snr < 38) {
+            barGrad = 'linear-gradient(to top, #d97706, #f59e0b)';
+            valColor = '#fbbf24';
+          }
+          const tagColor = constColors[sat.constellation] || '#94a3b8';
+          const elevStr = (sat.elev !== null && sat.elev >= 0) ? `${sat.elev}°` : '--';
+          const title = `${sat.constellation} ${sat.id} | SNR: ${snr} dB-Hz | Elev: ${elevStr}`;
+          return `
+            <div class="fleet-snr-col" title="${title}">
+              <div class="fleet-snr-val" style="color: ${valColor};">${Math.round(snr)}</div>
+              <div class="fleet-snr-track">
+                <div class="fleet-snr-fill" style="height: ${heightPct.toFixed(0)}%; background: ${barGrad};"></div>
+              </div>
+              <div class="fleet-snr-tag" style="color: ${tagColor}; border-color: ${tagColor}40;">${sat.id}</div>
+            </div>
+          `;
+        }).join('');
+      }
+    } else {
+      if (topEl) topEl.innerText = '--';
+      if (constsEl) constsEl.innerText = 'GPS/GAL/BDS/GLO';
+      if (barsEl) {
+        barsEl.innerHTML = `<div style="width: 100%; text-align: center; padding: 18px; color: #94a3b8; font-size: 0.78rem;">Waiting for per-satellite GSV C/N0 stream from Rover...</div>`;
+      }
     }
   }
 

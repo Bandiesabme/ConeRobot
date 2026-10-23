@@ -177,10 +177,11 @@ class LC29HGPSNode(Node):
             self.serial_conn.reset_output_buffer()
             self.get_logger().info(f"Successfully opened serial port: {self.serial_port_name}")
 
-            # Explicitly ensure LC29H(DA) is configured in Rover RTK mode
+            # Explicitly ensure LC29H(DA) is configured in Rover RTK mode and GSV (1 Hz) is enabled
             try:
                 with self.serial_lock:
                     self.serial_conn.write(b"$PQTMCFGRCVRMODE,W,1*2A\r\n")
+                    self.serial_conn.write(nmea_command("PAIR062,3,1"))
                     if self.debug_signal_log:
                         # Enable $GxGST (position error std-dev) at 1 Hz; not saved to flash
                         self.serial_conn.write(nmea_command("PAIR062,8,1"))
@@ -308,34 +309,58 @@ class LC29HGPSNode(Node):
                 if sats_in_view > self.current_num_sats and self.current_fix_quality == 0:
                     self.current_num_sats = sats_in_view
 
-            talker = parts[0][1:3]
+            talker = parts[0][1:3].upper()
             n_fields = len(parts) - 4
+            n_blocks = n_fields // 4
             # NMEA 4.10+ appends a signal ID (e.g. L1 vs L5) -> one extra trailing field
-            signal_id = parts[-1] if n_fields % 4 == 1 else ''
+            signal_id = parts[4 + n_blocks * 4].strip() if n_fields % 4 >= 1 else '1'
             now = time.time()
             with self._cn0_lock:
-                for i in range(4, 4 + (n_fields // 4) * 4, 4):
-                    prn, snr = parts[i], parts[i + 3]
-                    if prn and snr:
+                for i in range(4, 4 + n_blocks * 4, 4):
+                    prn, elev_s, snr_s = parts[i].strip(), parts[i + 1].strip(), parts[i + 3].strip()
+                    if prn and prn.isdigit() and snr_s:
                         try:
-                            self._cn0_table[(talker, signal_id, prn)] = (float(snr), now)
+                            snr = float(snr_s)
+                            if snr > 0:
+                                elev = int(float(elev_s)) if elev_s else -1
+                                self._cn0_table[(talker, signal_id, int(prn))] = (snr, elev, now)
                         except ValueError:
                             pass
         except Exception:
             pass
 
     def _get_cn0_summary(self) -> str:
-        """Summarize recent C/N0 values (signal strength) for interference/antenna diagnostics."""
+        """Summarize recent C/N0 values and encode compact per-satellite SNR list for Fleet Dashboard."""
         now = time.time()
+        prefix_map = {'GP': 'G', 'GL': 'R', 'GA': 'E', 'GB': 'B', 'BD': 'B', 'GQ': 'Q', 'GN': 'S'}
         with self._cn0_lock:
-            for key in [k for k, (_, t) in self._cn0_table.items() if now - t > 5.0]:
+            for key in [k for k, (_, _, t) in self._cn0_table.items() if now - t > 5.0]:
                 del self._cn0_table[key]
-            vals = [v for v, _ in self._cn0_table.values()]
-        if not vals:
+            items = list(self._cn0_table.items())
+        if not items:
             return "C/N0: n/a"
+
+        # Group by physical satellite (keeping strongest carrier band SNR and elevation)
+        sat_best = {}
+        vals = []
+        for (talker, _sig_id, prn), (snr, elev, _t) in items:
+            vals.append(snr)
+            sat_id = f"{prefix_map.get(talker, 'S')}{prn:02d}"
+            prev = sat_best.get(sat_id)
+            if prev is None or snr > prev[0]:
+                sat_best[sat_id] = (snr, elev if elev >= 0 else (prev[1] if prev else -1))
+
+        if len(sat_best) > self.current_num_sats and self.current_num_sats >= 12:
+            self.current_num_sats = len(sat_best)
+
         avg = sum(vals) / len(vals)
         strong = sum(1 for v in vals if v >= 35.0)
-        return f"C/N0: avg {avg:.1f} dB-Hz, {strong}/{len(vals)} signals >=35"
+        sorted_sats = sorted(sat_best.items(), key=lambda kv: kv[1][0], reverse=True)[:32]
+        snr_tokens = ",".join(
+            f"{sid}:{round(s):d}@{el}" if el >= 0 else f"{sid}:{round(s):d}"
+            for sid, (s, el) in sorted_sats
+        )
+        return f"C/N0: avg {avg:.1f} dB-Hz, {strong}/{len(vals)} signals >=35 | SNR:[{snr_tokens}]"
 
     def _log_signal_diagnostics(self) -> None:
         """Detailed per-band / elevation / fix / GST / Pi health log (debug_signal_log:=true)."""

@@ -667,3 +667,62 @@ body {
 .save-btn:hover {
   background: #0369a1;
 }
+
+/* Fleet Modal Satellite SNR Bar Chart */
+.fleet-snr-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 12px 8px 8px 8px;
+  min-height: 145px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56, 189, 248, 0.3) transparent;
+}
+
+.fleet-snr-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 30px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.fleet-snr-val {
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  margin-bottom: 4px;
+}
+
+.fleet-snr-track {
+  width: 15px;
+  height: 90px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.fleet-snr-fill {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  transition: height 0.35s ease;
+}
+
+.fleet-snr-tag {
+  margin-top: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  background: rgba(0, 0, 0, 0.5);
+}
