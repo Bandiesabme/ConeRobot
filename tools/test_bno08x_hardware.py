@@ -44,14 +44,24 @@ except ImportError:
 
 class ReliableBNO08X_I2C(BNO08X_I2C):
     """
-    Subclass of BNO08X_I2C that strictly maintains independent Host TX sequence numbers.
-    The stock CircuitPython driver overwrites self._sequence_number with the sensor's
-    incoming sequence numbers, causing outgoing SET_FEATURE packets to jump sequence numbers
-    (e.g., from 0 directly to 5), which causes the BNO080 sensor hub to reject the packet.
+    Subclass of BNO08X_I2C that:
+    1. Strictly maintains independent Host TX sequence numbers (0, 1, 2...) so the
+       BNO080 sensor hub does not drop outgoing SET_FEATURE_COMMAND packets.
+    2. Filters empty polling noise ('data_length=0' and '** DONE! **') from debug logs.
+    3. Enables features directly on Channel 2 without timing out waiting for 0xFC,
+       which BNO080 (firmware 3.2.13) only sends upon explicit GET_FEATURE_REQUEST (0xFE).
     """
     def __init__(self, i2c_bus, reset=None, address=0x4A, debug=False):
         self._tx_seq = [0, 0, 0, 0, 0, 0]
         super().__init__(i2c_bus, reset=reset, address=address, debug=debug)
+
+    def _dbg(self, *args, **kwargs):
+        if not self._debug:
+            return
+        msg = " ".join(str(a) for a in args)
+        if "data_length=0" in msg or "** DONE! **" in msg:
+            return
+        print("DBG::\t\t", *args, **kwargs)
 
     def _send_packet(self, channel, data):
         data_length = len(data)
@@ -70,8 +80,33 @@ class ReliableBNO08X_I2C(BNO08X_I2C):
 
         self._tx_seq[channel] = (self._tx_seq[channel] + 1) % 256
 
+    def enable_feature(self, feature_id, report_interval=50000):
+        """Send SET_FEATURE_COMMAND (0xFD) on Channel 2 and register feature."""
+        set_feature_report = bytearray(17)
+        pack_into(
+            "<BBBHIII",
+            set_feature_report,
+            0,
+            0xFD,            # SHTP_REPORT_SET_FEATURE_COMMAND
+            feature_id,      # Feature ID
+            0,               # Feature flags
+            0,               # Change sensitivity
+            report_interval, # Report interval in microseconds
+            0,               # Batch interval
+            0,               # Sensor-specific configuration
+        )
+        self._send_packet(2, set_feature_report)
+        self._enabled_features.add(feature_id)
+        time.sleep(0.04)
+        for _ in range(5):
+            try:
+                self._process_available_packets()
+            except Exception:
+                pass
+            time.sleep(0.01)
+
     def _handle_sensor_report(self, report_id, report_bytes):
-        # Acknowledge feature active if data packets begin streaming on Channel 3
+        # Acknowledge feature active when data packets arrive on Channel 3
         self._enabled_features.add(report_id)
         super()._handle_sensor_report(report_id, report_bytes)
 

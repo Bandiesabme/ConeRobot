@@ -57,6 +57,14 @@ try:
             self._tx_seq = [0, 0, 0, 0, 0, 0]
             super().__init__(i2c_bus, reset=reset, address=address, debug=debug)
 
+        def _dbg(self, *args, **kwargs):
+            if not self._debug:
+                return
+            msg = " ".join(str(a) for a in args)
+            if "data_length=0" in msg or "** DONE! **" in msg:
+                return
+            print("DBG::\t\t", *args, **kwargs)
+
         def _send_packet(self, channel, data):
             data_length = len(data)
             write_length = data_length + 4
@@ -73,6 +81,31 @@ try:
                 i2c.write(self._data_buffer, end=write_length)
 
             self._tx_seq[channel] = (self._tx_seq[channel] + 1) % 256
+
+        def enable_feature(self, feature_id, report_interval=50000):
+            """Send SET_FEATURE_COMMAND (0xFD) on Channel 2 and register feature."""
+            set_feature_report = bytearray(17)
+            pack_into(
+                "<BBBHIII",
+                set_feature_report,
+                0,
+                0xFD,            # SHTP_REPORT_SET_FEATURE_COMMAND
+                feature_id,      # Feature ID
+                0,               # Feature flags
+                0,               # Change sensitivity
+                report_interval, # Report interval in microseconds
+                0,               # Batch interval
+                0,               # Sensor-specific configuration
+            )
+            self._send_packet(2, set_feature_report)
+            self._enabled_features.add(feature_id)
+            time.sleep(0.04)
+            for _ in range(5):
+                try:
+                    self._process_available_packets()
+                except Exception:
+                    pass
+                time.sleep(0.01)
 
         def _handle_sensor_report(self, report_id, report_bytes):
             self._enabled_features.add(report_id)
@@ -389,6 +422,12 @@ class BNO08xNode(Node):
             span = max(self.battery_max_v - self.battery_min_v, 0.1)
             pct = max(0.0, min(1.0, (voltage_v - self.battery_min_v) / span))
 
+            msg = BatteryState()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = self.frame_id
+            msg.present = True
+            msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LIPO
+            msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
             msg.voltage = float(round(voltage_v, 2))
             msg.percentage = float(round(pct, 2))
 
