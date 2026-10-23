@@ -85,6 +85,10 @@ except Exception as e:
     print(f"  Could not run low-level SMBus scan: {e}")
 
 
+debug_mode = "--debug" in sys.argv
+if debug_mode:
+    print("  🔍 Debug logging enabled (SHTP packet trace active).")
+
 # 3. Connect to BNO08x & Test SHTP Features
 print("\n[Step 3/4] Initializing BNO08x over I2C...")
 i2c = None
@@ -93,7 +97,7 @@ try:
     target_addr = 0x4B if (0x4B in detected_addrs and 0x4A not in detected_addrs) else 0x4A
     i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
     print(f"  Connecting to BNO08x at I2C address 0x{target_addr:02X}...")
-    sensor = BNO08X_I2C(i2c, address=target_addr)
+    sensor = BNO08X_I2C(i2c, address=target_addr, debug=debug_mode)
     print(f"  ✓ SHTP transport established with BNO08x at 0x{target_addr:02X}.")
     
     # Settle time
@@ -119,6 +123,8 @@ try:
             print(f"  ✓ Game Rotation Vector enabled on attempt {attempt}!")
             break
         except Exception as e:
+            if debug_mode or attempt == 5:
+                print(f"    Attempt {attempt} failed: {e}")
             for _ in range(5):
                 try:
                     sensor._process_available_packets()
@@ -135,6 +141,8 @@ try:
                 print(f"  ✓ Absolute Rotation Vector enabled on attempt {attempt}!")
                 break
             except Exception as e:
+                if debug_mode or attempt == 5:
+                    print(f"    Attempt {attempt} failed: {e}")
                 time.sleep(0.15)
 
     # Enable Gyro & Accel
