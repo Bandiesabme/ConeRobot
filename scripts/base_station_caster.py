@@ -466,18 +466,25 @@ class NTRIPBaseCaster:
                     self._add_log(f"Failed to write GNSS command: {e}", "WARN")
 
     def _enable_rtcm_and_nmea_outputs(self) -> None:
-        """Enables RTCM 1005, MSM7, NMEA GGA, and NMEA GSV outputs on the LC29H(BS)."""
+        """Enables RTCM 1005, MSM7, NMEA GGA, NMEA GSV, and PQTMSVINSTATUS outputs on the LC29H(BS)."""
         # Enable RTCM 1005 (Station Coordinates at 1 Hz)
         self._send_gnss_cmd("PAIR434,1")
         time.sleep(0.05)
         # Enable RTCM MSM7 multi-constellation observations
         self._send_gnss_cmd("PAIR432,1")
         time.sleep(0.05)
-        # Enable NMEA GGA sentence output (1 Hz) for live telemetry
+        # Enable NMEA GGA sentence output (1 Hz) via both PAIR and PQTM
         self._send_gnss_cmd("PAIR062,0,1")
         time.sleep(0.05)
-        # Enable NMEA GSV sentence output (1 Hz) for satellite C/N0 SNR telemetry
+        self._send_gnss_cmd("PQTMCFGMSGRATE,W,GGA,1")
+        time.sleep(0.05)
+        # Enable NMEA GSV sentence output (1 Hz) via both PAIR and PQTM
         self._send_gnss_cmd("PAIR062,3,1")
+        time.sleep(0.05)
+        self._send_gnss_cmd("PQTMCFGMSGRATE,W,GSV,1")
+        time.sleep(0.05)
+        # Enable Quectel Base Survey-In status output (1 Hz)
+        self._send_gnss_cmd("PQTMCFGMSGRATE,W,PQTMSVINSTATUS,1,1")
         time.sleep(0.05)
 
     def _restart_gnss_subsystem(self) -> None:
@@ -926,8 +933,37 @@ class NTRIPBaseCaster:
             val -= (1 << num_bits)
         return val
 
+    @staticmethod
+    def _resolve_msm_band(constellation_id: int, sig_id: int) -> str:
+        """Maps RTCM 10403.3 MSM Signal ID (1..32) to a carrier frequency band label."""
+        if constellation_id in (107, 111):  # GPS / QZSS
+            if sig_id in (22, 23, 24):
+                return "L5"
+            if sig_id in (8, 9, 10, 15, 16, 17):
+                return "L2"
+            return "L1"
+        if constellation_id == 108:  # GLONASS
+            return "G2" if sig_id in (8, 9) else "G1"
+        if constellation_id == 109:  # Galileo
+            if sig_id in (22, 23, 24):
+                return "E5a"
+            if sig_id in (14, 15, 16, 17, 18, 19, 20):
+                return "E5b"
+            return "E1"
+        if constellation_id == 112:  # BeiDou
+            if sig_id in (22, 23, 24):
+                return "B2a"
+            if sig_id in (30, 31, 32):
+                return "B1C"
+            if sig_id in (14, 15, 16):
+                return "B2I"
+            if sig_id in (8, 9, 10):
+                return "B3I"
+            return "B1I"
+        return "L1"
+
     def _parse_rtcm3_payload(self, msg_id: int, payload: bytes) -> None:
-        """Extracts satellite tracking masks and reference station coordinates directly from RTCM3."""
+        """Extracts satellite tracking masks, C/N0 SNR, and reference station coordinates directly from RTCM3."""
         try:
             # 1. Message 1005 / 1006: Base Station Antenna Reference Point (ARP)
             if msg_id in (1005, 1006) and len(payload) >= 19:
@@ -948,15 +984,82 @@ class NTRIPBaseCaster:
                             self._update_survey_statistics(lat, lon, alt)
 
             # 2. MSM Messages (1071-1077 GPS, 1081-1087 GLO, 1091-1097 GAL, 1111-1117 QZS, 1121-1127 BDS)
-            elif 1071 <= msg_id <= 1137 and len(payload) >= 18:
+            elif 1071 <= msg_id <= 1137 and len(payload) >= 22:
                 sat_mask = self._get_bits(payload, 73, 64)
-                num_sats = bin(sat_mask).count('1')
-                constellation = msg_id // 10
-                self.msm_sats[constellation] = num_sats
+                sig_mask = self._get_bits(payload, 137, 32)
+                sats = [i + 1 for i in range(64) if (sat_mask >> (63 - i)) & 1]
+                sigs = [i + 1 for i in range(32) if (sig_mask >> (31 - i)) & 1]
+                num_sats = len(sats)
+                num_sigs = len(sigs)
+
+                constellation_id = msg_id // 10
+                msm_type = msg_id % 10
+                self.msm_sats[constellation_id] = num_sats
                 total_sats = sum(self.msm_sats.values())
+                now = time.time()
                 if total_sats > 0:
-                    self._last_msm_time = time.time()
+                    self._last_msm_time = now
                     self.satellites_tracked = total_sats
+
+                # Extract per-satellite, per-band C/N0 (SNR in dB-Hz) directly from RTCM3 MSM4/5/6/7
+                # so the SNR dashboard works in Base Mode even when NMEA GSV is disabled by LC29H firmware
+                if msm_type in (4, 5, 6, 7) and num_sats > 0 and num_sigs > 0:
+                    msm_const_map = {
+                        107: ('G', 'GPS'),
+                        108: ('R', 'GLONASS'),
+                        109: ('E', 'Galileo'),
+                        111: ('Q', 'QZSS'),
+                        112: ('B', 'BeiDou'),
+                    }
+                    prefix, constellation = msm_const_map.get(constellation_id, ('S', 'GNSS'))
+                    cell_mask_offset = 169
+                    cells: List[Tuple[int, int]] = []
+                    for s_idx, prn in enumerate(sats):
+                        for g_idx, sig_id in enumerate(sigs):
+                            if self._get_bits(payload, cell_mask_offset + s_idx * num_sigs + g_idx, 1):
+                                cells.append((prn, sig_id))
+                    n_cell = len(cells)
+                    sat_data_bits = (18 * num_sats) if msm_type in (4, 6) else (36 * num_sats)
+                    sig_data_offset = cell_mask_offset + (num_sats * num_sigs) + sat_data_bits
+
+                    if msm_type in (4, 5):
+                        cn0_offset = sig_data_offset + 42 * n_cell
+                        cn0_bits = 6
+                        cn0_scale = 1.0
+                    else:
+                        cn0_offset = sig_data_offset + 55 * n_cell
+                        cn0_bits = 10
+                        cn0_scale = 0.0625
+
+                    if len(payload) * 8 >= cn0_offset + cn0_bits * n_cell:
+                        for c_idx, (prn, sig_id) in enumerate(cells):
+                            raw_cn0 = self._get_bits(payload, cn0_offset + c_idx * cn0_bits, cn0_bits)
+                            if raw_cn0 <= 0:
+                                continue
+                            snr = round(raw_cn0 * cn0_scale, 1)
+                            sat_id = f"{prefix}{prn:02d}"
+                            band = self._resolve_msm_band(constellation_id, sig_id)
+                            with self.sat_snr_lock:
+                                existing = self.sat_snr_map.get(sat_id)
+                                sig_state: Dict[str, dict] = {}
+                                if existing and isinstance(existing.get("band_state"), dict):
+                                    sig_state = {
+                                        b: info for b, info in existing["band_state"].items()
+                                        if now - info.get("last_seen", 0) <= 5.0
+                                    }
+                                sig_state[band] = {"snr": snr, "last_seen": now}
+                                best_snr = max(info["snr"] for info in sig_state.values())
+                                self.sat_snr_map[sat_id] = {
+                                    "id": sat_id,
+                                    "constellation": constellation,
+                                    "prn": prn,
+                                    "elev": existing.get("elev") if existing else None,
+                                    "az": existing.get("az") if existing else None,
+                                    "snr": best_snr,
+                                    "bands": {b: info["snr"] for b, info in sig_state.items()},
+                                    "band_state": sig_state,
+                                    "last_seen": now
+                                }
         except Exception:
             pass
 
@@ -1022,6 +1125,22 @@ class NTRIPBaseCaster:
                     if lat and lon and max(gga_sats, self.satellites_tracked) >= 4:
                         self._last_gga_time = time.time()
                         self._update_survey_statistics(lat, lon, alt)
+
+            elif line.startswith('$PQTMSVINSTATUS'):
+                # Quectel LC29H(BS) Base Survey-In status sentence:
+                # $PQTMSVINSTATUS,<ver>,<tow>,<valid>,<res0>,<res1>,<obs>,<cfg_dur>,<mean_x>,<mean_y>,<mean_z>,<mean_acc>*cs
+                body = line.strip().split('*')[0]
+                parts = body.split(',')
+                if len(parts) >= 11 and not self.is_static_fixed:
+                    try:
+                        mean_x = float(parts[8])
+                        mean_y = float(parts[9])
+                        mean_z = float(parts[10])
+                        if abs(mean_x) > 1000.0 and abs(mean_y) > 1000.0 and (time.time() - self._last_gga_time > 5.0):
+                            lat, lon, alt = self._ecef_to_lla(mean_x, mean_y, mean_z)
+                            self._update_survey_statistics(lat, lon, alt)
+                    except ValueError:
+                        pass
 
             elif 'GSV' in line:
                 self._parse_gsv(line)
@@ -1286,9 +1405,11 @@ class NTRIPBaseCaster:
 
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
 
-            # Ensure GSV output is flowing if no GSV received in last 15s
-            if self.ser and (time.time() - self._last_gsv_time > 15.0):
+            # Ensure SNR telemetry is flowing if no GSV or MSM SNR received in last 30s
+            if self.ser and not self.sat_snr_map and (time.time() - self._last_gsv_time > 30.0):
+                self._last_gsv_time = time.time()
                 self._send_gnss_cmd("PAIR062,3,1")
+                self._send_gnss_cmd("PQTMCFGMSGRATE,W,GSV,1")
 
     def _get_battery_data(self) -> Optional[dict]:
         """Reads INA219 battery bus voltage, shunt current, and power with hardware 128x averaging and sliding window filter."""
@@ -1659,7 +1780,9 @@ class NTRIPBaseCaster:
                     self.wfile.write(resp)
                 elif self.path == '/api/gsv/enable':
                     caster_instance._send_gnss_cmd("PAIR062,3,1")
-                    caster_instance._add_log("📡 Manually requested NMEA GSV satellite signal stream ($PAIR062,3,1)")
+                    caster_instance._send_gnss_cmd("PQTMCFGMSGRATE,W,GSV,1")
+                    caster_instance._send_gnss_cmd("PQTMCFGMSGRATE,W,GGA,1")
+                    caster_instance._add_log("📡 Manually requested GSV & GGA satellite signal stream ($PAIR062,3,1 + $PQTMCFGMSGRATE)")
                     resp = json.dumps({"status": "ok"}).encode('utf-8')
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
