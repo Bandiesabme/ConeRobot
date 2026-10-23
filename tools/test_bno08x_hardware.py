@@ -28,16 +28,52 @@ except ImportError:
     missing_pkgs.append("adafruit-blinka")
 
 try:
+    from struct import pack_into
     from adafruit_bno08x import (
         BNO_REPORT_ACCELEROMETER,
         BNO_REPORT_GYROSCOPE,
         BNO_REPORT_GAME_ROTATION_VECTOR,
         BNO_REPORT_ROTATION_VECTOR,
+        Packet,
     )
     from adafruit_bno08x.i2c import BNO08X_I2C
     print("  ✓ adafruit-circuitpython-bno08x found.")
 except ImportError:
     missing_pkgs.append("adafruit-circuitpython-bno08x")
+
+
+class ReliableBNO08X_I2C(BNO08X_I2C):
+    """
+    Subclass of BNO08X_I2C that strictly maintains independent Host TX sequence numbers.
+    The stock CircuitPython driver overwrites self._sequence_number with the sensor's
+    incoming sequence numbers, causing outgoing SET_FEATURE packets to jump sequence numbers
+    (e.g., from 0 directly to 5), which causes the BNO080 sensor hub to reject the packet.
+    """
+    def __init__(self, i2c_bus, reset=None, address=0x4A, debug=False):
+        self._tx_seq = [0, 0, 0, 0, 0, 0]
+        super().__init__(i2c_bus, reset=reset, address=address, debug=debug)
+
+    def _send_packet(self, channel, data):
+        data_length = len(data)
+        write_length = data_length + 4
+
+        pack_into("<H", self._data_buffer, 0, write_length)
+        self._data_buffer[2] = channel
+        self._data_buffer[3] = self._tx_seq[channel]
+        for idx, send_byte in enumerate(data):
+            self._data_buffer[4 + idx] = send_byte
+        packet = Packet(self._data_buffer)
+        self._dbg(f"Sending packet (Host TX Seq {self._tx_seq[channel]} on Ch {channel}):")
+        self._dbg(packet)
+        with self.bus_device_obj as i2c:
+            i2c.write(self._data_buffer, end=write_length)
+
+        self._tx_seq[channel] = (self._tx_seq[channel] + 1) % 256
+
+    def _handle_sensor_report(self, report_id, report_bytes):
+        # Acknowledge feature active if data packets begin streaming on Channel 3
+        self._enabled_features.add(report_id)
+        super()._handle_sensor_report(report_id, report_bytes)
 
 try:
     import smbus2 as smbus
@@ -97,21 +133,11 @@ try:
     target_addr = 0x4B if (0x4B in detected_addrs and 0x4A not in detected_addrs) else 0x4A
     i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)
     print(f"  Connecting to BNO08x at I2C address 0x{target_addr:02X}...")
-    sensor = BNO08X_I2C(i2c, address=target_addr, debug=debug_mode)
+    sensor = ReliableBNO08X_I2C(i2c, address=target_addr, debug=debug_mode)
     print(f"  ✓ SHTP transport established with BNO08x at 0x{target_addr:02X}.")
     
-    # Settle time
-    time.sleep(0.8)
-    
-    # Drain initial packets
-    print("  Draining startup packets from SHTP queue...")
-    for _ in range(15):
-        try:
-            sensor._process_available_packets()
-        except Exception:
-            pass
-        time.sleep(0.02)
-    print("  ✓ Queue drained.")
+    # Allow sensor hub to settle after ID query
+    time.sleep(0.3)
 
     # Test Enabling Rotation Reports
     print("  Enabling Game Rotation Vector (6-DOF, Feature 0x08)...")
