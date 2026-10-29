@@ -1,8 +1,8 @@
 # ROS 2 Cone Robot Control Workspace
 
-This repository contains the ROS 2 control workspace and hardware interface for a **Modular Differential Drive (Tank Steering) Robot** powered by a **Raspberry Pi 5** and controlled remotely over Wi-Fi DDS.
+This repository contains the ROS 2 control workspace and hardware interface for a **Modular Differential Drive (Tank / Skid Steering) Robot** powered by a **Raspberry Pi 5** and controlled remotely over Wi-Fi DDS.
 
-The system uses a **Remote-Brain Offloaded Compute Architecture**: heavy decision-making, navigation, and visualization run on the remote station, while the Raspberry Pi 5 acts as a lightweight **Hardware I/O Gateway** for motors (Cytron MDD10 Rev 2.0) and plug-and-play sensors (LiDAR, IMU, GPS, Camera).
+The system uses a **Remote-Brain + Onboard State-Driven Motion Primitive Architecture**: high-level mission planning, fleet monitoring, and visualization run on the remote station, while the Raspberry Pi 5 executes **closed-loop, state-driven motion primitives (`STRAIGHT`, `ROTATE`, `ARC`)** using its 50 Hz BNO08x IMU and pluggable distance sensor (`RTK GPS` or `LiDAR Odometry`).
 
 ---
 
@@ -10,30 +10,32 @@ The system uses a **Remote-Brain Offloaded Compute Architecture**: heavy decisio
 
 | Guide | Description |
 | :--- | :--- |
-| 🏗️ **[Remote-Brain Architecture](documentation/ARCHITECTURE.md)** | Deep dive into the Remote-Brain offloading paradigm, sequence timing loops, topic registry, and modular plugin pattern. |
-| 🚀 **[Motion Primitive Architecture](documentation/MOTION_PRIMITIVE_ARCHITECTURE.md)** | High-level Action interface (`/execute_motion`), trapezoidal S-curve profiling, and dual-rate IMU+LiDAR feedback. |
+| 🏗️ **[Remote-Brain Architecture](documentation/ARCHITECTURE.md)** | Deep dive into the Remote-Brain paradigm, state-driven control loops, topic registry, and single-parameter GPS/LiDAR switching. |
+| 🚀 **[Motion Primitive Architecture](documentation/MOTION_PRIMITIVE_ARCHITECTURE.md)** | High-level Action interface (`/execute_motion`), state-based velocity profiling, and dual-rate IMU + GPS/LiDAR feedback. |
 | 🍓 **[Raspberry Pi 5 Setup & Wiring Guide](documentation/RPI5_SETUP.md)** | Hardware setup for Pi 5, swap memory, udev GPIO rules, I2C speed, and Cytron MDD10 / BNO08x wiring pinouts. |
 | ⚡ **[Raspberry Pi Zero Setup Guide](documentation/RPI_ZERO_SETUP.md)** | Headless Pi Zero OS configuration, PL011 hardware UART (`dtoverlay=disable-bt`), and Wi-Fi optimization. |
 | 📡 **[GPS/RTK Setup Guide](documentation/GPS_RTK_SETUP.md)** | Waveshare LC29H(DA) Dual-band GPS/RTK setup, Pi 5 `/dev/ttyAMA0` serial config, NTRIP rover client, and ROS 2 `/fix` topic. |
 | 🏰 **[RTK Base Station Setup Guide](documentation/BASE_STATION_SETUP.md)** | Dedicated Raspberry Pi Zero RTK Base Station setup, LC29H(BS) UART configuration, and local NTRIP caster server. |
-| 🦊 **[Foxglove Telemetry Guide](documentation/FOXGLOVE_SETUP.md)** | Cross-platform WebSocket telemetry setup (`ws://10.42.0.10:8765`), 2D/3D LiDAR point clouds, and teleop joystick controls. |
+| 🦊 **[Foxglove Telemetry Guide](documentation/FOXGLOVE_SETUP.md)** | Cross-platform WebSocket telemetry setup (`ws://<PI5_IP>:8765`) and live sensor visualization. |
 | 📦 **[Archive / Legacy Guides](documentation/archive/)** | Historical guides including WSL 2 setup (`documentation/archive/WSL2_SETUP.md`) and Wi-Fi hotspot setup (`documentation/archive/rpi_wifi_hotspot_guide.md`). |
 
 ---
 
-## 2. Remote-Brain & Modular Architecture
+## 2. Remote-Brain & Unified Motion Architecture
 
 ```text
-+------------------------------------------+         +------------------------------------------+
-|          Remote Computer / Brain         |         |    Raspberry Pi 5 (Hardware Gateway)     |
-|                                          |         |                                          |
-|  - Decision / Navigation Node            |         |  - Cytron MDD10 Motor Controller         |
-|  - RViz 2 / Foxglove Studio              |========>|  - LiDAR Driver Node (/scan)             |
-|  - Teleop Control Node                   | (Wi-Fi) |  - IMU Driver Node (/imu/data)           |
-|  - Publishes Movement Commands (/cmd_vel)|         |  - GPS Driver Node (/fix)                |
-+------------------------------------------+         +------------------------------------------+
-                     |                                                    |
-                     +------- ROS DDS Network (ROS_DOMAIN_ID = 42) -------+
++------------------------------------------+         +--------------------------------------------------+
+|          Remote Computer / Brain         |         |        Raspberry Pi 5 (Smart Motion Gateway)     |
+|                                          |         |                                                  |
+|  - Mission / Waypoint Planner            |         |  - Unified Motion Primitive Controller (50 Hz)   |
+|  - 13-Robot Fleet Dashboard & Foxglove   |========>|  - Cytron MDD10 Motor Driver (Deadband + Trim)   |
+|  - Dispatches High-Level Goals:          | (Wi-Fi) |  - BNO08x 6-DOF IMU + INA219 Battery (/imu/data) |
+|    /execute_motion (Straight/Rotate/Arc) |         |  - Pluggable Position Sensor:                    |
+|    /cmd_primitive, /cmd_step             |         |    * GPS Robot:   LC29H RTK GNSS (/fix)          |
+|                                          |         |    * LiDAR Robot: YDLIDAR + rf2o (/odom)         |
++------------------------------------------+         +--------------------------------------------------+
+                     |                                                        |
+                     +----------- ROS DDS Network (ROS_DOMAIN_ID = 42) -------+
 ```
 
 ---
@@ -66,67 +68,35 @@ The system uses a **Remote-Brain Offloaded Compute Architecture**: heavy decisio
 
 ---
 
-## 4. Quickstart Testing Commands
+## 4. Quickstart & Launch Commands
 
-### On Raspberry Pi 5 (One-Time Setup & Hardware Drivers via SSH):
+### On Raspberry Pi 5 (SSH):
 ```bash
-# 1. Connect over SSH:
-ssh conerobot@<PI5_IP>
-
-# 2. Create the folder and clone the repository (First-time setup):
-mkdir -p ~/github && cd ~/github
-git clone https://github.com/Bandiesabme/ConeRobot.git
-cd ConeRobot
-
-# 3. Start a persistent tmux session (so Wi-Fi/SSH hiccups won't cancel the setup):
-tmux new -s setup
-
-# One-time automated interactive setup & driver compilation:
-bash scripts/setup_robot_rpi5.sh "Bandi" "1234445678"
-
-# Or build/rebuild the workspace manually later:
+# Build workspace:
 colcon build --symlink-install --parallel-workers 2
 source install/setup.bash
 
-# Option A: Launch for GPS Robot (Motors + IMU + RTK GPS + Step Controller)
+# Option A: Launch GPS Robot (Default — Motors + IMU + RTK GPS + Motion Primitive Controller)
 ros2 launch cone_robot_control robot.launch.py robot_type:=gps
 
-# Option B: Launch for LiDAR Robot (Motors + IMU + YDLIDAR + Step Controller)
+# Option B: Launch LiDAR Robot (Motors + IMU + YDLIDAR + rf2o Odom + Motion Primitive Controller)
 ros2 launch cone_robot_control robot.launch.py robot_type:=lidar
 ```
 
-> [!TIP]
-> **If Wi-Fi drops during setup over SSH**: Simply reconnect with `ssh conerobot@<PI5_IP>` and run `tmux attach -t setup` to resume right where you left off.
-
 ### High-Level Motion Primitive Testing (Action `/execute_motion`):
-The default motion controller is `primitive_motion_controller`. You can send Action goals from the terminal:
-
 ```bash
-# 1. Drive Straight 1.0 meter forward (smooth trapezoidal acceleration)
-ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 0, distance: 1.0, delta_yaw: 0.0, max_velocity: 0.25}"
+# 1. Drive Straight 4.0 meters forward (closed-loop GPS/Odom distance + 50 Hz IMU yaw lock)
+ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 0, distance: 4.0, delta_yaw: 0.0, max_velocity: 0.22}"
 
-# 2. Rotate In-Place 90° CCW (Turn Left by pi/2 radians ~ 1.57 rad)
+# 2. Rotate In-Place 90° CCW (Turn Left by +pi/2 radians ~ 1.5708 rad)
 ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 1, distance: 0.0, delta_yaw: 1.5708, max_yaw_rate: 1.0}"
 
-# 3. Drive Continuous Arc: 1.5 meters while turning 30° left (~0.524 rad)
-ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 2, distance: 1.5, delta_yaw: 0.5236, max_velocity: 0.20}"
+# 3. Drive Continuous Arc: 3.0 meters path while turning +45° left (~0.7854 rad)
+ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 2, distance: 3.0, delta_yaw: 0.7854, max_velocity: 0.22}"
 
 # Quick Topic Testing via /cmd_primitive (Vector3: x=distance_m, z=delta_yaw_rad):
-ros2 topic pub --once /cmd_primitive geometry_msgs/msg/Vector3 "{x: 1.0, y: 0.0, z: 0.5236}"
+ros2 topic pub --once /cmd_primitive geometry_msgs/msg/Vector3 "{x: 3.0, y: 0.0, z: 0.7854}"
+
+# Quick Topic Testing via /cmd_step (Vector3: x=distance_cm, z=delta_yaw_deg):
+ros2 topic pub --once /cmd_step geometry_msgs/msg/Vector3 "{x: 300.0, y: 0.0, z: 45.0}"
 ```
-
-### Legacy Motion Step Testing (`Turn X° & Drive Y cm`):
-Legacy `/cmd_step` commands remain 100% supported:
-```bash
-# Turn 90° Clockwise
-ros2 topic pub --once /cmd_step geometry_msgs/msg/Vector3 "{x: 0.0, y: 0.0, z: -90.0}"
-
-# Drive 50 cm Forward
-ros2 topic pub --once /cmd_step geometry_msgs/msg/Vector3 "{x: 50.0, y: 0.0, z: 0.0}"
-```
-
-### Visual Telemetry (Foxglove Studio over WebSockets):
-1. On Raspberry Pi 5, Foxglove bridge starts automatically with `robot.launch.py` (port `8765`).
-2. Open **[studio.foxglove.dev](https://studio.foxglove.dev)** in Chrome/Edge, click **Open Connection**, and enter `ws://<PI5_IP>:8765`.
-3. Add panels for `/step_status`, `/imu/heading`, `/scan`, and `/cmd_vel` to monitor the robot live!
-

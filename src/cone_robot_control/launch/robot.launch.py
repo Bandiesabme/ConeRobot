@@ -2,7 +2,6 @@ import os
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
-from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -19,7 +18,6 @@ def launch_setup(context, *args, **kwargs):
     launch_imu_val = LaunchConfiguration('launch_imu').perform(context).lower() == 'true'
     launch_foxglove_val = LaunchConfiguration('launch_foxglove').perform(context).lower() == 'true'
     launch_motion_val = LaunchConfiguration('launch_motion_controller').perform(context).lower() == 'true'
-    motion_type_val = LaunchConfiguration('motion_controller_type').perform(context).lower()
     gps_debug_val = LaunchConfiguration('gps_debug').perform(context).lower() == 'true'
     gps_run_label_val = LaunchConfiguration('gps_run_label').perform(context)
 
@@ -74,15 +72,13 @@ def launch_setup(context, *args, **kwargs):
             )
         )
 
-    # 3. Motion Controller Node (Unified State-Driven Controller)
+    # 3. Unified State-Driven Motion Primitive Controller Node
     if launch_motion_val:
-        motion_exec = 'primitive_motion_controller' if motion_type_val == 'primitive' else 'step_motion_controller'
-        motion_node_name = 'primitive_motion_controller' if motion_type_val == 'primitive' else 'step_motion_controller'
         nodes_to_launch.append(
             Node(
                 package='cone_robot_control',
-                executable=motion_exec,
-                name=motion_node_name,
+                executable='primitive_motion_controller',
+                name='primitive_motion_controller',
                 output='screen',
                 parameters=[config_file] + motion_extra_params
             )
@@ -167,58 +163,46 @@ def launch_setup(context, *args, **kwargs):
 
 
 def generate_launch_description():
-    # Declare Launch Arguments
-    declare_robot_type_cmd = DeclareLaunchArgument(
-        'robot_type',
-        default_value='gps',
-        description='Robot hardware preset: "gps" (IMU+GPS), "lidar" (IMU+LiDAR), "all" (IMU+GPS+LiDAR), or "custom"'
-    )
-
-    declare_launch_lidar_cmd = DeclareLaunchArgument(
-        'launch_lidar',
-        default_value='true',
-        description='Whether to launch YDLIDAR T-mini Plus driver node'
-    )
-
-    declare_launch_gps_cmd = DeclareLaunchArgument(
-        'launch_gps',
-        default_value='true',
-        description='Whether to launch Waveshare LC29H GPS/RTK driver node'
-    )
-
-    declare_launch_imu_cmd = DeclareLaunchArgument(
-        'launch_imu',
-        default_value='true',
-        description='Whether to launch BNO08x IMU driver node'
-    )
-
-    declare_launch_motion_cmd = DeclareLaunchArgument(
-        'launch_motion_controller',
-        default_value='true',
-        description='Whether to launch motion controller node'
-    )
-
-    declare_motion_controller_type_cmd = DeclareLaunchArgument(
-        'motion_controller_type',
-        default_value='primitive',
-        description='Motion controller implementation: "primitive" (Unified State-Driven) or "step" (legacy discrete)'
-    )
-
-    declare_launch_foxglove_cmd = DeclareLaunchArgument(
-        'launch_foxglove',
-        default_value='true',
-        description='Whether to launch Foxglove WebSocket Bridge (port 8765)'
-    )
-
     return LaunchDescription([
-        declare_robot_type_cmd,
-        declare_launch_lidar_cmd,
-        declare_launch_gps_cmd,
-        declare_launch_imu_cmd,
-        declare_launch_motion_cmd,
-        declare_motion_controller_type_cmd,
-        declare_launch_foxglove_cmd,
-        DeclareLaunchArgument('gps_debug', default_value='false', description='GPS signal diagnostics: [SIGDIAG] logs + raw NMEA recording'),
-        DeclareLaunchArgument('gps_run_label', default_value='', description='Label in the recorded NMEA file name'),
+        DeclareLaunchArgument(
+            'robot_type',
+            default_value='gps',
+            description='Robot hardware preset: "gps" (IMU+GPS), "lidar" (IMU+LiDAR), "all" (IMU+GPS+LiDAR), or "custom"'
+        ),
+        DeclareLaunchArgument(
+            'launch_lidar',
+            default_value='true',
+            description='Whether to launch YDLIDAR T-mini Plus driver node'
+        ),
+        DeclareLaunchArgument(
+            'launch_gps',
+            default_value='true',
+            description='Whether to launch Waveshare LC29H GPS/RTK driver node'
+        ),
+        DeclareLaunchArgument(
+            'launch_imu',
+            default_value='true',
+            description='Whether to launch BNO08x IMU driver node'
+        ),
+        DeclareLaunchArgument(
+            'launch_motion_controller',
+            default_value='true',
+            description='Whether to launch unified state-driven motion controller node'
+        ),
+        DeclareLaunchArgument(
+            'launch_foxglove',
+            default_value='true',
+            description='Whether to launch Foxglove WebSocket Bridge (port 8765)'
+        ),
+        DeclareLaunchArgument(
+            'gps_debug',
+            default_value='false',
+            description='GPS signal diagnostics: [SIGDIAG] logs + raw NMEA recording'
+        ),
+        DeclareLaunchArgument(
+            'gps_run_label',
+            default_value='',
+            description='Label in the recorded NMEA file name'
+        ),
         OpaqueFunction(function=launch_setup)
     ])

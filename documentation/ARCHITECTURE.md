@@ -1,204 +1,72 @@
-# Remote-Brain & Modular Architecture Guide
+# Remote-Brain & State-Driven Control Architecture Guide
 
-This document details the **Remote-Brain Offloaded Compute Architecture** and **Modular Hardware Interface Pattern** used in the ROS 2 Cone Robot workspace.
-
----
-
-## 1. Architectural Concept: Remote-Brain Offloading
-
-In this architecture, heavy computational tasks (path planning, sensor fusion, computer vision, obstacle avoidance) are offloaded from the robot's onboard microcontroller to a powerful remote machine (Ubuntu Laptop).
-
-- **Raspberry Pi 5 (Hardware I/O Gateway - 1 GB RAM Edition)**:
-  - Strict low-memory constraint: Runs in headless mode (no GUI/RViz) with ~400MB base footprint.
-  - Connects directly to physical hardware sensors (LiDAR, GPS, IMU) and motor drivers.
-  - Runs lightweight ROS 2 driver nodes that broadcast raw sensor data onto the ROS 2 DDS network over Wi-Fi.
-  - Subscribes to `/cmd_vel` to drive the Cytron MDD10 motor controller GPIO pins.
-  - Includes a fail-safe Watchdog Timer that automatically stops physical motors if network connectivity drops.
-
-- **Ubuntu Laptop (The Remote Brain)**:
-  - Subscribes to sensor streams (`/scan`, `/fix`) over Wi-Fi.
-  - Computes navigation logic, target distances, and steering angles.
-  - Publishes target velocity commands (`/cmd_vel`) back to the Raspberry Pi 5.
-  - Runs real-time visualizers like **RViz 2**.
+This document details the **Remote-Brain Offloaded Compute Architecture** and **Unified State-Driven Motion Control System** used in the ROS 2 Cone Robot workspace.
 
 ---
 
-## 2. Complete System & Network Data Flow Diagram
+## 1. Architectural Concept
 
-```text
-+---------------------------------------------------------------------------------------+
-|                         RASPBERRY PI 5 (Hardware I/O Gateway)                         |
-|                                                                                       |
-|  [LiDAR Sensor] --------> (LiDAR Driver Node) -------\                                |
-|  [GPS Module]   --------> (GPS Driver Node)   --------\                               |
-|                                                        |                              |
-|  [DC Motors] <--- [MDD10 Driver] <--- (Motor Controller Node)                         |
-+--------------------------------------------------------|------------------------------+
-                                                         |
-                                 Wi-Fi DDS Network       | Publish /scan & /fix
-                                 (ROS_DOMAIN_ID = 42)    v
-+---------------------------------------------------------------------------------------+
-|                         UBUNTU LAPTOP (The Remote Brain)                              |
-|                                                                                       |
-|  (Laptop Brain Node) <---------------------------------/                              |
-|       |                                                                               |
-|       | Computes path & obstacle avoidance                                            |
-|       v                                                                               |
-|  Publishes /cmd_vel over Wi-Fi DDS -------------------> (Motor Controller Node)       |
-|                                                                                       |
-|  (RViz 2 Visualizer) <--- Subscribes to /scan & /fix                                  |
-|  (Teleop Control)   ---> Publishes manual /cmd_vel                                    |
-+---------------------------------------------------------------------------------------+
-```
+- **Ubuntu / Remote Station (The Mission Brain)**:
+  - Runs the 13-Robot Fleet Dashboard (`tools/fleet_dashboard/app.py`), Foxglove Studio, and high-level waypoint/mission planning.
+  - Sends high-level spatial goals (`Move X meters`, `Turn Y radians`, or `Drive Arc (X, Y)`) via the `/execute_motion` ROS 2 Action Server (or `/cmd_primitive` / `/cmd_step` topics).
+  - Never streams raw high-frequency motor PWM or open-loop timed velocity commands over Wi-Fi.
 
-<details>
-<summary>View Mermaid Diagram</summary>
+- **Raspberry Pi 5 (Smart Motion Gateway — 1 GB RAM Edition)**:
+  - Runs the **50 Hz State-Driven Motion Primitive Controller** (`primitive_motion_controller`) locally on the Pi, completely isolating motor control from Wi-Fi jitter.
+  - Controls motion strictly as a function of **measured physical distance $s$ and measured IMU heading $\psi$** (never open-loop wall-clock timers).
+  - Switching between the **GPS Robot** and the **LiDAR Robot** changes **only one parameter** (`distance_source: "gps"` vs `"odom"`, or `robot_type:=gps` vs `robot_type:=lidar` in `robot.launch.py`).
+
+---
+
+## 2. System Data Flow
 
 ```mermaid
 graph TB
-    subgraph Pi5 [Raspberry Pi 5 Hardware Gateway]
-        LIDAR_HW[LiDAR Sensor USB] -->|Raw Bytes| LIDAR_NODE[LiDAR Driver Node]
-        GPS_HW[GPS Module UART/USB] -->|NMEA Sentences| GPS_NODE[GPS Driver Node]
-        MOTOR_NODE[mdd10_motor_controller Node] -->|PWM + DIR| MDD10_HW[Cytron MDD10 Driver]
-        MDD10_HW --> MOTORS[DC Motors]
+    subgraph Laptop [Remote Mission Control Laptop]
+        PLANNER[Mission Planner / CLI]
+        DASHBOARD[13-Robot Fleet Dashboard]
     end
 
-    subgraph Network [Wi-Fi DDS Communication Network]
-        TOPIC_SCAN["/scan"]
-        TOPIC_FIX["/fix"]
-        TOPIC_CMD["/cmd_vel"]
+    subgraph Pi5 [Raspberry Pi 5 Smart Motion Gateway]
+        IMU_NODE[bno08x_node 50 Hz IMU + INA219]
+        GPS_NODE[lc29h_gps_node 10 Hz RTK GNSS]
+        LIDAR_NODE[YDLIDAR + rf2o_laser_odometry 6 Hz]
+        CTRL[primitive_motion_controller 50 Hz State Loop]
+        MOTOR[mdd10_motor_controller Deadband + Trim]
     end
 
-    subgraph Laptop [Ubuntu Laptop Remote Brain]
-        BRAIN_NODE[Laptop Brain Node]
-        RVIZ2[RViz 2 Visualizer]
-        TELEOP[Teleop Node]
-    end
-
-    LIDAR_NODE --> TOPIC_SCAN
-    GPS_NODE --> TOPIC_FIX
-
-    TOPIC_SCAN --> BRAIN_NODE
-    TOPIC_FIX --> BRAIN_NODE
-    TOPIC_SCAN --> RVIZ2
-    TOPIC_FIX --> RVIZ2
-
-    BRAIN_NODE --> TOPIC_CMD
-    TELEOP --> TOPIC_CMD
-
-    TOPIC_CMD --> MOTOR_NODE
+    PLANNER -->|"/execute_motion (X m, Y rad)"| CTRL
+    IMU_NODE -->|"/imu/heading & /imu/data"| CTRL
+    IMU_NODE -->|"/battery_state"| MOTOR
+    GPS_NODE -->|"/fix (distance_source=gps)"| CTRL
+    LIDAR_NODE -->|"/odom (distance_source=odom)"| CTRL
+    CTRL -->|"/cmd_vel (50 Hz local)"| MOTOR
+    CTRL -->|"/motion_status & /step_status"| DASHBOARD
+    GPS_NODE -->|"/fix & /gps/status"| DASHBOARD
+    IMU_NODE -->|"/imu/heading & /battery_state"| DASHBOARD
 ```
-
-</details>
 
 ---
 
-## 3. Continuous Execution & Control Loop Sequence
+## 3. Active ROS 2 Nodes & Topic Registry
 
-```text
-Pi 5 Hardware           Pi 5 Driver Nodes       Ubuntu Laptop Brain     Motor Controller (Pi 5)     Motors
-      |                         |                        |                         |                   |
-      |--- Read Sensor Data --->|                        |                         |                   |
-      |                         |--- Publish /scan ---->|                         |                   |
-      |                         |--- Publish /fix ----->|                         |                   |
-      |                         |                        |-- Calculate Navigation -|                   |
-      |                         |                        |-- Publish /cmd_vel ---->|                   |
-      |                         |                        |                         |-- PWM & DIR ----->|
-      |                         |                        |                         |                   | (Motors Turn)
-```
+### Active Nodes in `cone_robot_control`
+| Executable | Purpose |
+| :--- | :--- |
+| **`primitive_motion_controller`** | 50 Hz state-driven action server (`/execute_motion`) and topic controller (`/cmd_primitive`, `/cmd_step`) for `STRAIGHT`, `ROTATE`, and `ARC` maneuvers. |
+| **`mdd10_motor_controller`** | Converts `/cmd_vel` into left/right Cytron MDD10 PWM + DIR signals using effective skid-steer track width ($L_{\text{eff}}$), static deadband compensation (`min_pwm`), motor trim, and INA219 battery voltage scaling. |
+| **`bno08x_node`** | 50 Hz 6-DOF Game Rotation Vector IMU driver (`/imu/data`, `/imu/heading` in CCW+ degrees) and 1 Hz INA219 battery monitor (`/battery_state`). |
+| **`lc29h_gps_node`** | 10 Hz dual-band RTK GNSS driver (`/fix`, `/gps/status`) with integrated auto-discovering NTRIP client. |
 
-<details>
-<summary>View Mermaid Sequence Diagram</summary>
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Sensors as Pi 5 Sensors
-    participant PiDriver as Pi 5 Driver Nodes
-    participant LaptopBrain as Laptop Brain Node (Ubuntu)
-    participant MotorNode as Pi 5 Motor Controller Node
-    participant Motors as Cytron MDD10 + Motors
-
-    loop Control Loop (10-20 Hz)
-        Sensors->>PiDriver: Read raw hardware readings
-        PiDriver->>LaptopBrain: Publish /scan & /fix over Wi-Fi DDS
-        Note over LaptopBrain: Process obstacles & GPS target
-        LaptopBrain->>MotorNode: Publish /cmd_vel over Wi-Fi
-        MotorNode->>Motors: Convert /cmd_vel to PWM & DIR
-        Motors->>Motors: Physical wheels turn
-    end
-```
-
-</details>
-
----
-
-## 4. Modular "Plug-and-Play" Sensor Integration Pattern
-
-Sensors and motor controllers interact exclusively through standard ROS 2 message topics. Adding or removing a hardware module requires **zero code changes** to existing nodes:
-
-```text
-+------------------------+       +------------------------+       +------------------------+
-|  MODULAR SENSOR NODES  |       |   STANDARD DDS TOPICS  |       |    CORE ROBOT STACK    |
-|       (Pi 5)           |       |                        |       |                        |
-|  [LiDAR Driver] -------+------>|  /scan                 +------>| [Laptop Brain Node]    |
-|  [GPS Driver]   -------+------>|  /fix                  +------>|        |               |
-|  [IMU Driver]   -------+------>|  /imu/data             +------>|        v               |
-+------------------------+       +------------------------+       |     /cmd_vel           |
-                                                                  |        v               |
-                                                                  | [Motor Controller Node]|
-                                                                  +------------------------+
-```
-
-<details>
-<summary>View Mermaid Diagram</summary>
-
-```mermaid
-graph LR
-    subgraph ModularSensors [Modular Sensor Drivers Pi 5]
-        M1[LiDAR Driver /scan]
-        M2[GPS Driver /fix]
-        M3[IMU Driver /imu/data]
-    end
-
-    subgraph StandardTopics [Standard ROS 2 Interfaces DDS]
-        T1["/scan"]
-        T2["/fix"]
-        T3["/imu/data"]
-    end
-
-    subgraph CoreComponents [Core Robot Stack]
-        BRAIN[Laptop Brain Node]
-        CMD["/cmd_vel"]
-        MOTOR[Motor Controller Node]
-    end
-
-    M1 --> T1
-    M2 --> T2
-    M3 --> T3
-
-    T1 --> BRAIN
-    T2 --> BRAIN
-    T3 --> BRAIN
-
-    BRAIN --> CMD
-    CMD --> MOTOR
-```
-
-</details>
-
----
-
-## 5. ROS 2 Topic & Interface Registry
-
-| Topic Name | ROS 2 Message Type | Publisher Location | Subscriber Location | Purpose |
+### Standard Topic & Action Interfaces
+| Interface Name | Type | Publisher / Client | Subscriber / Server | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
-| `/cmd_vel` | `geometry_msgs/msg/Twist` | Laptop Brain / Teleop Node | `mdd10_motor_controller` (RPi 5) | Target linear velocity ($v_x$) and angular turning rate ($\omega_z$). |
-| `/scan` | `sensor_msgs/msg/LaserScan` | LiDAR Driver Node (RPi 5) | Laptop Brain Node / RViz 2 | 2D 360° obstacle distance measurements. |
-| `/fix` | `sensor_msgs/msg/NavSatFix` | GPS Driver Node (RPi 5) | Laptop Brain Node / EKF | Global latitude, longitude, and altitude coordinates. |
-| `/imu/data` | `sensor_msgs/msg/Imu` | IMU Driver Node (RPi 5) | Laptop Brain Node / EKF | 3-axis acceleration & angular velocity. |
-| `/tf` | `tf2_msgs/msg/TFMessage` | `robot_state_publisher` (RPi 5) | RViz 2 (Laptop) | Coordinate frame transformations (`base_link` $\rightarrow$ `laser`, `gps`, etc.). |
-
----
-
-
+| `/execute_motion` | `cone_robot_interfaces/action/ExecuteMotion` | Mission Planner / CLI | `primitive_motion_controller` | Execute `STRAIGHT` (0), `ROTATE` (1), `ARC` (2), or `STOP` (3) with real-time spatial feedback. |
+| `/cmd_primitive` | `geometry_msgs/msg/Vector3` | Laptop / CLI | `primitive_motion_controller` | Quick primitive trigger (`x` = distance in meters, `z` = delta yaw in radians). |
+| `/cmd_step` | `geometry_msgs/msg/Vector3` | Laptop / CLI | `primitive_motion_controller` | Quick step trigger (`x` = distance in cm, `z` = delta yaw in degrees). |
+| `/cmd_vel` | `geometry_msgs/msg/Twist` | `primitive_motion_controller` | `mdd10_motor_controller` | Internal 50 Hz closed-loop linear ($v_x$) and angular ($\omega_z$) velocity command. |
+| `/imu/heading` | `std_msgs/msg/Float32` | `bno08x_node` | `primitive_motion_controller` | Continuous $[0, 360^\circ)$ CCW+ heading. |
+| `/imu/data` | `sensor_msgs/msg/Imu` | `bno08x_node` | `primitive_motion_controller` | 50 Hz orientation quaternion and angular velocity ($\omega_z$). |
+| `/fix` | `sensor_msgs/msg/NavSatFix` | `lc29h_gps_node` | `primitive_motion_controller` | RTK GNSS position used when `distance_source: "gps"`. |
+| `/odom` | `nav_msgs/msg/Odometry` | `rf2o_laser_odometry` | `primitive_motion_controller` | 2D laser scan-matching odometry used when `distance_source: "odom"`. |
+| `/battery_state` | `sensor_msgs/msg/BatteryState` | `bno08x_node` | `mdd10_motor_controller` | 3S LiPo bus voltage for feedforward PWM scaling and dashboard telemetry. |

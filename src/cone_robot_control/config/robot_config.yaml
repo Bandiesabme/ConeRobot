@@ -48,8 +48,6 @@ lc29h_gps_node:
 
     # --- NTRIP RTK Correction Stream Configuration ---
     ntrip_enable: true
-
-    # Option A: Local Base Station Pi (Auto-discovers across any router, hotspot, or network!)
     ntrip_caster: "auto"              # 'auto' (or 'conerobotBaseStation.local')
     ntrip_port: 2101                  # Base Station NTRIP port
     ntrip_mountpoint: "BASE"          # Base Station mountpoint
@@ -89,29 +87,3 @@ primitive_motion_controller:
     turn_settle_time_s: 0.15          # Standstill verification duration at target (seconds)
     distance_tolerance_m: 0.03        # Distance completion tolerance (3 cm)
     stuck_detect_time_s: 2.5          # Stall watchdog abort timeout (seconds)
-
-# 5. Legacy Step Motion Controller (Turn Y deg -> Drive X cm)
-step_motion_controller:
-  ros__parameters:
-    control_rate_hz: 20.0
-    turn_kp: 0.08
-    turn_tolerance_deg: 2.0
-    min_turn_speed: 0.65
-    max_turn_speed: 1.5
-    turn_settle_time_s: 0.15
-    default_linear_speed: 0.20
-    yaw_lock_kp: 0.12
-    distance_source: "gps"            # "gps" or "odom"
-    gps_require_rtk: false
-
-# 6. Teleop Keyboard Settings (Laptop)
-teleop_keyboard:
-  ros__parameters:
-    default_linear_speed: 0.2
-    default_angular_speed: 0.5
-
-# 7. Vision & Camera Settings (Future Modules)
-cone_detector:
-  ros__parameters:
-    camera_topic: "/camera/image_raw"
-    target_cone_color: "orange"
