@@ -229,12 +229,48 @@
             <div id="modal-snr-bars" class="fleet-snr-chart"></div>
           </div>
 
-          <!-- LiDAR Status Card -->
+          <!-- LiDAR & Laser Odometry Status Card -->
           <div class="step-status-card" id="modal-lidar-card">
-            <h4>LiDAR Sensor (/scan)</h4>
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;">
+              <h4 style="margin: 0;">LiDAR Sensor (/scan) &amp; Laser Odometry (/odom)</h4>
+              <button type="button" id="btn-toggle-lidar-radar" style="font-size: 0.75rem; font-weight: 600; padding: 5px 12px; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.15s ease;">
+                📡 Show 2D LiDAR Map
+              </button>
+            </div>
             <div class="step-grid">
               <div><span>Hardware Status:</span> <strong id="modal-lidar-status">Checking...</strong></div>
               <div><span>Scan Frequency:</span> <strong id="modal-lidar-freq">--</strong></div>
+              <div><span>Odometry Pose (X, Y):</span> <strong id="modal-odom-pos">--</strong></div>
+              <div><span>Odom Distance from Origin:</span> <strong id="modal-odom-dist">--</strong></div>
+            </div>
+
+            <!-- Collapsible 2D LiDAR Point Cloud Radar (Hidden by default until user clicks toggle button) -->
+            <div id="modal-lidar-radar-wrap" style="display: none; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
+              <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;">
+                <div style="display: flex; gap: 14px; font-size: 0.75rem; color: #94a3b8; font-family: var(--font-mono);">
+                  <span>Points: <strong id="lidar-radar-pts" style="color: #f1f5f9;">0 pts</strong></span>
+                  <span>Nearest Obstacle: <strong id="lidar-radar-min" style="color: #10b981;">--</strong></span>
+                  <span>Range: <strong id="lidar-radar-scale" style="color: #38bdf8;">±4 m</strong></span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 4px;">
+                  <span style="font-size: 0.7rem; color: #94a3b8; margin-right: 4px;">Zoom:</span>
+                  <button type="button" class="lidar-range-btn" data-range="1" style="font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: #94a3b8; cursor: pointer;">1m</button>
+                  <button type="button" class="lidar-range-btn" data-range="2" style="font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: #94a3b8; cursor: pointer;">2m</button>
+                  <button type="button" class="lidar-range-btn" data-range="4" style="font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: #38bdf8; color: #0b0f19; font-weight: 700; cursor: pointer;">4m</button>
+                  <button type="button" class="lidar-range-btn" data-range="8" style="font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: #94a3b8; cursor: pointer;">8m</button>
+                  <button type="button" class="lidar-range-btn" data-range="12" style="font-size: 0.7rem; padding: 3px 7px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); color: #94a3b8; cursor: pointer;">12m</button>
+                </div>
+              </div>
+              <div style="display: flex; justify-content: center; background: #070b14; border-radius: 10px; border: 1px solid rgba(56, 189, 248, 0.25); padding: 8px; overflow: hidden;">
+                <canvas id="modal-lidar-canvas" width="460" height="360" style="max-width: 100%; height: auto; display: block;"></canvas>
+              </div>
+              <div style="display: flex; justify-content: center; gap: 16px; margin-top: 8px; font-size: 0.7rem; color: #94a3b8;">
+                <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #ef4444;"></span> &lt; 0.5m (Close)</span>
+                <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #f59e0b;"></span> 0.5m – 1.2m (Mid)</span>
+                <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #38bdf8;"></span> &gt; 1.2m (Clear)</span>
+              </div>
+            </div>
+            <div>
             </div>
           </div>
 
@@ -304,6 +340,11 @@
   <!-- Leaflet JS for Maps -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <!-- Custom Fleet JS with cache buster -->
-  <script src="js/dashboard.js?v=v237"></script>
+  <script src="js/state.js?v=v240"></script>
+  <script src="js/cdr_decoder.js?v=v240"></script>
+  <script src="js/map_view.js?v=v240"></script>
+  <script src="js/lidar_canvas.js?v=v240"></script>
+  <script src="js/websocket.js?v=v240"></script>
+  <script src="js/dashboard.js?v=v240"></script>
 </body>
 </html>

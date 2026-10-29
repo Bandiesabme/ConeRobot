@@ -34,6 +34,7 @@ def load_config():
         "server": {"port": 8000, "host": "0.0.0.0", "robot_port": 8765},
         "topics": {
             "scan": "/scan",
+            "odom": "/odom",
             "gps_fix": "/fix",
             "gps_status": "/gps/status",
             "heading": "/imu/heading",

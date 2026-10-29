@@ -128,7 +128,7 @@ def launch_setup(context, *args, **kwargs):
                         'base_frame_id': 'base_link',
                         'odom_frame_id': 'odom',
                         'laser_frame_id': 'laser_frame',
-                        'freq': 6.0,  # Match YDLidar T-mini Plus scan rate (6Hz)
+                        'freq': 10.0,  # Synced with YDLidar T-mini Plus scan rate (10Hz)
                         'init_pose_from_topic': ''  # CRITICAL: empty = don't wait for /base_pose_ground_truth (Gazebo-only topic)
                     }]
                 )

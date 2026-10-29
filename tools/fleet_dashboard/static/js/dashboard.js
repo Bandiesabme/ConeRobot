@@ -1,205 +1,18 @@
 /* ==========================================================================
-   ConeRobot 13-Fleet Mission Control - Ultra Clean Architecture
-   100% Real Live Sensor Data - Zero Fake Data - Heterogeneous Fleet (LiDAR & GPS)
+   ConeRobot Fleet Dashboard - Module 6: UI Orchestration, Cards & Detail Modal
    ========================================================================== */
-
-let map = null;
-let robotMarkers = {};
-let selectedRobotId = null;
-let activeWebSockets = {}; // { 1: WebSocket }
-let reconnectTimers = {};  // { 1: timerId }
-let realTelemetry = {};    // { 1: { ... } }
-
-let configuredTopics = {
-  scan: '/scan',
-  gps_fix: '/fix',
-  gps_status: '/gps/status',
-  heading: '/imu/heading',
-  imu_data: '/imu/data',
-  step_status: '/step_status',
-  battery: '/battery_state'
-};
 
 document.addEventListener('DOMContentLoaded', () => {
   initMap();
   initCardsGridDOM();
   initEventListeners();
   startDiscoveryLoop();
-  
+
   // Smooth, throttled UI update loop (10 FPS)
   setInterval(renderUIUpdates, 100);
 });
 
-// --- Debug Logger ---
-function logDebug(msg, level = 'info') {
-  const container = document.getElementById('debug-log-container');
-  if (!container) return;
-  const timeStr = new Date().toLocaleTimeString();
-  let color = '#94a3b8';
-  if (level === 'success') color = '#34d399';
-  if (level === 'warn') color = '#f59e0b';
-  if (level === 'error') color = '#f87171';
-  if (level === 'topic') color = '#38bdf8';
-
-  const line = document.createElement('div');
-  line.style.color = color;
-  line.innerHTML = `<span style="color: #64748b;">[${timeStr}]</span> ${msg}`;
-  container.appendChild(line);
-
-  while (container.children.length > 60) {
-    container.removeChild(container.firstChild);
-  }
-  container.scrollTop = container.scrollHeight;
-}
-
-// --- 1. Map Initialization ---
-function initMap() {
-  map = L.map('fleet-map', {
-    center: [47.4979, 19.0402],
-    zoom: 16,
-    zoomControl: true
-  });
-
-  // 1. Standard OpenStreetMap (100% Free, No API Key needed)
-  const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-  });
-
-  // 2. High-Resolution Satellite Imagery (Esri World Imagery, 100% Free)
-  const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    maxZoom: 19,
-    attribution: 'Tiles &copy; Esri'
-  });
-
-  // Add OSM by default
-  osm.addTo(map);
-
-  // Add Layer Switcher (Street / Satellite) in top right
-  const baseMaps = {
-    "Utcatérkép (OSM)": osm,
-    "Műholdkép (Satellite)": satellite
-  };
-  L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
-
-  document.getElementById('btn-fit-map').addEventListener('click', fitAllRobotsInMap);
-  setTimeout(() => { if (map) map.invalidateSize(); }, 300);
-}
-
-function createRobotIcon(robotId, headingDeg, gpsMode, isLidarOnly) {
-  const rNum = String(robotId).padStart(2, '0');
-  let strokeColor = '#10b981'; // Green for RTK FIX
-  if (isLidarOnly) strokeColor = '#3b82f6'; // Blue for LiDAR unit
-  else if (gpsMode === 'FLOAT' || gpsMode === '3D FIX') strokeColor = '#f59e0b';
-  else if (gpsMode === 'NO FIX' || !gpsMode) strokeColor = '#ef4444';
-
-  const rot = (headingDeg !== null && !isNaN(headingDeg)) ? headingDeg : 0;
-
-  const svgHtml = `
-    <div class="robot-map-pin" style="transform: rotate(${rot}deg);" title="ConeRobot ${rNum}">
-      <svg width="34" height="34" viewBox="0 0 34 34">
-        <polygon points="17,2 29,28 17,22 5,28" fill="${strokeColor}" fill-opacity="0.9" stroke="#ffffff" stroke-width="1.5" />
-      </svg>
-      <div class="robot-pin-label" style="transform: rotate(-${rot}deg);">R${rNum}</div>
-    </div>
-  `;
-
-  return L.divIcon({
-    className: 'custom-robot-leaflet-icon',
-    html: svgHtml,
-    iconSize: [34, 34],
-    iconAnchor: [17, 17]
-  });
-}
-
-let hasAutoCentered = false;
-
-function updateMapMarkers() {
-  if (!map) return;
-  const activeValidIds = new Set();
-  let primaryCoordText = null;
-
-  Object.keys(realTelemetry).forEach(id => {
-    const r = realTelemetry[id];
-    if (!r || !r.online) return;
-
-    const lat = r.gps?.lat;
-    const lon = r.gps?.lon;
-    const heading = r.imu?.heading;
-    const gpsMode = r.gps?.mode || 'NO FIX';
-    const isLidarOnly = !r.gps?.present && r.lidar?.present;
-
-    if (lat && lon && Math.abs(lat) > 0.0001 && Math.abs(lon) > 0.0001) {
-      activeValidIds.add(String(id));
-      const icon = createRobotIcon(id, heading, gpsMode, isLidarOnly);
-      const rNum = String(id).padStart(2, '0');
-
-      if (!primaryCoordText) {
-        primaryCoordText = `R${rNum}: ${lat.toFixed(7)}° N, ${lon.toFixed(7)}° E (${gpsMode})`;
-      }
-
-      const tooltipContent = `<b>ConeRobot ${rNum}</b> [${gpsMode}]<br>📍 ${lat.toFixed(7)}, ${lon.toFixed(7)}<br>Alt: ${r.gps?.alt ? r.gps.alt + ' m' : '--'} | Sats: ${r.gps?.sats || 0}`;
-
-      if (robotMarkers[id]) {
-        const prev = robotMarkers[id]._prevData;
-        const posChanged = !prev || Math.abs(prev.lat - lat) > 1e-7 || Math.abs(prev.lon - lon) > 1e-7;
-        const rotChanged = !prev || Math.abs((prev.heading || 0) - (heading || 0)) > 0.4 || prev.gpsMode !== gpsMode;
-
-        if (posChanged) {
-          robotMarkers[id].setLatLng([lat, lon]);
-        }
-        if (rotChanged) {
-          robotMarkers[id].setIcon(icon);
-          if (robotMarkers[id].getTooltip()) {
-            robotMarkers[id].setTooltipContent(tooltipContent);
-          }
-        }
-        robotMarkers[id]._prevData = { lat, lon, heading, gpsMode };
-      } else {
-        const marker = L.marker([lat, lon], { icon: icon }).addTo(map);
-        marker.bindTooltip(tooltipContent, { direction: 'top', offset: [0, -18], className: 'robot-map-tooltip' });
-        marker.on('click', () => openRobotDetailModal(id));
-        marker._prevData = { lat, lon, heading, gpsMode };
-        robotMarkers[id] = marker;
-      }
-
-      // Auto-center map viewport on first valid GPS fix
-      if (!hasAutoCentered) {
-        map.setView([lat, lon], 19);
-        hasAutoCentered = true;
-      }
-    }
-  });
-
-  const coordsTextEl = document.getElementById('map-coords-text');
-  if (coordsTextEl) {
-    if (primaryCoordText) {
-      coordsTextEl.innerText = primaryCoordText;
-    } else {
-      coordsTextEl.innerText = 'Searching GPS...';
-    }
-  }
-
-  Object.keys(robotMarkers).forEach(id => {
-    if (!activeValidIds.has(String(id))) {
-      map.removeLayer(robotMarkers[id]);
-      delete robotMarkers[id];
-    }
-  });
-}
-
-function fitAllRobotsInMap() {
-  const coords = [];
-  Object.values(robotMarkers).forEach(m => coords.push(m.getLatLng()));
-  if (coords.length === 1) {
-    map.setView(coords[0], 19);
-  } else if (coords.length > 1) {
-    const bounds = L.latLngBounds(coords);
-    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 19 });
-  }
-}
-
-// --- 2. Card Grid DOM Initialization (Built Once) ---
+// --- 1. Card Grid DOM Initialization (Built Once) ---
 function initCardsGridDOM() {
   const container = document.getElementById('robot-cards-container');
   container.innerHTML = '';
@@ -257,916 +70,11 @@ function initCardsGridDOM() {
     `;
 
     container.appendChild(card);
-
-    realTelemetry[i] = {
-      id: i,
-      ip: '',
-      online: false,
-      lidar: { present: false, freq_hz: 0, sample_count: 0, min_dist: null, last_scan_time: 0 },
-      gps: {
-        present: false,
-        mode: 'NO FIX',
-        lat: null,
-        lon: null,
-        alt: null,
-        sats: 0,
-        hdop: null,
-        diff_age: null,
-        avg_snr: null,
-        strong_signals: 0,
-        total_signals: 0,
-        snr_sats: []
-      },
-      imu: { heading: null, pitch: null, roll: null, yaw: null },
-      motion: { state: 'Offline', step_progress: '--' },
-      health: { cpu_temp: '--', cpu_load: '--', battery_v: '--' }
-    };
+    realTelemetry[i] = createEmptyRobotTelemetry(i);
   }
 }
 
-// --- 3. Discovery Loop ---
-async function startDiscoveryLoop() {
-  logDebug('Discovery engine started. Fetching discovered fleet...', 'info');
-
-  async function pollFleet() {
-    try {
-      const res = await fetch('/api/fleet');
-      if (res.ok) {
-        const data = await res.json();
-        configuredTopics = data.topics || configuredTopics;
-        const robots = data.robots || {};
-
-        for (let i = 1; i <= 13; i++) {
-          const rob = robots[i];
-          if (rob && rob.online && rob.ip) {
-            realTelemetry[i].ip = rob.ip;
-            
-            // Connect only if socket is not already created / open
-            if (!activeWebSockets[i] && !reconnectTimers[i]) {
-              connectToRobotWebSocket(i, rob.ip, rob.port || 8765);
-            }
-          } else {
-            // Robot is offline: cancel pending reconnect timer and close dead socket
-            if (reconnectTimers[i]) {
-              clearTimeout(reconnectTimers[i]);
-              delete reconnectTimers[i];
-            }
-            if (activeWebSockets[i]) {
-              try { activeWebSockets[i].close(); } catch(e) {}
-              delete activeWebSockets[i];
-            }
-            if (realTelemetry[i]) {
-              realTelemetry[i].online = false;
-            }
-          }
-        }
-      }
-    } catch (e) {}
-  }
-
-  await pollFleet();
-  setInterval(pollFleet, 5000);
-}
-
-function connectToRobotWebSocket(robotId, ip, port) {
-  if (activeWebSockets[robotId]) {
-    const st = activeWebSockets[robotId].readyState;
-    if (st === WebSocket.CONNECTING || st === WebSocket.OPEN) {
-      return; // Already connecting or open
-    }
-  }
-
-  const wsUrl = `ws://${ip}:${port}`;
-  logDebug(`[Robot ${robotId}] Connecting to ${wsUrl}...`, 'info');
-
-  let ws;
-  try {
-    ws = new WebSocket(wsUrl, ["foxglove.sdk.v1", "foxglove.websocket.v1"]);
-  } catch (e) {
-    try { ws = new WebSocket(wsUrl); } catch(err) {
-      logDebug(`[Robot ${robotId}] WebSocket error: ${err}`, 'error');
-      scheduleReconnect(robotId, ip, port);
-      return;
-    }
-  }
-
-  activeWebSockets[robotId] = ws;
-  ws.binaryType = "arraybuffer";
-
-  const subIdToTopic = {};
-  const channelIdToTopic = {};
-  let subIdCounter = 1;
-
-  ws.onopen = () => {
-    logDebug(`🟢 [Robot ${robotId}] Connected to ${wsUrl}!`, 'success');
-    realTelemetry[robotId].online = true;
-    
-    // Send Foxglove clientInfo handshake
-    try {
-      ws.send(JSON.stringify({
-        op: "clientInfo",
-        name: "ConeRobotFleetDashboard"
-      }));
-    } catch(e){}
-  };
-
-  ws.onmessage = (event) => {
-    realTelemetry[robotId].online = true;
-
-    if (typeof event.data === "string") {
-      try {
-        const msg = JSON.parse(event.data);
-        
-        // 1. Channel Advertisement
-        if (msg.op === "advertise" && Array.isArray(msg.channels)) {
-          const subscriptions = [];
-          let hasLidarTopic = false;
-          let hasGpsTopic = false;
-          const targetTopics = [
-            '/scan',
-            '/fix',
-            '/gps/status',
-            '/imu/heading',
-            '/imu/data',
-            '/step_status',
-            '/battery_state',
-            '/foxglove_bridge/sysinfo',
-            '/robot/diagnostics'
-          ];
-
-          const seen = new Set();
-          msg.channels.forEach(ch => {
-            const rawTopic = ch.topic || '';
-            const topic = rawTopic.startsWith('/') ? rawTopic : '/' + rawTopic;
-            const schema = ch.schemaName || '';
-
-            const isScan = topic === configuredTopics.scan || topic === '/scan' || topic.endsWith('/scan');
-            const isGpsFix = topic === configuredTopics.gps_fix || topic === '/fix' || topic.endsWith('/fix');
-            const isGpsStatus = topic === configuredTopics.gps_status || topic === '/gps/status' || topic.endsWith('/gps/status');
-            const isHeading = topic === configuredTopics.heading || topic === '/imu/heading' || topic.endsWith('/heading');
-            const isImuData = topic === configuredTopics.imu_data || topic === '/imu/data' || topic.endsWith('/imu/data');
-            const isStep = topic === configuredTopics.step_status || topic === '/step_status' || topic.endsWith('/step_status');
-            const isDiag = topic === '/robot/diagnostics' || topic.endsWith('/robot/diagnostics');
-            const isSysinfo = topic === '/foxglove_bridge/sysinfo' || topic.includes('sysinfo');
-            const isBattery = topic === configuredTopics.battery ||
-                              topic === '/battery_state' ||
-                              topic.includes('battery') ||
-                              schema.includes('BatteryState');
-
-            if (isScan) hasLidarTopic = true;
-            if (isGpsFix) hasGpsTopic = true;
-
-            const isTarget = isScan || isGpsFix || isGpsStatus || isHeading || isImuData || isStep || isDiag || isSysinfo || isBattery || targetTopics.includes(topic) || Object.values(configuredTopics).includes(topic);
-
-            if (isTarget && !seen.has(rawTopic)) {
-              seen.add(rawTopic);
-              const subId = subIdCounter++;
-              subIdToTopic[subId] = rawTopic;
-              channelIdToTopic[ch.id] = rawTopic;
-              subscriptions.push({
-                id: subId,
-                channelId: ch.id
-              });
-            }
-          });
-
-          if (hasLidarTopic) realTelemetry[robotId].lidar.present = true;
-          if (hasGpsTopic) realTelemetry[robotId].gps.present = true;
-
-          const topicNames = subscriptions.map(s => subIdToTopic[s.id]).join(', ');
-          logDebug(`🛰️ [Robot ${robotId}] Subscribed to ${subscriptions.length} topics: ${topicNames}`, 'topic');
-
-          if (subscriptions.length > 0) {
-            ws.send(JSON.stringify({ op: "subscribe", subscriptions: subscriptions }));
-          }
-        }
-        // 2. Message Data
-        else if (msg.op === "message" && msg.data) {
-          const topic = subIdToTopic[msg.subscriptionId] || channelIdToTopic[msg.channelId] || subIdToTopic[msg.id] || channelIdToTopic[msg.id];
-          handleParsedRobotMessage(robotId, topic, msg.data);
-        }
-      } catch (e) {}
-    } else if (event.data instanceof ArrayBuffer) {
-      handleBinaryFoxgloveMessage(robotId, event.data, subIdToTopic, channelIdToTopic);
-    }
-  };
-
-  ws.onerror = () => {
-    // Suppress unneeded browser warnings
-  };
-
-  ws.onclose = (event) => {
-    logDebug(`🔴 [Robot ${robotId}] WebSocket Disconnected (Code: ${event.code}).`, 'warn');
-    delete activeWebSockets[robotId];
-    if (realTelemetry[robotId]) {
-      realTelemetry[robotId].online = false;
-    }
-    scheduleReconnect(robotId, ip, port);
-  };
-}
-
-function scheduleReconnect(robotId, ip, port) {
-  if (reconnectTimers[robotId]) return;
-  // If robot is known to be offline from fleet polling, don't spam reconnect
-  if (realTelemetry[robotId] && realTelemetry[robotId].online === false) {
-    return;
-  }
-  reconnectTimers[robotId] = setTimeout(() => {
-    delete reconnectTimers[robotId];
-    if (realTelemetry[robotId] && realTelemetry[robotId].online !== false) {
-      connectToRobotWebSocket(robotId, ip, port);
-    }
-  }, 4000);
-}
-
-function handleSysInfoData(r, sys) {
-  if (!r || !sys) return;
-  let cpu = null;
-  if (sys.total_cpu_percent !== undefined) {
-    cpu = `${Number(sys.total_cpu_percent).toFixed(1)}%`;
-  } else if (sys.process_cpu_percent !== undefined) {
-    cpu = `${Number(sys.process_cpu_percent).toFixed(1)}%`;
-  } else if (sys.cpu_percentage !== undefined) {
-    cpu = `${Math.round(sys.cpu_percentage * 100)}%`;
-  }
-
-  let ram = null;
-  if (sys.used_memory !== undefined && sys.total_memory !== undefined) {
-    const usedMb = Math.round(sys.used_memory / (1024 * 1024));
-    const totalMb = Math.round(sys.total_memory / (1024 * 1024));
-    ram = `${usedMb} MB / ${totalMb} MB`;
-  } else if (sys.used_memory !== undefined) {
-    ram = `${Math.round(sys.used_memory / (1024 * 1024))} MB`;
-  }
-
-  r.health.cpu_percent = cpu || '--';
-  r.health.ram_mb = ram || '--';
-  if (cpu || ram) {
-    r.health.cpu_load = [cpu ? `${cpu} CPU` : null, ram].filter(Boolean).join(' | ');
-  }
-}
-
-function parseSnrAndCorrFromStatus(r, str) {
-  if (!r || !str) return;
-  const ageMatch = str.match(/Corr\.\s*age:\s*([\d.]+s|-)/i);
-  if (ageMatch) {
-    r.gps.diff_age = ageMatch[1];
-  }
-
-  const cn0Match = str.match(/C\/N0:\s*avg\s*([\d.]+)\s*dB-Hz(?:,\s*(\d+)\/(\d+))?/i);
-  if (cn0Match) {
-    r.gps.avg_snr = parseFloat(cn0Match[1]);
-    if (cn0Match[2] !== undefined) r.gps.strong_signals = parseInt(cn0Match[2], 10);
-    if (cn0Match[3] !== undefined) r.gps.total_signals = parseInt(cn0Match[3], 10);
-  }
-
-  const snrListMatch = str.match(/SNR:\[([^\]]*)\]/i);
-  if (snrListMatch && snrListMatch[1].trim()) {
-    const constMap = { G: 'GPS', R: 'GLONASS', E: 'Galileo', B: 'BeiDou', Q: 'QZSS', S: 'GNSS' };
-    const sats = [];
-    snrListMatch[1].split(',').forEach(tok => {
-      const m = tok.trim().match(/^([A-Z]\d{2}):(\d+)(?:@(-?\d+))?$/i);
-      if (m) {
-        const sid = m[1].toUpperCase();
-        const snr = parseFloat(m[2]);
-        const elev = m[3] !== undefined ? parseInt(m[3], 10) : null;
-        sats.push({
-          id: sid,
-          constellation: constMap[sid[0]] || 'GNSS',
-          snr: snr,
-          elev: elev
-        });
-      }
-    });
-    if (sats.length > 0) {
-      r.gps.snr_sats = sats;
-    }
-  }
-}
-
-function cdrAlign(ptr, alignment) {
-  // Foxglove binary message has a 13-byte envelope (op:1, subId:4, stamp:8).
-  // ROS 2 CDR encapsulation header is 4 bytes (offset 13..16).
-  // The CDR serialized data payload starts at byte 17.
-  // In OMG CDR specification, all primitive type alignments (2, 4, 8)
-  // are calculated relative to the start of the serialized data stream (byte 17).
-  const dataStart = 17;
-  const offset = Math.max(0, ptr - dataStart);
-  const aligned = (offset + (alignment - 1)) & ~(alignment - 1);
-  return dataStart + aligned;
-}
-
-function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToTopic) {
-  const view = new DataView(buffer);
-  if (buffer.byteLength < 17) return;
-  const op = view.getUint8(0);
-  
-  // Opcode 1 = Message Data
-  if (op === 1) {
-    const subId = view.getUint32(1, true);
-    const topic = (subIdToTopic && subIdToTopic[subId]) || (channelIdToTopic && channelIdToTopic[subId]);
-    if (!topic) {
-      return; // Skip messages for unmapped or unsubscribed channels
-    }
-
-    const r = realTelemetry[robotId];
-    if (!r) return;
-
-    try {
-      // 0. foxglove.SystemInfo (/foxglove_bridge/sysinfo)
-      if (topic === '/foxglove_bridge/sysinfo' || topic.endsWith('sysinfo')) {
-        const jsonBytes = new Uint8Array(buffer, 13);
-        const rawText = new TextDecoder('utf-8').decode(jsonBytes);
-        const firstBrace = rawText.indexOf('{');
-        const lastBrace = rawText.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace > firstBrace) {
-          try {
-            const jsonStr = rawText.substring(firstBrace, lastBrace + 1);
-            const sys = JSON.parse(jsonStr);
-            handleSysInfoData(r, sys);
-          } catch(e) {
-            // Silently ignore non-JSON or partial binary packets
-          }
-        }
-        return;
-      }
-
-      // CDR payload starts at byte 13.
-      // CDR 4-byte header is at 13..16. Data starts at byte 17.
-      let ptr = 17;
-
-      const normTopic = topic.startsWith('/') ? topic : '/' + topic;
-
-      // 1. sensor_msgs/msg/LaserScan (/scan)
-      if (normTopic === configuredTopics.scan || normTopic === '/scan' || normTopic.endsWith('/scan')) {
-        r.lidar.present = true;
-        const now = Date.now();
-        if (r.lidar.last_scan_time > 0) {
-          const dt = (now - r.lidar.last_scan_time) / 1000;
-          if (dt > 0.01) r.lidar.freq_hz = Number((1.0 / dt).toFixed(1));
-        }
-        r.lidar.last_scan_time = now;
-      }
-
-      // 2. sensor_msgs/msg/NavSatFix (/fix)
-      else if (normTopic === configuredTopics.gps_fix || normTopic === '/fix' || normTopic.endsWith('/fix')) {
-        r.gps.present = true;
-        const isLE = buffer.byteLength > 14 ? (view.getUint8(14) === 1) : true;
-        let lat = null, lon = null, alt = null;
-
-        // Pass 1: Standard ROS 2 CDR Header Skip & Sequential Read
-        // Payload starts at byte 17.
-        // stamp: sec(4) + nsec(4) = 8 bytes -> fPtr = 25.
-        let fPtr = ptr + 8;
-        if (fPtr + 4 <= buffer.byteLength) {
-          const frameLen = view.getUint32(fPtr, isLE);
-          if (frameLen < 256 && fPtr + 4 + frameLen <= buffer.byteLength) {
-            fPtr += 4 + frameLen;
-            const statusInt = view.getInt8(fPtr); fPtr += 1;
-            fPtr = cdrAlign(fPtr, 2);
-            fPtr += 2;             // service (uint16)
-            fPtr = cdrAlign(fPtr, 8); // align 8 relative to CDR stream (latitude)
-
-            if (fPtr + 24 <= buffer.byteLength) {
-              const cLat = view.getFloat64(fPtr, isLE);
-              const cLon = view.getFloat64(fPtr + 8, isLE);
-              const cAlt = view.getFloat64(fPtr + 16, isLE);
-              if (!isNaN(cLat) && !isNaN(cLon) && isFinite(cLat) && isFinite(cLon) &&
-                  Math.abs(cLat) <= 90.0 && Math.abs(cLon) <= 180.0 &&
-                  (Math.abs(cLat) > 0.0001 || Math.abs(cLon) > 0.0001)) {
-                lat = cLat;
-                lon = cLon;
-                if (!isNaN(cAlt) && isFinite(cAlt) && Math.abs(cAlt) < 100000.0) alt = cAlt;
-              }
-            }
-
-            if (statusInt === 2) {
-              if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'RTK FIX';
-            } else if (statusInt === 1) {
-              if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'DGPS';
-            } else if (statusInt === 0) {
-              if (r.gps.mode === 'NO FIX') r.gps.mode = '3D FIX';
-            }
-          }
-        }
-
-        // Pass 2: Resilient byte-by-byte scan across entire CDR buffer (LE & BE)
-        // Skip timestamp (start at offset 25) to avoid false matches
-        if (lat === null) {
-          for (let offset = 25; offset <= buffer.byteLength - 16; offset++) {
-            // Little Endian
-            let sLat = view.getFloat64(offset, true);
-            let sLon = view.getFloat64(offset + 8, true);
-            if (!isNaN(sLat) && !isNaN(sLon) && isFinite(sLat) && isFinite(sLon) &&
-                Math.abs(sLat) <= 90.0 && Math.abs(sLon) <= 180.0 &&
-                (Math.abs(sLat) > 0.0001 || Math.abs(sLon) > 0.0001) &&
-                (Math.abs(sLat) >= 0.01 && Math.abs(sLon) >= 0.01)) {
-              lat = sLat;
-              lon = sLon;
-              if (offset + 24 <= buffer.byteLength) {
-                const sAlt = view.getFloat64(offset + 16, true);
-                if (!isNaN(sAlt) && isFinite(sAlt) && Math.abs(sAlt) < 100000.0) alt = sAlt;
-              }
-              break;
-            }
-            // Big Endian fallback
-            sLat = view.getFloat64(offset, false);
-            sLon = view.getFloat64(offset + 8, false);
-            if (!isNaN(sLat) && !isNaN(sLon) && isFinite(sLat) && isFinite(sLon) &&
-                Math.abs(sLat) <= 90.0 && Math.abs(sLon) <= 180.0 &&
-                (Math.abs(sLat) > 0.0001 || Math.abs(sLon) > 0.0001) &&
-                (Math.abs(sLat) >= 0.01 && Math.abs(sLon) >= 0.01)) {
-              lat = sLat;
-              lon = sLon;
-              if (offset + 24 <= buffer.byteLength) {
-                const sAlt = view.getFloat64(offset + 16, false);
-                if (!isNaN(sAlt) && isFinite(sAlt) && Math.abs(sAlt) < 100000.0) alt = sAlt;
-              }
-              break;
-            }
-          }
-        }
-
-        if (lat !== null && lon !== null) {
-          r.gps.lat = Number(lat.toFixed(7));
-          r.gps.lon = Number(lon.toFixed(7));
-          if (alt !== null && !isNaN(alt) && isFinite(alt)) r.gps.alt = Number(alt.toFixed(1));
-          if (r.gps.mode === 'NO FIX') r.gps.mode = '3D FIX';
-          console.log(`[NavSatFix] Extracted coords: ${r.gps.lat}, ${r.gps.lon} (Alt: ${r.gps.alt}m)`);
-          logDebug(`📍 [Robot ${robotId}] GPS Fix: ${r.gps.lat}, ${r.gps.lon} (Alt: ${r.gps.alt !== null ? r.gps.alt + 'm' : '--'})`, 'topic');
-        } else {
-          console.warn(`[NavSatFix] Could not find coords in buffer (${buffer.byteLength} bytes)`);
-        }
-      }
-
-      // 3. std_msgs/msg/Float32 (/imu/heading)
-      else if (normTopic === configuredTopics.heading || normTopic === '/imu/heading' || normTopic.endsWith('/heading')) {
-        if (ptr + 4 <= buffer.byteLength) {
-          let val = view.getFloat32(ptr, true);
-          if (!isNaN(val) && isFinite(val)) {
-            val = ((val % 360) + 360) % 360;
-            const rounded = Number(val.toFixed(1));
-            r.imu.heading = rounded;
-            r.imu.last_heading_topic_time = Date.now();
-          }
-        }
-      }
-
-      // 4. std_msgs/msg/String (/gps/status)
-      else if (normTopic === configuredTopics.gps_status || normTopic === '/gps/status' || normTopic.endsWith('/gps/status')) {
-        r.gps.present = true;
-        let str = '';
-
-        // Pass 1: Standard ROS 2 CDR string decoding (offset 17 has uint32 length)
-        if (ptr + 4 <= buffer.byteLength) {
-          const strLen = view.getUint32(ptr, true);
-          if (strLen > 0 && strLen < 10000 && ptr + 4 < buffer.byteLength) {
-            const actualLen = Math.min(strLen, buffer.byteLength - (ptr + 4));
-            const strBytes = new Uint8Array(buffer, ptr + 4, actualLen);
-            str = new TextDecoder('utf-8', { fatal: false }).decode(strBytes).replace(/\0/g, '').trim();
-          }
-        }
-
-        // Pass 2: Resilient full-payload scan (from byte 13 onwards)
-        if (!str || !str.includes('Fix:')) {
-          try {
-            const payloadBytes = new Uint8Array(buffer, 13);
-            const rawPayload = new TextDecoder('utf-8', { fatal: false }).decode(payloadBytes);
-            const fixIdx = rawPayload.indexOf('Fix:');
-            if (fixIdx !== -1) {
-              str = rawPayload.substring(fixIdx).replace(/\0/g, '').trim();
-            }
-          } catch(e) {}
-        }
-
-        if (str) {
-          const fixMatch = str.match(/Fix:\s*([^|]+)/i);
-          const fixStr = (fixMatch ? fixMatch[1] : str).trim().toUpperCase();
-          if (fixStr.includes('RTK FIX') || fixStr === '4') r.gps.mode = 'RTK FIX';
-          else if (fixStr.includes('FLOAT') || fixStr === '5') r.gps.mode = 'FLOAT';
-          else if (fixStr.includes('DGPS') || fixStr === '2') r.gps.mode = 'DGPS';
-          else if (fixStr.includes('3D') || fixStr === '1') r.gps.mode = '3D FIX';
-          else if (fixStr.includes('NO FIX') || fixStr === '0') r.gps.mode = 'NO FIX';
-          else r.gps.mode = fixStr || '3D FIX';
-
-          const satMatch = str.match(/Sats:\s*(\d+)/i) || str.match(/(\d+)\s*sats/i);
-          if (satMatch) r.gps.sats = parseInt(satMatch[1]);
-
-          const hdopMatch = str.match(/HDOP:\s*([\d.]+)/i);
-          if (hdopMatch) r.gps.hdop = hdopMatch[1];
-
-          const ntripMatch = str.match(/NTRIP:\s*([^(|]+)(?:\(([^)]+)\))?/i);
-          if (ntripMatch) {
-            r.gps.ntrip = ntripMatch[1].trim();
-            r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
-          }
-
-          parseSnrAndCorrFromStatus(r, str);
-
-          // Resilient Coordinate extraction from /gps/status
-          let pMatch = str.match(/Pos:\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?\s*\)/i);
-          if (!pMatch) {
-            const latM = str.match(/Lat(?:itude)?:\s*([-\d.]+)/i);
-            const lonM = str.match(/Lon(?:gitude)?:\s*([-\d.]+)/i);
-            if (latM && lonM) {
-              const altM = str.match(/Alt(?:itude)?:\s*([-\d.]+)/i);
-              pMatch = [null, latM[1], lonM[1], altM ? altM[1] : null];
-            }
-          }
-          if (!pMatch) {
-            pMatch = str.match(/Pos:\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?/i);
-          }
-          if (!pMatch) {
-            const decM = str.match(/\b([0-8]?\d\.\d{4,9})\s*,\s*([0-1]?\d{1,2}\.\d{4,9})\b/);
-            if (decM) {
-              pMatch = [null, decM[1], decM[2], null];
-            }
-          }
-          if (pMatch) {
-            const pLat = parseFloat(pMatch[1]);
-            const pLon = parseFloat(pMatch[2]);
-            if (!isNaN(pLat) && !isNaN(pLon) && isFinite(pLat) && isFinite(pLon) &&
-                Math.abs(pLat) <= 90.0 && Math.abs(pLon) <= 180.0 &&
-                (Math.abs(pLat) > 0.0001 || Math.abs(pLon) > 0.0001)) {
-              r.gps.lat = Number(pLat.toFixed(7));
-              r.gps.lon = Number(pLon.toFixed(7));
-              if (pMatch[3]) {
-                const pAlt = parseFloat(pMatch[3]);
-                if (!isNaN(pAlt) && isFinite(pAlt)) r.gps.alt = Number(pAlt.toFixed(1));
-              }
-            }
-          }
-
-          logDebug(`🛰️ [Robot ${robotId}] GPS Status: ${r.gps.mode} (${r.gps.sats} Sats, HDOP ${r.gps.hdop}) | Base: ${r.gps.ntrip}`, 'topic');
-        }
-      }
-
-      // 5. std_msgs/msg/String (/step_status)
-      else if (normTopic === configuredTopics.step_status || normTopic === '/step_status' || normTopic.endsWith('/step_status')) {
-        let str = '';
-        if (ptr + 4 <= buffer.byteLength) {
-          const strLen = view.getUint32(ptr, true);
-          if (strLen > 0 && strLen < 10000 && ptr + 4 < buffer.byteLength) {
-            const actualLen = Math.min(strLen, buffer.byteLength - (ptr + 4));
-            const strBytes = new Uint8Array(buffer, ptr + 4, actualLen);
-            str = new TextDecoder('utf-8', { fatal: false }).decode(strBytes).replace(/\0/g, '').trim();
-          }
-        }
-        if (!str) {
-          try {
-            const payloadBytes = new Uint8Array(buffer, 13);
-            str = new TextDecoder('utf-8', { fatal: false }).decode(payloadBytes).replace(/\0/g, '').trim();
-          } catch(e) {}
-        }
-        if (str) {
-          r.motion.step_progress = str;
-          r.motion.state = str.includes('Driving') || str.includes('Turning') ? 'Moving' : 'Standby';
-        }
-      }
-
-      // 6. std_msgs/msg/String (/robot/diagnostics)
-      else if (topic === '/robot/diagnostics' || topic === 'robot/diagnostics') {
-        const strLen = view.getUint32(ptr, true); ptr += 4;
-        if (strLen > 0 && ptr + strLen <= buffer.byteLength) {
-          const strBytes = new Uint8Array(buffer, ptr, strLen);
-          const str = new TextDecoder('utf-8').decode(strBytes).replace(/\0/g, '').trim();
-          try {
-            const diag = JSON.parse(str);
-            if (diag.cpu_temp) r.health.cpu_temp = diag.cpu_temp;
-          } catch(e) {
-            if (str.includes('°C') || str.includes('C')) r.health.cpu_temp = str;
-          }
-        }
-      }
-
-      // 7. foxglove.SystemInfo (/foxglove_bridge/sysinfo)
-      else if (topic === '/foxglove_bridge/sysinfo' || topic === 'foxglove_bridge/sysinfo' || (topic && topic.includes('sysinfo'))) {
-        try {
-          const jsonBytes = new Uint8Array(buffer, 13);
-          const rawText = new TextDecoder('utf-8').decode(jsonBytes);
-          const jsonMatch = rawText.substring(rawText.indexOf('{'), rawText.lastIndexOf('}') + 1);
-          if (jsonMatch) {
-            const sys = JSON.parse(jsonMatch);
-            handleSysInfoData(r, sys);
-          }
-        } catch(e) {}
-      }
-
-      // 5. sensor_msgs/msg/Imu (/imu/data)
-      else if (normTopic === configuredTopics.imu_data || normTopic === '/imu/data' || normTopic.endsWith('/imu/data')) {
-        const isLE = buffer.byteLength > 14 ? (view.getUint8(14) === 1) : true;
-        // Skip Header: sec (4), nsec (4)
-        ptr += 8;
-        if (ptr + 4 <= buffer.byteLength) {
-          const frameLen = view.getUint32(ptr, isLE);
-          if (frameLen < 256 && ptr + 4 + frameLen <= buffer.byteLength) {
-            ptr += 4 + frameLen;
-            
-            // Align to 8 bytes relative to start of CDR data payload (byte 17)
-            ptr = cdrAlign(ptr, 8);
-
-            if (ptr + 32 <= buffer.byteLength) {
-              const x = view.getFloat64(ptr, isLE); ptr += 8;
-              const y = view.getFloat64(ptr, isLE); ptr += 8;
-              const z = view.getFloat64(ptr, isLE); ptr += 8;
-              const w = view.getFloat64(ptr, isLE); ptr += 8;
-
-              const normSq = x * x + y * y + z * z + w * w;
-              // Guard against uninitialized or all-zero quaternion buffers
-              if (!isNaN(normSq) && normSq > 0.0001 && normSq < 4.0) {
-                const sinr_cosp = 2 * (w * x + y * z);
-                const cosr_cosp = 1 - 2 * (x * x + y * y);
-                const roll = Math.atan2(sinr_cosp, cosr_cosp) * (180 / Math.PI);
-
-                const sinp = 2 * (w * y - z * x);
-                let pitch;
-                if (Math.abs(sinp) >= 1) pitch = Math.sign(sinp) * 90;
-                else pitch = Math.asin(sinp) * (180 / Math.PI);
-
-                const siny_cosp = 2 * (w * z + x * y);
-                const cosy_cosp = 1 - 2 * (y * y + z * z);
-                let yaw = Math.atan2(siny_cosp, cosy_cosp) * (180 / Math.PI);
-                yaw = ((yaw % 360) + 360) % 360;
-                if (yaw >= 359.95) yaw = 0.0;
-
-                r.imu.roll = Number(roll.toFixed(1));
-                r.imu.pitch = Number(pitch.toFixed(1));
-                r.imu.yaw = Number(yaw.toFixed(1));
-                
-                // Only use /imu/data yaw as fallback if dedicated /imu/heading topic is not actively streaming
-                const hasFreshHeadingTopic = r.imu.last_heading_topic_time && (Date.now() - r.imu.last_heading_topic_time < 2000);
-                if (!hasFreshHeadingTopic) {
-                  r.imu.heading = Number(yaw.toFixed(1));
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // 8. sensor_msgs/msg/BatteryState (/battery_state)
-      else if (topic === configuredTopics.battery || topic === '/battery_state' || (topic && (topic.includes('battery') || topic.endsWith('/battery_state')))) {
-        let volt = null;
-        let pct = null;
-
-        // Pass 1: Standard ROS 2 CDR Header Skip
-        let bPtr = ptr + 8; // skip stamp (sec: 4, nsec: 4)
-        if (bPtr + 4 <= buffer.byteLength) {
-          const frameLen = view.getUint32(bPtr, true);
-          if (frameLen < 128 && bPtr + 4 + frameLen <= buffer.byteLength) {
-            bPtr += 4 + frameLen;
-            bPtr = cdrAlign(bPtr, 4);
-
-            if (bPtr + 28 <= buffer.byteLength) {
-              const vCand = view.getFloat32(bPtr, true);
-              if (!isNaN(vCand) && vCand >= 3.0 && vCand <= 36.0) {
-                volt = vCand;
-                const pCand = view.getFloat32(bPtr + 24, true);
-                if (!isNaN(pCand) && pCand >= 0.0 && pCand <= 100.0) {
-                  pct = pCand;
-                }
-              }
-            }
-          }
-        }
-
-        // Pass 2: Resilient CDR float scanner (matches 3S/4S LiPo voltage: 5.0V to 30.0V)
-        if (volt === null) {
-          for (let offset = 17; offset <= buffer.byteLength - 28; offset += 4) {
-            const vCand = view.getFloat32(offset, true);
-            if (!isNaN(vCand) && vCand >= 5.0 && vCand <= 30.0) {
-              volt = vCand;
-              const pCand = view.getFloat32(offset + 24, true);
-              if (!isNaN(pCand) && pCand >= 0.0 && pCand <= 100.0) {
-                pct = pCand;
-              }
-              break;
-            }
-          }
-        }
-
-        // Pass 3: 2-byte aligned scan fallback
-        if (volt === null) {
-          for (let offset = 17; offset <= buffer.byteLength - 4; offset += 2) {
-            const vCand = view.getFloat32(offset, true);
-            if (!isNaN(vCand) && vCand >= 5.0 && vCand <= 30.0) {
-              volt = vCand;
-              break;
-            }
-          }
-        }
-
-        if (volt !== null && volt > 0.0) {
-          const vFormatted = Number(volt).toFixed(1);
-          let pctVal = null;
-          if (pct !== null && !isNaN(pct) && pct >= 0) {
-            pctVal = Math.round(pct <= 1.0 ? pct * 100 : pct);
-          }
-          const prevBatt = r.health.battery_v;
-          r.health.battery_v = pctVal !== null ? `${vFormatted}V (${pctVal}%)` : `${vFormatted}V`;
-          if (prevBatt !== r.health.battery_v) {
-            logDebug(`🔋 [Robot ${robotId}] Battery: ${r.health.battery_v}`, 'topic');
-          }
-        }
-      }
-
-    } catch (e) {}
-  }
-}
-
-function handleParsedRobotMessage(robotId, topic, data) {
-  const r = realTelemetry[robotId];
-  if (!r) return;
-
-  // 1. LiDAR LaserScan (/scan)
-  if (topic === configuredTopics.scan || topic === '/scan') {
-    r.lidar.present = true;
-    const now = Date.now();
-    if (r.lidar.last_scan_time > 0) {
-      const dt = (now - r.lidar.last_scan_time) / 1000;
-      if (dt > 0.01) {
-        r.lidar.freq_hz = Number((1.0 / dt).toFixed(1));
-      }
-    }
-    r.lidar.last_scan_time = now;
-
-    if (Array.isArray(data.ranges)) {
-      r.lidar.sample_count = data.ranges.length;
-      let minD = Infinity;
-      for (let i = 0; i < data.ranges.length; i++) {
-        const d = data.ranges[i];
-        if (d > 0.05 && d < 12.0 && d < minD) {
-          minD = d;
-        }
-      }
-      r.lidar.min_dist = minD !== Infinity ? Number(minD.toFixed(2)) : null;
-    }
-  }
-
-  const normTopic = topic ? (topic.startsWith('/') ? topic : '/' + topic) : '';
-
-  // 2. GPS Fix (/fix)
-  if (normTopic === configuredTopics.gps_fix || normTopic === '/fix' || normTopic.endsWith('/fix')) {
-    r.gps.present = true;
-    if (data.latitude !== undefined && data.longitude !== undefined) {
-      r.gps.lat = Number(data.latitude);
-      r.gps.lon = Number(data.longitude);
-      r.gps.alt = data.altitude ? Number(data.altitude).toFixed(1) : '--';
-      const statusInt = data.status?.status ?? data.status;
-      if (statusInt === 2) {
-        if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'RTK FIX';
-      } else if (statusInt === 1) {
-        if (r.gps.mode === 'NO FIX' || r.gps.mode === '3D FIX') r.gps.mode = 'DGPS';
-      } else if (statusInt >= 0 && r.gps.mode === 'NO FIX') {
-        r.gps.mode = '3D FIX';
-      }
-    }
-  }
-
-  // 3. GPS Status (/gps/status)
-  if (normTopic === configuredTopics.gps_status || normTopic === '/gps/status' || normTopic.endsWith('/gps/status')) {
-    r.gps.present = true;
-    const str = typeof data === 'string' ? data : (data.data || '');
-    if (str) {
-      const fixMatch = str.match(/Fix:\s*([^|]+)/i);
-      const fixStr = (fixMatch ? fixMatch[1] : str).trim().toUpperCase();
-      if (fixStr.includes('RTK FIX') || fixStr === '4') r.gps.mode = 'RTK FIX';
-      else if (fixStr.includes('FLOAT') || fixStr === '5') r.gps.mode = 'FLOAT';
-      else if (fixStr.includes('DGPS') || fixStr === '2') r.gps.mode = 'DGPS';
-      else if (fixStr.includes('3D') || fixStr === '1') r.gps.mode = '3D FIX';
-      else if (fixStr.includes('NO FIX') || fixStr === '0') r.gps.mode = 'NO FIX';
-      else r.gps.mode = fixStr || '3D FIX';
-
-      const satMatch = str.match(/Sats:\s*(\d+)/i) || str.match(/(\d+)\s*sats/i);
-      if (satMatch) r.gps.sats = parseInt(satMatch[1]);
-
-      const hdopMatch = str.match(/HDOP:\s*([\d.]+)/i);
-      if (hdopMatch) r.gps.hdop = hdopMatch[1];
-
-      const ntripMatch = str.match(/NTRIP:\s*([^(|]+)(?:\(([^)]+)\))?/i);
-      if (ntripMatch) {
-        r.gps.ntrip = ntripMatch[1].trim();
-        r.gps.rtcm = ntripMatch[2] ? ntripMatch[2].trim() : '';
-      }
-
-      parseSnrAndCorrFromStatus(r, str);
-
-      // Resilient Coordinate extraction from /gps/status
-      let pMatch = str.match(/Pos:\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?\s*\)/i);
-      if (!pMatch) {
-        const latM = str.match(/Lat(?:itude)?:\s*([-\d.]+)/i);
-        const lonM = str.match(/Lon(?:gitude)?:\s*([-\d.]+)/i);
-        if (latM && lonM) {
-          const altM = str.match(/Alt(?:itude)?:\s*([-\d.]+)/i);
-          pMatch = [null, latM[1], lonM[1], altM ? altM[1] : null];
-        }
-      }
-      if (!pMatch) {
-        pMatch = str.match(/Pos:\s*([-\d.]+)\s*,\s*([-\d.]+)(?:\s*,\s*([-\d.]+)m?)?/i);
-      }
-      if (!pMatch) {
-        const decM = str.match(/\b([0-8]?\d\.\d{4,9})\s*,\s*([0-1]?\d{1,2}\.\d{4,9})\b/);
-        if (decM) {
-          pMatch = [null, decM[1], decM[2], null];
-        }
-      }
-      if (pMatch) {
-        const pLat = parseFloat(pMatch[1]);
-        const pLon = parseFloat(pMatch[2]);
-        if (!isNaN(pLat) && !isNaN(pLon) && isFinite(pLat) && isFinite(pLon) &&
-            Math.abs(pLat) <= 90.0 && Math.abs(pLon) <= 180.0 &&
-            (Math.abs(pLat) > 0.0001 || Math.abs(pLon) > 0.0001)) {
-          r.gps.lat = Number(pLat.toFixed(7));
-          r.gps.lon = Number(pLon.toFixed(7));
-          if (pMatch[3]) {
-            const pAlt = parseFloat(pMatch[3]);
-            if (!isNaN(pAlt) && isFinite(pAlt)) r.gps.alt = Number(pAlt.toFixed(1));
-          }
-        }
-      }
-    }
-  }
-
-  // 4. IMU Heading (/imu/heading)
-  if (topic === configuredTopics.heading || topic === '/imu/heading' || (topic && topic.endsWith('/heading'))) {
-    const val = typeof data === 'number' ? data : (data.data !== undefined ? Number(data.data) : null);
-    if (val !== null && !isNaN(val) && isFinite(val)) {
-      r.imu.heading = Number((((val % 360) + 360) % 360).toFixed(1));
-      r.imu.last_heading_topic_time = Date.now();
-    }
-  }
-
-  // 5. IMU Data Orientation (/imu/data)
-  if (topic === configuredTopics.imu_data || topic === '/imu/data' || (topic && topic.endsWith('/imu/data'))) {
-    if (data.orientation) {
-      const { x, y, z, w } = data.orientation;
-      const normSq = x * x + y * y + z * z + w * w;
-      if (!isNaN(normSq) && normSq > 0.0001 && normSq < 4.0) {
-        const sinr_cosp = 2 * (w * x + y * z);
-        const cosr_cosp = 1 - 2 * (x * x + y * y);
-        r.imu.roll = (Math.atan2(sinr_cosp, cosr_cosp) * (180 / Math.PI)).toFixed(1);
-
-        const sinp = 2 * (w * y - z * x);
-        if (Math.abs(sinp) >= 1) r.imu.pitch = (Math.sign(sinp) * 90).toFixed(1);
-        else r.imu.pitch = (Math.asin(sinp) * (180 / Math.PI)).toFixed(1);
-
-        const siny_cosp = 2 * (w * z + x * y);
-        const cosy_cosp = 1 - 2 * (y * y + z * z);
-        let yaw = (Math.atan2(siny_cosp, cosy_cosp) * (180 / Math.PI));
-        if (yaw < 0) yaw += 360;
-        r.imu.yaw = yaw.toFixed(1);
-
-        const hasFreshHeadingTopic = r.imu.last_heading_topic_time && (Date.now() - r.imu.last_heading_topic_time < 2000);
-        if (!hasFreshHeadingTopic) {
-          r.imu.heading = Number(yaw.toFixed(1));
-        }
-      }
-    }
-  }
-
-  // 6. Step Motion Status (/step_status)
-  if (topic === configuredTopics.step_status || topic === '/step_status') {
-    const stepStr = typeof data === 'string' ? data : (data.data || '--');
-    r.motion.step_progress = stepStr;
-    r.motion.state = stepStr.includes('Driving') || stepStr.includes('Turning') ? 'Moving' : 'Standby';
-  }
-
-  // 7. Battery State (/battery_state)
-  if (topic === configuredTopics.battery || topic === '/battery_state' || (topic && (topic.includes('battery') || topic.endsWith('/battery_state')))) {
-    if (data.voltage !== undefined) {
-      const v = Number(data.voltage).toFixed(1);
-      const pct = (data.percentage !== undefined && data.percentage !== null && !isNaN(data.percentage))
-        ? Math.round(Number(data.percentage) * (data.percentage <= 1.0 ? 100 : 1))
-        : null;
-      const prevBatt = r.health.battery_v;
-      r.health.battery_v = pct !== null ? `${v}V (${pct}%)` : `${v}V`;
-      if (prevBatt !== r.health.battery_v) {
-        logDebug(`🔋 [Robot ${robotId}] Battery (JSON): ${r.health.battery_v}`, 'topic');
-      }
-    }
-  }
-
-  // 8. Foxglove System Info (/foxglove_bridge/sysinfo)
-  if (topic === '/foxglove_bridge/sysinfo' || topic === 'foxglove_bridge/sysinfo') {
-    handleSysInfoData(r, data);
-  }
-
-  // 9. Robot Diagnostics (/robot/diagnostics)
-  if (topic === '/robot/diagnostics' || topic === 'robot/diagnostics') {
-    if (typeof data === 'object' && data.cpu_temp) {
-      r.health.cpu_temp = data.cpu_temp;
-    } else if (typeof data === 'string') {
-      try {
-        const parsed = JSON.parse(data);
-        if (parsed.cpu_temp) r.health.cpu_temp = parsed.cpu_temp;
-      } catch(e) {
-        if (data.includes('°C') || data.includes('C')) r.health.cpu_temp = data;
-      }
-    }
-  }
-}
-
-// --- 4. High Performance UI Update Engine (0 Lag) ---
+// --- 2. High Performance UI Update Engine (10 FPS) ---
 function renderUIUpdates() {
   let activeCount = 0;
   let idleCount = 0;
@@ -1215,11 +123,17 @@ function renderUIUpdates() {
       }
 
       ipEl.innerText = r.ip;
-      
-      // LiDAR Metric
+
+      // LiDAR & Odom Metric
       if (r.lidar.present) {
+        const odomSnippet = (r.lidar.odom_x !== null && r.lidar.odom_y !== null)
+          ? ` [${r.lidar.odom_x.toFixed(2)}m, ${r.lidar.odom_y.toFixed(2)}m]`
+          : '';
         if (r.lidar.freq_hz > 0) {
-          lidarEl.innerText = `🟢 Active (${r.lidar.freq_hz} Hz)`;
+          lidarEl.innerText = `🟢 Active (${r.lidar.freq_hz} Hz)${odomSnippet}`;
+          lidarEl.className = 'metric-val gps-rtk';
+        } else if (r.lidar.odom_present) {
+          lidarEl.innerText = `🟢 Odom Active${odomSnippet}`;
           lidarEl.className = 'metric-val gps-rtk';
         } else {
           lidarEl.innerText = '🟢 Active';
@@ -1244,8 +158,8 @@ function renderUIUpdates() {
           gpsEl.className = 'metric-val gps-float';
         } else if (r.gps.mode === '3D FIX' || (r.gps.mode && r.gps.mode.includes('3D'))) {
           const isBaseConnected = (r.gps.ntrip && r.gps.ntrip.toLowerCase().includes('connected'));
-          gpsTxt = isBaseConnected 
-            ? `3D FIX (${r.gps.sats} Sats)${coordSnippet}` 
+          gpsTxt = isBaseConnected
+            ? `3D FIX (${r.gps.sats} Sats)${coordSnippet}`
             : `3D FIX [${r.gps.sats} Sats]${coordSnippet}`;
           gpsEl.className = 'metric-val gps-none';
         } else {
@@ -1286,7 +200,7 @@ function renderUIUpdates() {
       if (battEl) {
         if (r.health.battery_v && r.health.battery_v !== '--') {
           battEl.innerText = r.health.battery_v;
-          battEl.style.color = '#10b981'; // Green for active battery voltage
+          battEl.style.color = '#10b981';
         } else if (r.health.cpu_temp !== '--' && r.health.cpu_load) {
           battEl.innerText = `${r.health.cpu_temp} (${r.health.cpu_load})`;
           battEl.style.color = 'var(--text-muted)';
@@ -1335,7 +249,7 @@ function renderUIUpdates() {
   }
 }
 
-// --- 5. Detail Modal ---
+// --- 3. Detail Modal ---
 function openRobotDetailModal(robotId) {
   selectedRobotId = robotId;
   const modal = document.getElementById('robot-detail-modal');
@@ -1348,7 +262,7 @@ function updateModalContent(r) {
   const rNum = String(r.id).padStart(2, '0');
   document.getElementById('modal-robot-title').innerText = `ConeRobot ${rNum}`;
   document.getElementById('modal-ip').innerText = r.ip || 'Offline';
-  
+
   if (r.gps.present) {
     document.getElementById('modal-gps-mode').innerText = `${r.gps.mode} (${r.gps.sats || 0} Sats)`;
   } else {
@@ -1357,16 +271,33 @@ function updateModalContent(r) {
 
   document.getElementById('modal-ping').innerText = r.online ? 'Connected' : 'Offline';
 
-  // LiDAR Widget in Modal
+  // LiDAR & Odometry Widget in Modal
+  const odomPosEl = document.getElementById('modal-odom-pos');
+  const odomDistEl = document.getElementById('modal-odom-dist');
   if (r.lidar.present) {
     const isScanActive = (r.lidar.freq_hz > 0);
     document.getElementById('modal-lidar-status').innerText = isScanActive ? '🟢 Active & Streaming' : '🟡 Topic Present';
     document.getElementById('modal-lidar-status').style.color = isScanActive ? '#10b981' : '#f59e0b';
     document.getElementById('modal-lidar-freq').innerText = r.lidar.freq_hz > 0 ? `${r.lidar.freq_hz} Hz` : 'Waiting stream...';
+    if (r.lidar.odom_x !== null && r.lidar.odom_y !== null) {
+      if (odomPosEl) odomPosEl.innerText = `X: ${r.lidar.odom_x.toFixed(3)} m, Y: ${r.lidar.odom_y.toFixed(3)} m`;
+      const distOrig = Math.hypot(r.lidar.odom_x, r.lidar.odom_y);
+      if (odomDistEl) odomDistEl.innerText = `${distOrig.toFixed(3)} m (${(distOrig * 100).toFixed(1)} cm)`;
+    } else {
+      if (odomPosEl) odomPosEl.innerText = r.lidar.odom_present ? 'Waiting pose...' : 'No /odom stream';
+      if (odomDistEl) odomDistEl.innerText = '--';
+    }
   } else {
     document.getElementById('modal-lidar-status').innerText = '⚪ Not Equipped';
     document.getElementById('modal-lidar-status').style.color = 'var(--text-muted)';
     document.getElementById('modal-lidar-freq').innerText = 'N/A';
+    if (odomPosEl) odomPosEl.innerText = 'N/A';
+    if (odomDistEl) odomDistEl.innerText = 'N/A';
+  }
+
+  // Render 2D LiDAR Radar Point Cloud ONLY if user has opened the collapsible panel
+  if (lidarRadarOpen) {
+    renderLidarRadarCanvas(r);
   }
 
   const heading = r.imu.heading;
@@ -1378,6 +309,12 @@ function updateModalContent(r) {
     document.getElementById('modal-heading-val').innerText = '--';
     document.getElementById('modal-yaw').innerText = 'No Data';
   }
+
+  const pitchEl = document.getElementById('modal-pitch');
+  if (pitchEl) pitchEl.innerText = (r.imu.pitch !== null && r.imu.pitch !== undefined) ? `${r.imu.pitch}°` : '--';
+
+  const rollEl = document.getElementById('modal-roll');
+  if (rollEl) rollEl.innerText = (r.imu.roll !== null && r.imu.roll !== undefined) ? `${r.imu.roll}°` : '--';
 
   const cpuEl = document.getElementById('modal-cpu');
   if (cpuEl) cpuEl.innerText = r.health.cpu_percent || '--';
@@ -1470,9 +407,7 @@ function updateModalContent(r) {
 
     if (sats.length > 0) {
       const topSat = sats[0];
-      if (topEl) {
-        topEl.innerText = `${topSat.id} (${topSat.snr} dB)`;
-      }
+      if (topEl) topEl.innerText = `${topSat.id} (${topSat.snr} dB)`;
       const constCounts = {};
       sats.forEach(s => {
         constCounts[s.constellation] = (constCounts[s.constellation] || 0) + 1;
@@ -1524,7 +459,7 @@ function updateModalContent(r) {
   }
 
   document.getElementById('modal-motion-state').innerText = r.motion.state;
-  document.getElementById('modal-speed').innerText = '--';
+  document.getElementById('modal-speed').innerText = (r.lidar.odom_vx !== null && !isNaN(r.lidar.odom_vx)) ? `${r.lidar.odom_vx.toFixed(2)} m/s` : '--';
   document.getElementById('modal-dist-progress').innerText = r.motion.step_progress;
   document.getElementById('modal-turn-progress').innerText = '--';
 }
@@ -1534,6 +469,18 @@ function initEventListeners() {
     document.getElementById('robot-detail-modal').classList.add('hidden');
     selectedRobotId = null;
   };
+
+  const btnToggleRadar = document.getElementById('btn-toggle-lidar-radar');
+  if (btnToggleRadar) {
+    btnToggleRadar.onclick = () => toggleLidarRadarPanel();
+  }
+
+  document.querySelectorAll('.lidar-range-btn').forEach(btn => {
+    btn.onclick = () => {
+      const rVal = Number(btn.getAttribute('data-range')) || 4.0;
+      setLidarRadarRange(rVal);
+    };
+  });
 
   document.getElementById('btn-close-settings').onclick = () => {
     document.getElementById('settings-modal').classList.add('hidden');
@@ -1554,7 +501,7 @@ function initEventListeners() {
         document.getElementById('topic-step').value = top.step_status || '/step_status';
         document.getElementById('topic-battery').value = top.battery || '/battery_state';
       }
-    } catch(e) {}
+    } catch (e) {}
   };
 
   document.getElementById('settings-form').onsubmit = async (e) => {
@@ -1607,7 +554,7 @@ function initEventListeners() {
         `;
         btn.disabled = false;
       }, 2500);
-    } catch(e) {
+    } catch (e) {
       btn.disabled = false;
     }
   };
