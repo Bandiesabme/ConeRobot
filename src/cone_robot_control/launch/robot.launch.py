@@ -23,19 +23,23 @@ def launch_setup(context, *args, **kwargs):
     gps_debug_val = LaunchConfiguration('gps_debug').perform(context).lower() == 'true'
     gps_run_label_val = LaunchConfiguration('gps_run_label').perform(context)
 
-    # Resolve active hardware based on robot_type preset
+    # Resolve active hardware and distance_source based on single robot_type preset
     if robot_type_val == 'gps':
         enable_gps = True
         enable_lidar = False
+        motion_extra_params = [{'distance_source': 'gps'}]
     elif robot_type_val == 'lidar':
         enable_gps = False
         enable_lidar = True
+        motion_extra_params = [{'distance_source': 'odom'}]
     elif robot_type_val == 'all':
         enable_gps = True
         enable_lidar = True
+        motion_extra_params = []
     else:  # Custom / manual flags
         enable_gps = launch_gps_val
         enable_lidar = launch_lidar_val
+        motion_extra_params = []
 
     nodes_to_launch = []
 
@@ -70,7 +74,7 @@ def launch_setup(context, *args, **kwargs):
             )
         )
 
-    # 3. Motion Controller Node (Primitive Action or Legacy Step)
+    # 3. Motion Controller Node (Unified State-Driven Controller)
     if launch_motion_val:
         motion_exec = 'primitive_motion_controller' if motion_type_val == 'primitive' else 'step_motion_controller'
         motion_node_name = 'primitive_motion_controller' if motion_type_val == 'primitive' else 'step_motion_controller'
@@ -80,7 +84,7 @@ def launch_setup(context, *args, **kwargs):
                 executable=motion_exec,
                 name=motion_node_name,
                 output='screen',
-                parameters=[config_file]
+                parameters=[config_file] + motion_extra_params
             )
         )
 
@@ -166,8 +170,8 @@ def generate_launch_description():
     # Declare Launch Arguments
     declare_robot_type_cmd = DeclareLaunchArgument(
         'robot_type',
-        default_value='all',
-        description='Robot hardware preset: "all" (IMU+GPS+LiDAR), "gps" (IMU+GPS), "lidar" (IMU+LiDAR), or "custom"'
+        default_value='gps',
+        description='Robot hardware preset: "gps" (IMU+GPS), "lidar" (IMU+LiDAR), "all" (IMU+GPS+LiDAR), or "custom"'
     )
 
     declare_launch_lidar_cmd = DeclareLaunchArgument(
@@ -197,7 +201,7 @@ def generate_launch_description():
     declare_motion_controller_type_cmd = DeclareLaunchArgument(
         'motion_controller_type',
         default_value='primitive',
-        description='Motion controller implementation: "primitive" (Action-based S-curve) or "step" (discrete turn/drive)'
+        description='Motion controller implementation: "primitive" (Unified State-Driven) or "step" (legacy discrete)'
     )
 
     declare_launch_foxglove_cmd = DeclareLaunchArgument(

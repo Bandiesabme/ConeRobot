@@ -2,20 +2,24 @@
 # CONE ROBOT MASTER CONFIGURATION FILE
 # ==============================================================================
 
-# 1. Raspberry Pi 5 Motor Driver Settings
+# 1. Raspberry Pi 5 Motor Driver Settings (Cytron MDD10 Rev 2.0)
 mdd10_motor_controller:
   ros__parameters:
     # --- GPIO Pin Mapping (Raspberry Pi 5) ---
-    pwm1_pin: 12   # Left Motor Speed PWM (GPIO 12)
-    dir1_pin: 24   # Left Motor Direction (GPIO 24)
-    pwm2_pin: 13   # Right Motor Speed PWM (GPIO 13)
-    dir2_pin: 25   # Right Motor Direction (GPIO 25)
+    pwm1_pin: 12               # Left Motor Speed PWM (GPIO 12)
+    dir1_pin: 24               # Left Motor Direction (GPIO 24)
+    pwm2_pin: 13               # Right Motor Speed PWM (GPIO 13)
+    dir2_pin: 25               # Right Motor Direction (GPIO 25)
 
-    # --- Physical Dimensions & Hardware Limits ---
-    wheel_track: 0.380         # Effective track width for skid-steer track slip (meters)
-    max_linear_speed: 1.0      # Maximum forward/reverse speed (m/s)
-    max_angular_speed: 3.0     # Maximum turning speed (rad/s)
-    cmd_timeout: 0.5           # Safety timeout (seconds)
+    # --- Physical Dimensions, Deadband & Trim Calibration ---
+    wheel_track: 0.380         # Effective track width L_eff for skid-steer slip (meters)
+    max_linear_speed: 0.50     # Physical track speed at 100% PWM duty cycle (m/s)
+    max_angular_speed: 2.50    # Maximum turning speed (rad/s)
+    min_pwm: 0.12              # Static friction deadband duty cycle [0.0 - 0.35]
+    left_motor_trim: 1.00      # Left track speed multiplier (adjust e.g. 0.98 or 1.02 if needed)
+    right_motor_trim: 1.00     # Right track speed multiplier
+    nominal_battery_v: 12.0    # Reference 3S LiPo voltage for automatic PWM compensation
+    cmd_timeout: 0.5           # Safety watchdog timeout (seconds)
 
 # 2. BNO08x IMU Sensor Settings (MikroE Click / I2C)
 bno08x_node:
@@ -23,7 +27,7 @@ bno08x_node:
     i2c_address: 74            # 0x4A in decimal
     frame_id: "imu_link"       # IMU TF frame
     publish_rate_hz: 50.0      # Output publication frequency (Hz)
-    mount_flipped: true        # Sensor mounted upside down (applies 180-deg roll rotation)
+    mount_flipped: true        # Sensor mounted upside down (right-multiplies 180-deg roll)
     use_game_rotation: true    # 6-DOF fused orientation (immune to motor magnetic noise)
 
     # --- INA219 Battery Monitor Settings (Shares I2C Bus, 0 MB Extra RAM) ---
@@ -46,72 +50,59 @@ lc29h_gps_node:
     ntrip_enable: true
 
     # Option A: Local Base Station Pi (Auto-discovers across any router, hotspot, or network!)
-    ntrip_caster: "auto"              # 'auto' (or 'conerobotBaseStation.local') - zero-config automatic discovery!
+    ntrip_caster: "auto"              # 'auto' (or 'conerobotBaseStation.local')
     ntrip_port: 2101                  # Base Station NTRIP port
     ntrip_mountpoint: "BASE"          # Base Station mountpoint
     ntrip_user: "conerobot"           # Local username
     ntrip_password: "none"            # Local password
     ntrip_send_gga: false             # Set false for local single-base caster (no VRS needed)
 
-    # Option B: Public RTK2Go Caster (Pforzheim Station)
-    # ntrip_caster: "rtk2go.com"
-    # ntrip_port: 2101
-    # ntrip_mountpoint: "PFORZEM"
-    # ntrip_user: "conerobot@gmail.com"
-    # ntrip_password: "none"
-    # ntrip_send_gga: true
-
-# 4. Step Motion Controller (Turn X deg & Drive Y cm)
-step_motion_controller:
-  ros__parameters:
-    control_rate_hz: 20.0             # Control loop execution frequency
-    
-    # --- Turning Parameters (IMU Closed Loop) ---
-    turn_kp: 0.08                     # Proportional gain for turning (snappier approach)
-    turn_tolerance_deg: 2.0           # Heading error threshold in degrees
-    min_turn_speed: 0.70              # Assertive turn speed (rad/s) so it doesn't crawl at the end
-    max_turn_speed: 1.5               # Maximum angular speed (rad/s)
-    turn_settle_time_s: 0.10          # Fast settle time (0.10s) for immediate completion
-
-    # --- Linear Driving Parameters ---
-    default_linear_speed: 0.15        # Forward/reverse cruising speed (m/s)
-    yaw_lock_kp: 0.12                 # Active IMU straight-line yaw correction gain
-    calibrated_speed_mps: 0.25        # Measured speed for open-loop time integration fallback
-
-    # --- Multi-Sensor Distance Tracking ---
-    # Options: 'auto' (detects odom -> gps -> time), 'odom', 'gps', 'time'
-    distance_source: "auto"
-    gps_require_rtk: true             # Require RTK Fix/Float to use GPS distance
-
-# 5. High-Level Primitive Motion Controller (Straight, Turn, Arc)
+# 4. Unified State-Driven Motion Primitive Controller (Straight, Rotate, Arc)
 primitive_motion_controller:
   ros__parameters:
-    control_rate_hz: 50.0             # Control loop execution frequency (synced with IMU)
-    feedback_rate_hz: 10.0            # Action feedback publication frequency
-    
-    # --- Velocity Limits & Acceleration Profiles ---
-    default_linear_speed: 0.20        # Cruising linear speed (m/s)
+    control_rate_hz: 50.0             # Fast inner control loop (synced with 50 Hz IMU)
+    feedback_rate_hz: 10.0            # Action feedback publication rate
+
+    # --- SINGLE ROBOT TYPE SWITCH: "gps" (GPS Robot) or "odom" (LiDAR Robot) ---
+    distance_source: "gps"            # Change ONLY this to "odom" for the LiDAR robot!
+    gps_require_rtk: false            # false = accepts RTK Fix/Float/DGPS/3D Fix; true = strict RTK only
+
+    # --- Velocity Limits & State-Based Braking Profiles ---
+    default_linear_speed: 0.22        # Cruising linear speed (m/s)
     default_angular_speed: 1.00       # Cruising turning speed (rad/s)
     max_linear_speed: 0.50            # Absolute maximum linear speed (m/s)
     max_angular_speed: 1.80           # Absolute maximum angular speed (rad/s)
-    max_linear_accel: 0.35            # Maximum linear acceleration (m/s^2)
-    max_angular_accel: 1.50           # Maximum angular acceleration (rad/s^2)
-    min_linear_speed: 0.08            # Minimum linear speed to overcome track friction
-    min_angular_speed: 0.70           # Assertive turn speed to prevent motor stall & PWM whine (matches step controller)
+    max_linear_accel: 0.35            # Linear acceleration & deceleration rate (m/s^2)
+    max_angular_accel: 1.50           # Angular acceleration & deceleration rate (rad/s^2)
+    min_linear_speed: 0.08            # Minimum linear speed before target stop (m/s)
+    min_angular_speed: 0.65           # Minimum pivot speed to overcome track friction (rad/s)
 
     # --- Skid-Steering Calibration ---
     wheel_track_geometric: 0.290      # Measured physical chassis track width (m)
     wheel_track_effective: 0.380      # Calibrated effective track width L_eff for lateral shear (m)
 
-    # --- Feedback Control & Tolerances ---
-    yaw_kp: 1.2                       # Fast 50 Hz IMU heading correction gain
-    yaw_ki: 0.15                      # Integral error accumulator gain
+    # --- Closed-Loop IMU Heading & Arc Curvature Gains ---
+    yaw_kp: 2.0                       # Proportional heading correction gain (rad/s per rad error)
+    yaw_ki: 0.60                      # Integral gain to automatically trim track asymmetry
+    yaw_kd: 0.20                      # Gyro rate damping gain
     yaw_tolerance_rad: 0.031          # Angle completion tolerance (~1.8 deg)
-    turn_settle_time_s: 0.15          # Standstill settle duration (seconds)
+    turn_settle_time_s: 0.15          # Standstill verification duration at target (seconds)
     distance_tolerance_m: 0.03        # Distance completion tolerance (3 cm)
-    stuck_detect_time_s: 1.5          # Stall watchdog abort timeout (seconds)
-    distance_source: "auto"           # Multi-sensor distance tracking ('auto', 'odom', 'gps', 'time')
-    gps_require_rtk: true             # Require RTK Fix/Float to use GPS distance (GPS robot)
+    stuck_detect_time_s: 2.5          # Stall watchdog abort timeout (seconds)
+
+# 5. Legacy Step Motion Controller (Turn Y deg -> Drive X cm)
+step_motion_controller:
+  ros__parameters:
+    control_rate_hz: 20.0
+    turn_kp: 0.08
+    turn_tolerance_deg: 2.0
+    min_turn_speed: 0.65
+    max_turn_speed: 1.5
+    turn_settle_time_s: 0.15
+    default_linear_speed: 0.20
+    yaw_lock_kp: 0.12
+    distance_source: "gps"            # "gps" or "odom"
+    gps_require_rtk: false
 
 # 6. Teleop Keyboard Settings (Laptop)
 teleop_keyboard:
@@ -119,7 +110,7 @@ teleop_keyboard:
     default_linear_speed: 0.2
     default_angular_speed: 0.5
 
-# 6. Vision & Camera Settings (Future Modules)
+# 7. Vision & Camera Settings (Future Modules)
 cone_detector:
   ros__parameters:
     camera_topic: "/camera/image_raw"

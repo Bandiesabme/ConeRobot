@@ -304,20 +304,20 @@ class StepMotionController(Node):
             vx = direction_sign * self.default_linear_speed
 
             # Active IMU Straight-Line Yaw Lock with PI Controller (Standard ROS 2 CCW convention)
-            if self.current_heading is not None and abs(self.target_turn_deg) < self.turn_tolerance_deg:
+            if self.current_heading is not None:
                 heading_drift = shortest_angular_diff_deg(self.target_absolute_heading, self.current_heading)
-                
+
                 # Accumulate integral error with anti-windup (+/- 10 deg*s)
                 dt = 1.0 / self.control_rate_hz
                 self.heading_integral = max(-10.0, min(10.0, self.heading_integral + (heading_drift * dt)))
-                
+
                 # PI control: positive drift (target is to the left) -> steer left (+wz)
                 p_term = self.yaw_lock_kp * heading_drift
-                i_term = (self.yaw_lock_kp * 0.2) * self.heading_integral
+                i_term = (self.yaw_lock_kp * 0.25) * self.heading_integral
                 raw_yaw = p_term + i_term
-                
-                # Authority clamp to +/- 0.40 rad/s
-                yaw_correction = max(-0.40, min(0.40, raw_yaw))
+
+                # Authority clamp to +/- 0.80 rad/s
+                yaw_correction = max(-0.80, min(0.80, raw_yaw))
             else:
                 yaw_correction = 0.0
 
@@ -336,28 +336,43 @@ class StepMotionController(Node):
         if abs(self.target_turn_deg) < self.turn_tolerance_deg and self.current_heading is not None:
             self.target_absolute_heading = self.current_heading
 
-        # Capture Odometry baseline if recent (< 0.5s)
-        if self.current_odom_pos and (time.time() - self.last_odom_time < 0.5):
+        # Capture Odometry baseline if recent (< 1.5s)
+        if self.current_odom_pos and (time.time() - self.last_odom_time < 1.5):
             self.start_odom_pos = self.current_odom_pos
         else:
             self.start_odom_pos = None
 
-        # Capture GPS baseline if recent (< 1.0s) and RTK mode condition is satisfied
-        if self.current_gps_coords and (time.time() - self.last_gps_time < 1.0):
-            if not self.gps_require_rtk or self.gps_status in [NavSatStatus.STATUS_GBAS_FIX, NavSatStatus.STATUS_SBAS_FIX]:
-                self.start_gps_coords = self.current_gps_coords
-            else:
-                self.start_gps_coords = None
+        # Capture GPS baseline if recent (< 2.0s) and fix status is valid
+        if self.current_gps_coords and (time.time() - self.last_gps_time < 2.0):
+            is_ok = (self.gps_status in [NavSatStatus.STATUS_GBAS_FIX, NavSatStatus.STATUS_SBAS_FIX]) if self.gps_require_rtk else (self.gps_status >= NavSatStatus.STATUS_FIX)
+            self.start_gps_coords = self.current_gps_coords if is_ok else None
         else:
             self.start_gps_coords = None
 
-        # Determine Primary Method
-        if (self.distance_source == 'odom' or self.distance_source == 'auto') and self.start_odom_pos:
+        # Determine Primary Sensor Method (Strictly Sensor-Driven, No Time Integration)
+        if self.distance_source == 'odom':
+            if not self.start_odom_pos:
+                self.get_logger().error("[DRIVE ABORTED] LiDAR Odometry (/odom) not ready! Refusing time-based fallback.")
+                self._publish_cmd_vel(0.0, 0.0)
+                self._set_state(MotionState.IDLE)
+                return
             self.active_distance_method = "ODOM"
-        elif (self.distance_source == 'gps' or self.distance_source == 'auto') and self.start_gps_coords:
+        elif self.distance_source == 'gps':
+            if not self.start_gps_coords:
+                self.get_logger().error("[DRIVE ABORTED] GPS (/fix) not ready! Refusing time-based fallback.")
+                self._publish_cmd_vel(0.0, 0.0)
+                self._set_state(MotionState.IDLE)
+                return
             self.active_distance_method = "RTK_GPS"
+        elif self.start_gps_coords:
+            self.active_distance_method = "RTK_GPS"
+        elif self.start_odom_pos:
+            self.active_distance_method = "ODOM"
         else:
-            self.active_distance_method = "TIME_INTEGRATION"
+            self.get_logger().error("[DRIVE ABORTED] Neither GPS nor Odometry is ready! Refusing time-based fallback.")
+            self._publish_cmd_vel(0.0, 0.0)
+            self._set_state(MotionState.IDLE)
+            return
 
         self.get_logger().info(
             f"[PHASE 2: DRIVE] Target: {self.target_drive_cm:+.1f} cm | Distance Method: [{self.active_distance_method}]"

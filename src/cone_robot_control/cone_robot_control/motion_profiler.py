@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
 ==============================================================================
-Motion Profiler: Deterministic S-Curve / Trapezoidal Trajectory Generation
+Motion Profiler: State-Driven (Position & Angle) Trajectory Generator
 ==============================================================================
-Provides smooth velocity and heading profiles for:
-  - STRAIGHT: Linear translation with zero angular velocity
-  - ROTATE: In-place pivot rotation with zero linear velocity
-  - ARC: Synchronous translation and heading change (curvature continuous)
-  - STOP: Controlled deceleration profile to standstill
+Generates smooth velocity and heading references purely as a function of
+MEASURED spatial progress (distance traveled s and heading change yaw),
+NEVER open-loop wall-clock time.
 
-Designed for skid-steer / tracked robots to prevent sudden torque spikes and
-track slip at motion initiation.
+Supports:
+  - STRAIGHT: Linear translation X meters with locked 0° relative yaw
+  - ROTATE:   In-place pivot rotation Y radians with 0 linear velocity
+  - ARC:      Synchronous curved trajectory (distance X meters, turn Y radians)
+              with constant geometric curvature kappa = Y / X and spatial
+              heading reference yaw_ref(s) = (s / |X|) * Y.
 ==============================================================================
 """
 
@@ -18,147 +20,68 @@ import math
 from typing import Tuple, Optional
 
 
-class TrapezoidalProfile1D:
-    """Computes a 1D trapezoidal velocity profile for distance or angle."""
-
-    def __init__(
-        self,
-        total_distance: float,
-        max_speed: float,
-        max_accel: float,
-        start_speed: float = 0.0,
-        end_speed: float = 0.0,
-    ):
-        self.total_dist = max(1e-5, abs(total_distance))
-        self.sign = 1.0 if total_distance >= 0 else -1.0
-        self.max_accel = max(1e-3, abs(max_accel))
-        self.max_speed = max(1e-3, abs(max_speed))
-        self.start_speed = min(self.max_speed, max(0.0, abs(start_speed)))
-        self.end_speed = min(self.max_speed, max(0.0, abs(end_speed)))
-
-        # Distance required to accelerate from start_speed to max_speed
-        d_accel = (self.max_speed ** 2 - self.start_speed ** 2) / (2.0 * self.max_accel)
-        # Distance required to decelerate from max_speed to end_speed
-        d_decel = (self.max_speed ** 2 - self.end_speed ** 2) / (2.0 * self.max_accel)
-
-        if d_accel + d_decel > self.total_dist:
-            # Triangular profile: peak cruise speed cannot be reached
-            self.v_cruise = math.sqrt(
-                max(
-                    0.0,
-                    (2.0 * self.max_accel * self.total_dist + self.start_speed ** 2 + self.end_speed ** 2) / 2.0,
-                )
-            )
-            self.t_accel = (self.v_cruise - self.start_speed) / self.max_accel
-            self.d_accel = (self.v_cruise ** 2 - self.start_speed ** 2) / (2.0 * self.max_accel)
-            self.t_cruise = 0.0
-            self.d_cruise = 0.0
-            self.t_decel = (self.v_cruise - self.end_speed) / self.max_accel
-            self.d_decel = (self.v_cruise ** 2 - self.end_speed ** 2) / (2.0 * self.max_accel)
-        else:
-            # Full trapezoidal profile
-            self.v_cruise = self.max_speed
-            self.t_accel = (self.v_cruise - self.start_speed) / self.max_accel
-            self.d_accel = d_accel
-            self.d_cruise = self.total_dist - (d_accel + d_decel)
-            self.t_cruise = self.d_cruise / self.v_cruise
-            self.t_decel = (self.v_cruise - self.end_speed) / self.max_accel
-            self.d_decel = d_decel
-
-        self.total_duration = self.t_accel + self.t_cruise + self.t_decel
-
-    def sample(self, t: float) -> Tuple[float, float, bool]:
-        """
-        Samples the profile at elapsed time t.
-        Returns:
-            (velocity, position, is_finished)
-        """
-        if t <= 0.0:
-            return self.sign * self.start_speed, 0.0, False
-
-        if t >= self.total_duration:
-            return self.sign * self.end_speed, self.sign * self.total_dist, True
-
-        # Phase 1: Acceleration
-        if t < self.t_accel:
-            v = self.start_speed + self.max_accel * t
-            s = self.start_speed * t + 0.5 * self.max_accel * (t ** 2)
-            return self.sign * v, self.sign * s, False
-
-        # Phase 2: Cruise
-        t_into_cruise = t - self.t_accel
-        if t_into_cruise < self.t_cruise:
-            v = self.v_cruise
-            s = self.d_accel + self.v_cruise * t_into_cruise
-            return self.sign * v, self.sign * s, False
-
-        # Phase 3: Deceleration
-        t_into_decel = t_into_cruise - self.t_cruise
-        v = max(self.end_speed, self.v_cruise - self.max_accel * t_into_decel)
-        s = (
-            self.d_accel
-            + self.d_cruise
-            + (self.v_cruise * t_into_decel - 0.5 * self.max_accel * (t_into_decel ** 2))
-        )
-        return self.sign * v, self.sign * s, False
-
-
 class MotionPrimitiveProfiler:
     """
-    High-level coordinated trajectory generator for Straight, Rotate, and Arc primitives.
+    State-based trajectory generator for Straight, Rotate, and Arc primitives.
+    Computes target velocities from remaining measured distance/angle rather than time.
     """
 
     def __init__(
         self,
-        default_linear_speed: float = 0.25,
+        default_linear_speed: float = 0.20,
         default_angular_speed: float = 1.0,
-        max_linear_accel: float = 0.5,
+        max_linear_accel: float = 0.35,
         max_angular_accel: float = 1.5,
+        min_linear_speed: float = 0.08,
+        min_angular_speed: float = 0.70,
     ):
         self.default_linear_speed = default_linear_speed
         self.default_angular_speed = default_angular_speed
-        self.max_linear_accel = max_linear_accel
-        self.max_angular_accel = max_angular_accel
+        self.max_linear_accel = max(0.05, max_linear_accel)
+        self.max_angular_accel = max(0.10, max_angular_accel)
+        self.min_linear_speed = max(0.04, min_linear_speed)
+        self.min_angular_speed = max(0.20, min_angular_speed)
 
         self.motion_type: Optional[str] = None
-        self.profile: Optional[TrapezoidalProfile1D] = None
         self.curvature: float = 0.0
         self.target_dist: float = 0.0
         self.target_yaw: float = 0.0
 
+        self.v_limit: float = self.default_linear_speed
+        self.w_limit: float = self.default_angular_speed
+        self.a_limit: float = self.max_linear_accel
+        self.alpha_limit: float = self.max_angular_accel
+
+        self._current_v_mag: float = 0.0
+        self._current_w_mag: float = 0.0
+
     def start_straight(
         self, distance_m: float, max_v: Optional[float] = None
-    ) -> float:
-        """Configures straight drive. Returns total expected duration in seconds."""
+    ) -> None:
+        """Configures state-driven straight drive for X meters."""
         self.motion_type = "STRAIGHT"
-        self.target_dist = distance_m
+        self.target_dist = float(distance_m)
         self.target_yaw = 0.0
         self.curvature = 0.0
 
-        v_limit = max_v if (max_v and max_v > 0) else self.default_linear_speed
-        self.profile = TrapezoidalProfile1D(
-            total_distance=distance_m,
-            max_speed=v_limit,
-            max_accel=self.max_linear_accel,
-        )
-        return self.profile.total_duration
+        self.v_limit = max_v if (max_v and max_v > 0.0) else self.default_linear_speed
+        self.a_limit = self.max_linear_accel
+        self._current_v_mag = self.min_linear_speed
+        self._current_w_mag = 0.0
 
     def start_rotate(
         self, delta_yaw_rad: float, max_w: Optional[float] = None
-    ) -> float:
-        """Configures in-place rotation. Returns total expected duration in seconds."""
+    ) -> None:
+        """Configures state-driven in-place rotation for Y radians."""
         self.motion_type = "ROTATE"
         self.target_dist = 0.0
-        self.target_yaw = delta_yaw_rad
+        self.target_yaw = float(delta_yaw_rad)
         self.curvature = 0.0
 
-        w_limit = max_w if (max_w and max_w > 0) else self.default_angular_speed
-        self.profile = TrapezoidalProfile1D(
-            total_distance=delta_yaw_rad,
-            max_speed=w_limit,
-            max_accel=self.max_angular_accel,
-        )
-        return self.profile.total_duration
+        self.w_limit = max_w if (max_w and max_w > 0.0) else self.default_angular_speed
+        self.alpha_limit = self.max_angular_accel
+        self._current_v_mag = 0.0
+        self._current_w_mag = self.min_angular_speed
 
     def start_arc(
         self,
@@ -166,64 +89,120 @@ class MotionPrimitiveProfiler:
         delta_yaw_rad: float,
         max_v: Optional[float] = None,
         max_w: Optional[float] = None,
-    ) -> float:
+    ) -> None:
         """
-        Configures synchronous circular arc.
-        Calculates curvature kappa = delta_yaw / distance.
-        Ramps v(t) and omega(t) proportionally so heading and distance complete simultaneously.
+        Configures state-driven circular arc for path length X meters and heading change Y radians.
+        Curvature kappa = delta_yaw_rad / signed_distance_m.
         """
         self.motion_type = "ARC"
-        self.target_dist = distance_m
-        self.target_yaw = delta_yaw_rad
+        self.target_dist = float(distance_m)
+        self.target_yaw = float(delta_yaw_rad)
 
         signed_dist = math.copysign(max(1e-4, abs(distance_m)), distance_m if distance_m != 0.0 else 1.0)
         self.curvature = delta_yaw_rad / signed_dist
 
-        v_limit = max_v if (max_v and max_v > 0) else self.default_linear_speed
-        w_limit = max_w if (max_w and max_w > 0) else self.default_angular_speed
+        v_lim = max_v if (max_v and max_v > 0.0) else self.default_linear_speed
+        w_lim = max_w if (max_w and max_w > 0.0) else self.default_angular_speed
 
-        # Enforce that v_limit does not cause omega to exceed w_limit
-        if abs(self.curvature * v_limit) > w_limit:
-            v_limit = abs(w_limit / self.curvature)
+        # Ensure linear speed does not force angular velocity above w_lim
+        if abs(self.curvature * v_lim) > w_lim:
+            v_lim = abs(w_lim / self.curvature)
 
-        # Enforce that linear acceleration does not exceed angular acceleration limit
-        a_limit = self.max_linear_accel
-        if abs(self.curvature * a_limit) > self.max_angular_accel:
-            a_limit = abs(self.max_angular_accel / self.curvature)
+        # Ensure linear acceleration does not force angular acceleration above max_angular_accel
+        a_lim = self.max_linear_accel
+        if abs(self.curvature * a_lim) > self.max_angular_accel:
+            a_lim = abs(self.max_angular_accel / self.curvature)
 
-        self.profile = TrapezoidalProfile1D(
-            total_distance=distance_m,
-            max_speed=v_limit,
-            max_accel=a_limit,
-        )
-        return self.profile.total_duration
+        self.v_limit = max(self.min_linear_speed, v_lim)
+        self.w_limit = w_lim
+        self.a_limit = max(0.05, a_lim)
+        self._current_v_mag = self.min_linear_speed
+        self._current_w_mag = abs(self.curvature * self._current_v_mag)
 
-    def sample(
-        self, elapsed_t: float
+    def sample_by_state(
+        self,
+        actual_dist_m: float,
+        actual_yaw_rad: float,
+        dt: float,
+        dist_tolerance_m: float = 0.03,
+        yaw_tolerance_rad: float = 0.031,
     ) -> Tuple[float, float, float, float, bool]:
         """
-        Samples the active trajectory at elapsed time t.
+        Computes reference velocities and reference pose purely from measured state:
+          - actual_dist_m:  Measured path distance traveled so far (meters, >= 0)
+          - actual_yaw_rad: Measured relative yaw change so far (radians)
+          - dt:             Control loop timestep (seconds, e.g. 0.02s for 50 Hz)
+
         Returns:
-            (v_ref, omega_ref, s_ref, yaw_ref, is_finished)
+          (v_ref, omega_ref, s_ref, yaw_ref, is_finished)
         """
-        if not self.profile:
+        if not self.motion_type:
             return 0.0, 0.0, 0.0, 0.0, True
 
-        val, pos, finished = self.profile.sample(elapsed_t)
+        total_s = abs(self.target_dist)
+        s = max(0.0, abs(actual_dist_m))
+        dist_rem = max(0.0, total_s - s)
+        dir_sign = 1.0 if self.target_dist >= 0.0 else -1.0
 
+        # ----------------------------------------------------------------------
+        # 1. STRAIGHT: Move X meters with locked heading (yaw_ref = 0.0)
+        # ----------------------------------------------------------------------
         if self.motion_type == "STRAIGHT":
-            return val, 0.0, pos, 0.0, finished
+            if dist_rem <= dist_tolerance_m:
+                self._current_v_mag = 0.0
+                return 0.0, 0.0, self.target_dist, 0.0, True
 
-        if self.motion_type == "ROTATE":
-            # For rotate: val is omega, pos is yaw
-            return 0.0, val, 0.0, pos, finished
+            # Smooth acceleration slew from standstill + kinematic braking from remaining distance
+            self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
+            v_brake = math.sqrt(
+                self.min_linear_speed ** 2 + 2.0 * self.a_limit * max(0.0, dist_rem - dist_tolerance_m)
+            )
+            v_mag = max(self.min_linear_speed, min(self._current_v_mag, v_brake))
+            self._current_v_mag = v_mag
 
+            return dir_sign * v_mag, 0.0, dir_sign * s, 0.0, False
+
+        # ----------------------------------------------------------------------
+        # 2. ARC: Move X meters along curve while turning Y radians
+        #    Heading reference yaw_ref(s) is strictly parameterized by distance s!
+        # ----------------------------------------------------------------------
         if self.motion_type == "ARC":
-            # For arc: val is linear speed v, pos is linear distance s
-            v_ref = val
+            progress = min(1.0, max(0.0, s / max(1e-4, total_s)))
+            yaw_ref = progress * self.target_yaw
+
+            if dist_rem <= dist_tolerance_m:
+                self._current_v_mag = 0.0
+                return 0.0, 0.0, self.target_dist, self.target_yaw, True
+
+            self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
+            v_brake = math.sqrt(
+                self.min_linear_speed ** 2 + 2.0 * self.a_limit * max(0.0, dist_rem - dist_tolerance_m)
+            )
+            v_mag = max(self.min_linear_speed, min(self._current_v_mag, v_brake))
+            self._current_v_mag = v_mag
+
+            v_ref = dir_sign * v_mag
             omega_ref = self.curvature * v_ref
-            s_ref = pos
-            yaw_ref = self.curvature * s_ref
-            return v_ref, omega_ref, s_ref, yaw_ref, finished
+            return v_ref, omega_ref, dir_sign * s, yaw_ref, False
+
+        # ----------------------------------------------------------------------
+        # 3. ROTATE: Turn Y radians in place
+        # ----------------------------------------------------------------------
+        if self.motion_type == "ROTATE":
+            yaw_err = self.target_yaw - actual_yaw_rad
+            abs_err = abs(yaw_err)
+            if abs_err <= yaw_tolerance_rad:
+                self._current_w_mag = 0.0
+                return 0.0, 0.0, 0.0, self.target_yaw, True
+
+            turn_sign = 1.0 if yaw_err >= 0.0 else -1.0
+            self._current_w_mag = min(self.w_limit, self._current_w_mag + self.alpha_limit * dt)
+            w_brake = math.sqrt(
+                self.min_angular_speed ** 2 + 2.0 * self.alpha_limit * max(0.0, abs_err - yaw_tolerance_rad)
+            )
+            w_mag = max(self.min_angular_speed, min(self._current_w_mag, w_brake))
+            self._current_w_mag = w_mag
+
+            return 0.0, turn_sign * w_mag, 0.0, self.target_yaw, False
 
         return 0.0, 0.0, 0.0, 0.0, True
