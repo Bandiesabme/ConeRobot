@@ -240,6 +240,7 @@ class PrimitiveMotionController(Node):
                     ExecuteMotion,
                     'execute_motion',
                     execute_callback=self._execute_action_callback,
+                    goal_callback=self._goal_callback,
                     cancel_callback=self._cancel_action_callback,
                     callback_group=self.cb_group,
                 )
@@ -305,6 +306,7 @@ class PrimitiveMotionController(Node):
         # Action Execution Reference
         self._current_goal_handle = None
         self._cancel_requested: bool = False
+        self._preempted_by_topic: bool = False
 
         # Timers
         self.control_timer = self.create_timer(1.0 / self.control_rate_hz, self._control_loop)
@@ -423,6 +425,12 @@ class PrimitiveMotionController(Node):
         self._dispatch_topic_command(dist_m, yaw_rad)
 
     def _dispatch_topic_command(self, dist_m: float, yaw_rad: float) -> None:
+        if self._current_goal_handle is not None:
+            self.get_logger().warn(
+                "[PREEMPT] Active Action goal preempted by incoming topic command."
+            )
+            self._preempted_by_topic = True
+
         if abs(dist_m) > 0.005 and abs(yaw_rad) > 0.01:
             self._start_motion("ARC", dist_m, yaw_rad)
         elif abs(yaw_rad) > 0.01:
@@ -435,6 +443,19 @@ class PrimitiveMotionController(Node):
     # --------------------------------------------------------------------------
     # ROS 2 Action Server Callbacks
     # --------------------------------------------------------------------------
+    def _goal_callback(self, goal_request):
+        # Always allow TYPE_STOP (3) to execute immediately
+        if getattr(goal_request, 'motion_type', None) == 3:
+            self._cancel_requested = True
+            return GoalResponse.ACCEPT
+
+        if self.state == ControllerState.EXECUTING or self._current_goal_handle is not None:
+            self.get_logger().warn(
+                "[ACTION] Rejecting new motion goal: Controller is currently busy."
+            )
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
     def _cancel_action_callback(self, goal_handle):
         self.get_logger().info("[ACTION] Preemption / Cancel requested by client.")
         self._cancel_requested = True
@@ -444,6 +465,7 @@ class PrimitiveMotionController(Node):
     def _execute_action_callback(self, goal_handle):
         self._current_goal_handle = goal_handle
         self._cancel_requested = False
+        self._preempted_by_topic = False
         goal = goal_handle.request
 
         # TYPE_DRIVE_STRAIGHT=0, TYPE_ROTATE_IN_PLACE=1, TYPE_DRIVE_ARC=2, TYPE_STOP=3
@@ -496,6 +518,18 @@ class PrimitiveMotionController(Node):
 
         # Wait loop until state-driven motion finishes, aborts, or cancels
         while rclpy.ok() and self.state == ControllerState.EXECUTING:
+            if self._preempted_by_topic:
+                goal_handle.abort()
+                result = ExecuteMotion.Result()
+                result.success = False
+                result.error_code = ExecuteMotion.Result.ERROR_CANCELED
+                result.message = "Action preempted by incoming topic command"
+                result.actual_distance = float(self._get_measured_distance_m())
+                result.actual_yaw = float(self._get_measured_yaw_rad())
+                self._current_goal_handle = None
+                self._preempted_by_topic = False
+                return result
+
             if self._cancel_requested or goal_handle.is_cancel_requested:
                 self._stop_motion()
                 self._set_state(ControllerState.CANCELING, "Canceled")
@@ -520,9 +554,7 @@ class PrimitiveMotionController(Node):
 
             feedback.progress_ratio = float(min(1.0, max(0.0, ratio)))
             feedback.distance_remaining = float(max(0.0, abs(self.target_dist_m) - abs(measured_dist)))
-            feedback.yaw_remaining = float(
-                abs(shortest_angular_diff_rad(self.target_yaw_rad, measured_yaw))
-            )
+            feedback.yaw_remaining = float(max(0.0, abs(self.target_yaw_rad) - abs(measured_yaw)))
             feedback.current_velocity = float(self.last_cmd_v)
             feedback.current_yaw_rate = float(self.current_yaw_rate)
             goal_handle.publish_feedback(feedback)
@@ -533,6 +565,15 @@ class PrimitiveMotionController(Node):
         result = ExecuteMotion.Result()
         result.actual_distance = float(self._get_measured_distance_m())
         result.actual_yaw = float(self._get_measured_yaw_rad())
+
+        if self._preempted_by_topic:
+            goal_handle.abort()
+            result.success = False
+            result.error_code = ExecuteMotion.Result.ERROR_CANCELED
+            result.message = "Action preempted by incoming topic command"
+            self._current_goal_handle = None
+            self._preempted_by_topic = False
+            return result
 
         if self.state == ControllerState.STUCK:
             goal_handle.abort()
@@ -762,7 +803,13 @@ class PrimitiveMotionController(Node):
         # MODE A: ROTATE IN PLACE (Pure IMU Closed-Loop Angle Control)
         # ----------------------------------------------------------------------
         if self.active_motion_type == "ROTATE":
-            if dist_or_rot_done:
+            # Deadband hysteresis: once settling has started within yaw_tolerance_rad,
+            # stay in settle mode unless overshoot exceeds 2x yaw_tolerance_rad.
+            in_settle_hysteresis = (
+                self.turn_settle_start is not None
+                and abs(yaw_error_to_target) <= (self.yaw_tolerance_rad * 2.0)
+            )
+            if dist_or_rot_done or in_settle_hysteresis:
                 self._publish_cmd_vel(0.0, 0.0)
                 if self.turn_settle_start is None:
                     self.turn_settle_start = now

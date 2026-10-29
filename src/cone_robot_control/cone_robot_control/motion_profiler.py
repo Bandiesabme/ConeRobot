@@ -197,10 +197,17 @@ class MotionPrimitiveProfiler:
 
             turn_sign = 1.0 if yaw_err >= 0.0 else -1.0
             self._current_w_mag = min(self.w_limit, self._current_w_mag + self.alpha_limit * dt)
+
+            # Proportional deceleration taper inside final 8 deg to prevent overshoot & hunting
+            fine_band_rad = math.radians(8.0)
+            err_above_tol = max(0.0, abs_err - yaw_tolerance_rad)
+            taper_ratio = min(1.0, err_above_tol / max(1e-4, fine_band_rad))
+            fine_floor_w = 0.35 + (self.min_angular_speed - 0.35) * taper_ratio
+
             w_brake = math.sqrt(
-                self.min_angular_speed ** 2 + 2.0 * self.alpha_limit * max(0.0, abs_err - yaw_tolerance_rad)
+                fine_floor_w ** 2 + 2.0 * self.alpha_limit * err_above_tol
             )
-            w_mag = max(self.min_angular_speed, min(self._current_w_mag, w_brake))
+            w_mag = max(fine_floor_w, min(self._current_w_mag, w_brake))
             self._current_w_mag = w_mag
 
             return 0.0, turn_sign * w_mag, 0.0, self.target_yaw, False
