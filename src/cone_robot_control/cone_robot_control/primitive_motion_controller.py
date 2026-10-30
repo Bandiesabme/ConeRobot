@@ -141,10 +141,6 @@ class PrimitiveMotionController(Node):
         self.declare_parameter('min_linear_speed', 0.08)        # Minimum linear speed before target stop (m/s)
         self.declare_parameter('min_angular_speed', 0.65)       # Minimum pivot speed to overcome track scrubbing (rad/s)
 
-        # Skid-Steering Kinematic Parameters
-        self.declare_parameter('wheel_track_geometric', 0.290)  # Physical track width in meters
-        self.declare_parameter('wheel_track_effective', 0.380)  # Effective track width (L_eff) for slip
-
         # Closed-Loop Feedback Gains (Standard ROS CCW+ convention)
         self.declare_parameter('yaw_kp', 2.0)                   # Proportional gain for heading lock (rad/s per rad)
         self.declare_parameter('yaw_ki', 0.60)                  # Integral gain to trim left/right motor asymmetry
@@ -170,7 +166,6 @@ class PrimitiveMotionController(Node):
         self.max_angular_accel = float(self.get_parameter('max_angular_accel').value)
         self.min_linear_speed = float(self.get_parameter('min_linear_speed').value)
         self.min_angular_speed = float(self.get_parameter('min_angular_speed').value)
-        self.effective_track = float(self.get_parameter('wheel_track_effective').value)
         self.yaw_kp = float(self.get_parameter('yaw_kp').value)
         self.yaw_ki = float(self.get_parameter('yaw_ki').value)
         self.yaw_kd = float(self.get_parameter('yaw_kd').value)
@@ -316,7 +311,6 @@ class PrimitiveMotionController(Node):
         self.get_logger().info(" Unified State-Driven Motion Controller Ready")
         self.get_logger().info(f" Control Rate   : {self.control_rate_hz:.0f} Hz (Zero Time-Fallback)")
         self.get_logger().info(f" Distance Source: {self.distance_source.upper()}")
-        self.get_logger().info(f" Effective Track: {self.effective_track:.3f} m")
         self.get_logger().info("==================================================")
 
     # --------------------------------------------------------------------------

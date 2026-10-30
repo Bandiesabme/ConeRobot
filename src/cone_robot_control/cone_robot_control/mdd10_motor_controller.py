@@ -13,10 +13,14 @@ Hardware Configuration (Cytron MDD10 Rev 2.0 in PWM + DIR mode):
 """
 
 import math
+import os
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import BatteryState
+
+# Default to lgpio backend on Raspberry Pi 5 (RP1 chip)
+os.environ.setdefault('GPIOZERO_PIN_FACTORY', 'lgpio')
 
 # Try importing gpiozero for Raspberry Pi 5 hardware GPIO control
 HAS_GPIO = False

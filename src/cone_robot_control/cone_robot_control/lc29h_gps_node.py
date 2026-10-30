@@ -289,10 +289,13 @@ class LC29HGPSNode(Node):
             lat = self._parse_nmea_coordinate(raw_lat, lat_dir, is_lon=False)
             lon = self._parse_nmea_coordinate(raw_lon, lon_dir, is_lon=True)
 
-            if lat is not None and lon is not None:
+            if lat is not None and lon is not None and self.current_fix_quality > 0:
                 self.current_lat = lat
                 self.current_lon = lon
                 self.last_fix_time = time.time()
+                self._publish_navsat_fix()
+            else:
+                self.current_fix_quality = 0
                 self._publish_navsat_fix()
 
         except Exception as e:
@@ -398,9 +401,14 @@ class LC29HGPSNode(Node):
             NavSatStatus.SERVICE_COMPASS
         )
 
-        msg.latitude = self.current_lat
-        msg.longitude = self.current_lon
-        msg.altitude = self.current_alt
+        if nav_status != NavSatStatus.STATUS_NO_FIX:
+            msg.latitude = self.current_lat
+            msg.longitude = self.current_lon
+            msg.altitude = self.current_alt
+        else:
+            msg.latitude = 0.0
+            msg.longitude = 0.0
+            msg.altitude = 0.0
 
         # Calculate position covariance matrix (sigma^2)
         if nav_status != NavSatStatus.STATUS_NO_FIX:

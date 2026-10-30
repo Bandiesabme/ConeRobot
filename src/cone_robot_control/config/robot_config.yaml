@@ -75,10 +75,6 @@ primitive_motion_controller:
     min_linear_speed: 0.08            # Minimum linear speed before target stop (m/s)
     min_angular_speed: 0.65           # Minimum pivot speed to overcome track friction (rad/s)
 
-    # --- Skid-Steering Calibration ---
-    wheel_track_geometric: 0.290      # Measured physical chassis track width (m)
-    wheel_track_effective: 0.380      # Calibrated effective track width L_eff for lateral shear (m)
-
     # --- Closed-Loop IMU Heading & Arc Curvature Gains ---
     yaw_kp: 2.0                       # Proportional heading correction gain (rad/s per rad error)
     yaw_ki: 0.60                      # Integral gain to automatically trim track asymmetry
