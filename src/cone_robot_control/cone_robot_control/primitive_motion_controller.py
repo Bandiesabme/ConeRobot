@@ -402,11 +402,12 @@ class PrimitiveMotionController(Node):
                 self._prev_gps_fix_time = now
                 self._cmd_v_accum = 0.0
 
-                # Account for ~0.28s LC29H RTK computation + NMEA serial pipeline latency
-                # while actively driving; reset to 0.0 when stopped waiting for stationary fix.
+                # Account for ~0.42s LC29H RTK computation + NMEA serial pipeline latency
+                # plus ~3.5 cm track spin-down lead while actively driving; reset to 0.0 when stopped.
                 if self._gps_stop_wait_start is None and abs(self.last_cmd_v) > 0.01:
-                    est_v = abs(self.last_cmd_v) * self._gps_speed_scale
-                    self._gps_interfix_dist_m = min(0.10, est_v * 0.28)
+                    eff_cmd_v = abs(self.last_cmd_v) + 0.025
+                    est_v = eff_cmd_v * self._gps_speed_scale
+                    self._gps_interfix_dist_m = min(0.14, est_v * 0.42 + 0.035)
                 else:
                     self._gps_interfix_dist_m = 0.0
                     # If this is a true post-stop stationary fix (>= 0.45s after motor cut)
@@ -583,7 +584,7 @@ class PrimitiveMotionController(Node):
                 self._set_state(ControllerState.IDLE, "Idle")
                 return result
 
-            measured_dist = self._get_measured_distance_m()
+            measured_dist = self._get_measured_distance_m(include_interfix=True)
             measured_yaw = self._get_measured_yaw_rad()
 
             if self.active_motion_type == "ROTATE":
@@ -796,9 +797,10 @@ class PrimitiveMotionController(Node):
             and (now - self.last_gps_time) <= 1.05
             and abs(self.last_cmd_v) > 0.01
         ):
-            est_ground_v = abs(self.last_cmd_v) * self._gps_speed_scale
-            self._gps_interfix_dist_m = min(0.38, self._gps_interfix_dist_m + est_ground_v * dt)
-            self._cmd_v_accum += abs(self.last_cmd_v) * dt
+            eff_cmd_v = abs(self.last_cmd_v) + 0.025
+            est_ground_v = eff_cmd_v * self._gps_speed_scale
+            self._gps_interfix_dist_m = min(0.40, self._gps_interfix_dist_m + est_ground_v * dt)
+            self._cmd_v_accum += eff_cmd_v * dt
 
         # 1. Measure actual physical distance and heading change
         actual_dist = self._get_measured_distance_m(include_interfix=True)

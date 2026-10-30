@@ -22,6 +22,7 @@ import time
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 from sensor_msgs.msg import NavSatFix
 
@@ -50,9 +51,10 @@ class SafeActionRunner(Node):
         self._goal_handle = None
         self._is_done = False
 
-        # Real-time GPS RTK Fix & Position Monitor
+        # Real-time GPS RTK Fix, Position & /cmd_vel Monitor
         self.gps_status_sub = self.create_subscription(String, '/gps/status', self._gps_status_cb, 10)
         self.gps_fix_sub = self.create_subscription(NavSatFix, '/fix', self._fix_cb, 10)
+        self.cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self._cmd_vel_cb, 20)
         self.current_fix_quality = "UNKNOWN"
         self.num_sats = 0
         self.hdop = 99.99
@@ -65,11 +67,78 @@ class SafeActionRunner(Node):
         self.target_distance = 0.0
         self.active_motion_type = 0
 
+        # Detailed 1 Hz Fix & Motor Cut-Off Telemetry Loggers
+        self.fix_history = []
+        self._prev_fix_time = None
+        self._prev_fix_dist = 0.0
+        self._cmd_v_sum = 0.0
+        self._cmd_v_count = 0
+        self.last_cmd_v = 0.0
+        self.last_nonzero_cmd_v = 0.0
+        self.motor_cut_events = []
+        self._was_moving = False
+
+    def _cmd_vel_cb(self, msg: Twist):
+        v = float(msg.linear.x)
+        w = float(msg.angular.z)
+        now = time.time()
+        self.last_cmd_v = v
+        if self.motion_start_time is not None:
+            self._cmd_v_sum += abs(v)
+            self._cmd_v_count += 1
+            is_moving = abs(v) > 0.005 or abs(w) > 0.01
+            if is_moving:
+                self.last_nonzero_cmd_v = v
+                self._was_moving = True
+            elif self._was_moving and not is_moving:
+                self._was_moving = False
+                elapsed = now - self.motion_start_time
+                dt_since_fix = (now - self._prev_fix_time) if self._prev_fix_time else 0.0
+                self.motor_cut_events.append({
+                    "t": elapsed,
+                    "last_fix_dist": self._prev_fix_dist,
+                    "dt_since_fix": dt_since_fix,
+                    "prev_cmd_v": self.last_nonzero_cmd_v,
+                })
+
     def _fix_cb(self, msg: NavSatFix):
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
+            now = time.time()
             self.current_pos = (msg.latitude, msg.longitude)
             if self.motion_start_time and self.start_pos is None:
                 self.start_pos = (msg.latitude, msg.longitude)
+                self._prev_fix_time = now
+                self._prev_fix_dist = 0.0
+
+            if self.motion_start_time and self.start_pos is not None:
+                elapsed = now - self.motion_start_time
+                dist_m = gps_distance_m(
+                    self.start_pos[0], self.start_pos[1],
+                    msg.latitude, msg.longitude,
+                )
+                dt_fix = (now - self._prev_fix_time) if self._prev_fix_time else 0.0
+                step_m = dist_m - self._prev_fix_dist
+                true_v = (step_m / dt_fix) if dt_fix > 0.1 else 0.0
+                avg_cmd_v = (self._cmd_v_sum / self._cmd_v_count) if self._cmd_v_count > 0 else abs(self.last_cmd_v)
+                scale = (true_v / avg_cmd_v) if avg_cmd_v > 0.015 else 0.0
+
+                self.fix_history.append({
+                    "idx": len(self.fix_history) + 1,
+                    "t": elapsed,
+                    "dt": dt_fix,
+                    "dist_m": dist_m,
+                    "step_cm": step_m * 100.0,
+                    "true_v": true_v,
+                    "avg_cmd_v": avg_cmd_v,
+                    "curr_cmd_v": self.last_cmd_v,
+                    "scale": scale,
+                    "lat": msg.latitude,
+                    "lon": msg.longitude,
+                })
+                self._prev_fix_time = now
+                self._prev_fix_dist = dist_m
+                self._cmd_v_sum = 0.0
+                self._cmd_v_count = 0
 
     def _gps_status_cb(self, msg: String):
         text = msg.data
@@ -116,6 +185,13 @@ class SafeActionRunner(Node):
         self.active_motion_type = motion_type
         self.target_distance = float(distance)
         self.start_pos = self.current_pos
+        self.fix_history = []
+        self.motor_cut_events = []
+        self._prev_fix_time = self.motion_start_time
+        self._prev_fix_dist = 0.0
+        self._cmd_v_sum = 0.0
+        self._cmd_v_count = 0
+        self._was_moving = False
 
         goal_msg = ExecuteMotion.Goal()
         goal_msg.motion_type = motion_type
@@ -184,16 +260,53 @@ class SafeActionRunner(Node):
 
             # Print Linear Displacement Accuracy Benchmark for Straight motions (forward & reverse)
             if self.start_pos and self.current_pos and self.active_motion_type == 0 and abs(self.target_distance) > 0.05:
+                pos_at_completion = self.current_pos
+                dist_at_completion = gps_distance_m(
+                    self.start_pos[0], self.start_pos[1],
+                    pos_at_completion[0], pos_at_completion[1],
+                )
+
+                # Spin for 1.1s after action completion to capture 1 extra stationary /fix
+                # and verify whether any post-completion GPS lag or coasting occurred
+                post_wait_end = time.time() + 1.15
+                while rclpy.ok() and time.time() < post_wait_end:
+                    rclpy.spin_once(self, timeout_sec=0.05)
+
                 target_mag = abs(self.target_distance)
                 actual_gps_dist = gps_distance_m(self.start_pos[0], self.start_pos[1], self.current_pos[0], self.current_pos[1])
+                post_settle_drift_cm = (actual_gps_dist - dist_at_completion) * 100.0
                 err_m = actual_gps_dist - target_mag
                 err_cm = abs(err_m) * 100.0
+
+                if self.fix_history:
+                    print("\n" + "=" * 78)
+                    print(" 📊 1 Hz RTK GPS STEP-BY-STEP TELEMETRY & MOTOR CUT-OFF LOG")
+                    print("=" * 78)
+                    print(f" {'#':>2} | {'t (s)':>6} | {'GPS Dist':>9} | {'Step':>8} | {'True V':>8} | {'AvgCmdV':>8} | {'NowCmdV':>8} | {'Scale':>5}")
+                    print("-" * 78)
+                    for row in self.fix_history:
+                        scale_str = f"{row['scale']:.2f}x" if row['scale'] > 0 else "  -  "
+                        print(
+                            f" {row['idx']:2d} | {row['t']:5.2f}s | {row['dist_m']:8.3f}m | "
+                            f"{row['step_cm']:+6.1f}cm | {row['true_v']:6.2f}m/s | "
+                            f"{row['avg_cmd_v']:6.2f}m/s | {row['curr_cmd_v']:+6.2f}m/s | {scale_str}"
+                        )
+                    print("-" * 78)
+                    if self.motor_cut_events:
+                        for idx, ev in enumerate(self.motor_cut_events, 1):
+                            print(
+                                f" 🛑 Motor Cut #{idx} at t={ev['t']:.2f}s "
+                                f"(+{ev['dt_since_fix']:.2f}s after Fix@{ev['last_fix_dist']:.3f}m, "
+                                f"last CmdV={ev['prev_cmd_v']:+.3f}m/s)"
+                            )
+                    print("=" * 78)
 
                 print("\n" + "=" * 65)
                 print(" 🎯 LINEAR DISPLACEMENT ACCURACY BENCHMARK (RTK GPS)")
                 print("=" * 65)
                 print(f" Commanded Target Distance : {target_mag:.3f} m ({self.target_distance:+.2f} m)")
-                print(f" Measured RTK GPS Distance : {actual_gps_dist:.3f} m")
+                print(f" Distance at Action Done   : {dist_at_completion:.3f} m")
+                print(f" Measured Stationary (+1s) : {actual_gps_dist:.3f} m (Post-done drift: {post_settle_drift_cm:+.1f} cm)")
                 print(f" Net Displacement Error    : {err_cm:.1f} cm ({err_m:+.3f} m)")
                 print(f" Start Position (Lat, Lon) : ({self.start_pos[0]:.7f}, {self.start_pos[1]:.7f})")
                 print(f" Final Position (Lat, Lon) : ({self.current_pos[0]:.7f}, {self.current_pos[1]:.7f})")
