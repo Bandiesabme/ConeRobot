@@ -204,7 +204,7 @@ class BNO08xNode(Node):
                 self.get_logger().warn('tf2_ros is not installed. Skipping dynamic TF broadcast.')
 
         # 180-deg roll rotation quaternion [x, y, z, w] for flipped mounting
-        self.q_flip = [-1.0, 0.0, 0.0, 0.0]
+        self.q_flip = [1.0, 0.0, 0.0, 0.0]
 
         # Standard Covariances
         self.orientation_covariance = [
@@ -489,7 +489,7 @@ class BNO08xNode(Node):
 
             # Apply Flip Correction if mounted upside down
             if self.mount_flipped:
-                q_corrected = quaternion_multiply([qx, qy, qz, qw], self.q_flip)
+                q_corrected = quaternion_multiply(self.q_flip, [qx, qy, qz, qw])
                 msg.orientation.x = float(q_corrected[0])
                 msg.orientation.y = float(q_corrected[1])
                 msg.orientation.z = float(q_corrected[2])
