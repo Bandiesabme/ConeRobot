@@ -453,7 +453,7 @@ class PrimitiveMotionController(Node):
     def _cancel_action_callback(self, goal_handle):
         self.get_logger().info("[ACTION] Preemption / Cancel requested by client.")
         self._cancel_requested = True
-        self._stop_motion()
+        self._publish_cmd_vel(0.0, 0.0)
         return CancelResponse.ACCEPT
 
     def _execute_action_callback(self, goal_handle):
@@ -567,6 +567,15 @@ class PrimitiveMotionController(Node):
             result.message = "Action preempted by incoming topic command"
             self._current_goal_handle = None
             self._preempted_by_topic = False
+            return result
+
+        if self._cancel_requested or goal_handle.is_cancel_requested:
+            self._stop_motion()
+            goal_handle.canceled()
+            result.success = False
+            result.error_code = ExecuteMotion.Result.ERROR_CANCELED
+            result.message = "Motion canceled by client"
+            self._current_goal_handle = None
             return result
 
         if self.state == ControllerState.STUCK:
@@ -721,7 +730,7 @@ class PrimitiveMotionController(Node):
     # Main 50 Hz State-Driven Control Loop (Zero Time-Based Trajectory Sampling)
     # --------------------------------------------------------------------------
     def _control_loop(self) -> None:
-        if self.state != ControllerState.EXECUTING:
+        if self.state != ControllerState.EXECUTING or self._cancel_requested:
             return
 
         now = time.time()
