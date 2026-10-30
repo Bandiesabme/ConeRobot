@@ -182,16 +182,17 @@ class SafeActionRunner(Node):
                     f"⚠️ Motion Finished with Status: {res.result.message} (Code: {res.result.error_code})"
                 )
 
-            # Print Linear Displacement Accuracy Benchmark for Straight motions
-            if self.start_pos and self.current_pos and self.active_motion_type == 0 and self.target_distance > 0.05:
+            # Print Linear Displacement Accuracy Benchmark for Straight motions (forward & reverse)
+            if self.start_pos and self.current_pos and self.active_motion_type == 0 and abs(self.target_distance) > 0.05:
+                target_mag = abs(self.target_distance)
                 actual_gps_dist = gps_distance_m(self.start_pos[0], self.start_pos[1], self.current_pos[0], self.current_pos[1])
-                err_m = actual_gps_dist - self.target_distance
+                err_m = actual_gps_dist - target_mag
                 err_cm = abs(err_m) * 100.0
 
                 print("\n" + "=" * 65)
                 print(" 🎯 LINEAR DISPLACEMENT ACCURACY BENCHMARK (RTK GPS)")
                 print("=" * 65)
-                print(f" Commanded Target Distance : {self.target_distance:.3f} m")
+                print(f" Commanded Target Distance : {target_mag:.3f} m ({self.target_distance:+.2f} m)")
                 print(f" Measured RTK GPS Distance : {actual_gps_dist:.3f} m")
                 print(f" Net Displacement Error    : {err_cm:.1f} cm ({err_m:+.3f} m)")
                 print(f" Start Position (Lat, Lon) : ({self.start_pos[0]:.7f}, {self.start_pos[1]:.7f})")

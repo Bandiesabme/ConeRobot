@@ -155,16 +155,17 @@ class MotionPrimitiveProfiler:
             # Smooth acceleration slew from standstill
             self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
 
-            # Progressive 80 cm approach deceleration ramp down to gentle crawl speed
-            # Eliminates high-speed momentum & 1 Hz sensor-latency overshoot at target
-            crawl_speed = max(0.04, self.min_linear_speed * 0.55)
-            decel_zone_m = min(0.80, max(0.20, total_s * 0.50))
+            # Progressive 90 cm approach deceleration ramp down to gentle crawl speed
+            # Uses a concave profile (ramp_ratio ** 1.35) so the final 15-20 cm is traversed
+            # at ~4-5 cm/s, eliminating 1 Hz GPS latency & track momentum overshoot.
+            crawl_speed = max(0.035, self.min_linear_speed * 0.45)
+            decel_zone_m = min(0.90, max(0.25, total_s * 0.50))
             if dist_rem < decel_zone_m:
                 ramp_ratio = max(
                     0.0,
                     (dist_rem - dist_tolerance_m) / max(1e-3, decel_zone_m - dist_tolerance_m),
                 )
-                v_approach = crawl_speed + (self.v_limit - crawl_speed) * ramp_ratio
+                v_approach = crawl_speed + (self.v_limit - crawl_speed) * (ramp_ratio ** 1.35)
             else:
                 v_approach = self.v_limit
 
@@ -187,14 +188,14 @@ class MotionPrimitiveProfiler:
 
             self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
 
-            crawl_speed = max(0.04, self.min_linear_speed * 0.55)
-            decel_zone_m = min(0.80, max(0.20, total_s * 0.50))
+            crawl_speed = max(0.035, self.min_linear_speed * 0.45)
+            decel_zone_m = min(0.90, max(0.25, total_s * 0.50))
             if dist_rem < decel_zone_m:
                 ramp_ratio = max(
                     0.0,
                     (dist_rem - dist_tolerance_m) / max(1e-3, decel_zone_m - dist_tolerance_m),
                 )
-                v_approach = crawl_speed + (self.v_limit - crawl_speed) * ramp_ratio
+                v_approach = crawl_speed + (self.v_limit - crawl_speed) * (ramp_ratio ** 1.35)
             else:
                 v_approach = self.v_limit
 

@@ -278,11 +278,11 @@ class PrimitiveMotionController(Node):
         self.gps_status: int = NavSatStatus.STATUS_NO_FIX
         self.last_gps_time: float = 0.0
         self._gps_interfix_dist_m: float = 0.0
-        self._gps_speed_scale: float = 1.25
+        self._gps_speed_scale: float = 1.32
         self._prev_gps_dist_m: float = 0.0
         self._prev_gps_fix_time: float = 0.0
         self._cmd_v_accum: float = 0.0
-        self._cmd_v_samples: int = 0
+        self._gps_stop_wait_start: Optional[float] = None
 
         # Battery State
         self.battery_voltage: float = 12.0
@@ -381,20 +381,42 @@ class PrimitiveMotionController(Node):
                     curr_lat, curr_lon,
                 )
                 dt_fix = (now - self._prev_gps_fix_time) if self._prev_gps_fix_time > 0.0 else 0.0
-                if 0.25 <= dt_fix <= 2.5 and self._cmd_v_samples > 0:
-                    avg_cmd_v = self._cmd_v_accum / self._cmd_v_samples
+                rem_to_target = abs(self.target_dist_m) - new_chord
+
+                # Calibrate ground-to-command speed ratio strictly during steady cruising
+                # (outside the final 85 cm braking ramp so deceleration/stopping never skews it)
+                if (
+                    0.40 <= dt_fix <= 2.0
+                    and self._cmd_v_accum >= 0.12
+                    and new_chord >= 0.30
+                    and rem_to_target >= 0.85
+                    and self._gps_stop_wait_start is None
+                ):
                     delta_d = max(0.0, new_chord - self._prev_gps_dist_m)
-                    if avg_cmd_v > 0.025 and delta_d > 0.01:
-                        measured_v = delta_d / dt_fix
-                        raw_scale = max(0.50, min(2.20, measured_v / avg_cmd_v))
-                        self._gps_speed_scale = 0.35 * self._gps_speed_scale + 0.65 * raw_scale
+                    if delta_d > 0.05:
+                        raw_scale = max(0.85, min(1.85, delta_d / self._cmd_v_accum))
+                        self._gps_speed_scale = 0.40 * self._gps_speed_scale + 0.60 * raw_scale
 
                 self.chord_dist_m = new_chord
                 self._prev_gps_dist_m = new_chord
                 self._prev_gps_fix_time = now
-                self._gps_interfix_dist_m = 0.0
                 self._cmd_v_accum = 0.0
-                self._cmd_v_samples = 0
+
+                # Account for ~0.28s LC29H RTK computation + NMEA serial pipeline latency
+                # while actively driving; reset to 0.0 when stopped waiting for stationary fix.
+                if self._gps_stop_wait_start is None and abs(self.last_cmd_v) > 0.01:
+                    est_v = abs(self.last_cmd_v) * self._gps_speed_scale
+                    self._gps_interfix_dist_m = min(0.10, est_v * 0.28)
+                else:
+                    self._gps_interfix_dist_m = 0.0
+                    # If this is a true post-stop stationary fix (>= 0.45s after motor cut)
+                    # and the robot stopped slightly short of target, allow a gentle creep
+                    if (
+                        self._gps_stop_wait_start is not None
+                        and (now - self._gps_stop_wait_start) >= 0.45
+                        and rem_to_target > self.distance_tolerance_m
+                    ):
+                        self._gps_stop_wait_start = None
 
             if self.last_gps_accum_coords is not None:
                 step_m = gps_distance_m(
@@ -705,10 +727,11 @@ class PrimitiveMotionController(Node):
         self.chord_dist_m = 0.0
         self.accumulated_path_dist_m = 0.0
         self._gps_interfix_dist_m = 0.0
+        self._gps_speed_scale = 1.32
         self._prev_gps_dist_m = 0.0
         self._prev_gps_fix_time = time.time()
         self._cmd_v_accum = 0.0
-        self._cmd_v_samples = 0
+        self._gps_stop_wait_start = None
         self.start_odom_pos = self.current_odom_pos
         self.last_odom_accum_pos = self.current_odom_pos
         self.start_gps_coords = self.current_gps_coords
@@ -765,17 +788,17 @@ class PrimitiveMotionController(Node):
         dt = 1.0 / self.control_rate_hz
 
         # Update sub-second inter-fix displacement between 1 Hz RTK GPS updates
-        # (Strictly bounded to a single 1s GPS interval; resets to 0 on every /fix)
+        # (Strictly bounded to a single 1s GPS interval; resets on every /fix)
         if (
             self.active_sensor_mode == "GPS"
             and self.active_motion_type in ["STRAIGHT", "ARC"]
+            and self._gps_stop_wait_start is None
             and (now - self.last_gps_time) <= 1.05
             and abs(self.last_cmd_v) > 0.01
         ):
             est_ground_v = abs(self.last_cmd_v) * self._gps_speed_scale
-            self._gps_interfix_dist_m = min(0.35, self._gps_interfix_dist_m + est_ground_v * dt)
-            self._cmd_v_accum += abs(self.last_cmd_v)
-            self._cmd_v_samples += 1
+            self._gps_interfix_dist_m = min(0.38, self._gps_interfix_dist_m + est_ground_v * dt)
+            self._cmd_v_accum += abs(self.last_cmd_v) * dt
 
         # 1. Measure actual physical distance and heading change
         actual_dist = self._get_measured_distance_m(include_interfix=True)
@@ -790,6 +813,8 @@ class PrimitiveMotionController(Node):
             dist_tolerance_m=self.distance_tolerance_m,
             yaw_tolerance_rad=self.yaw_tolerance_rad,
         )
+        if self._gps_stop_wait_start is not None:
+            dist_or_rot_done = True
 
         # 3. Physical Motion Progress Check (Stuck / Stall Watchdog)
         dist_delta = abs(actual_dist - self.last_dist_m)
@@ -814,7 +839,7 @@ class PrimitiveMotionController(Node):
 
         is_near_target = (
             (self.active_motion_type == "ROTATE" and abs(yaw_error_to_target) <= math.radians(4.0))
-            or (self.active_motion_type in ["STRAIGHT", "ARC"] and dist_remaining <= 0.06)
+            or (self.active_motion_type in ["STRAIGHT", "ARC"] and dist_remaining <= 0.20)
         )
 
         if is_commanding_movement and not is_near_target and (now - self.last_moved_time > self.stuck_detect_time_s):
@@ -893,15 +918,18 @@ class PrimitiveMotionController(Node):
         # When linear distance X is reached:
         if dist_or_rot_done:
             # On 1 Hz RTK GPS, cut motors immediately when sub-second target is reached
-            # and wait at standstill for the next 1 Hz /fix packet to confirm true position.
-            if (
-                self.active_sensor_mode == "GPS"
-                and not is_full_circle
-                and (abs(self.target_dist_m) - true_sensor_dist) > self.distance_tolerance_m
-                and (now - self.last_gps_time) < 1.15
-            ):
+            # and wait at standstill for a post-stop stationary 1 Hz /fix (>= 0.45s after
+            # motor cutoff) to confirm true resting position before completing.
+            if self.active_sensor_mode == "GPS" and not is_full_circle:
+                if self._gps_stop_wait_start is None:
+                    self._gps_stop_wait_start = now
                 self._publish_cmd_vel(0.0, 0.0)
-                return
+                has_stationary_fix = (self.last_gps_time - self._gps_stop_wait_start) >= 0.45
+                wait_elapsed = now - self._gps_stop_wait_start
+                if not has_stationary_fix and wait_elapsed < 1.55:
+                    return
+                if (abs(self.target_dist_m) - true_sensor_dist) > self.distance_tolerance_m and wait_elapsed < 1.55:
+                    return
 
             # For ARC: ensure final target heading Y is also satisfied within tolerance
             if self.active_motion_type == "ARC" and abs(yaw_error_to_target) > self.yaw_tolerance_rad:
