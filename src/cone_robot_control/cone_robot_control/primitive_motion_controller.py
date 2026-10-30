@@ -271,12 +271,18 @@ class PrimitiveMotionController(Node):
         self.last_odom_accum_pos: Optional[Tuple[float, float]] = None
         self.last_odom_time: float = 0.0
 
-        # Raw GPS Sensor State
+        # Raw GPS Sensor State & 1 Hz Sub-Second Inter-Fix Predictor
         self.current_gps_coords: Optional[Tuple[float, float]] = None
         self.start_gps_coords: Optional[Tuple[float, float]] = None
         self.last_gps_accum_coords: Optional[Tuple[float, float]] = None
         self.gps_status: int = NavSatStatus.STATUS_NO_FIX
         self.last_gps_time: float = 0.0
+        self._gps_interfix_dist_m: float = 0.0
+        self._gps_speed_scale: float = 1.25
+        self._prev_gps_dist_m: float = 0.0
+        self._prev_gps_fix_time: float = 0.0
+        self._cmd_v_accum: float = 0.0
+        self._cmd_v_samples: int = 0
 
         # Battery State
         self.battery_voltage: float = 12.0
@@ -361,18 +367,35 @@ class PrimitiveMotionController(Node):
             return
         curr_lat = float(msg.latitude)
         curr_lon = float(msg.longitude)
+        now = time.time()
         self.current_gps_coords = (curr_lat, curr_lon)
         self.gps_status = int(msg.status.status)
-        self.last_gps_time = time.time()
+        self.last_gps_time = now
 
         if self.state == ControllerState.EXECUTING and self.active_sensor_mode == "GPS":
             if not self._is_gps_fix_acceptable():
                 return
             if self.start_gps_coords is not None:
-                self.chord_dist_m = gps_distance_m(
+                new_chord = gps_distance_m(
                     self.start_gps_coords[0], self.start_gps_coords[1],
                     curr_lat, curr_lon,
                 )
+                dt_fix = (now - self._prev_gps_fix_time) if self._prev_gps_fix_time > 0.0 else 0.0
+                if 0.25 <= dt_fix <= 2.5 and self._cmd_v_samples > 0:
+                    avg_cmd_v = self._cmd_v_accum / self._cmd_v_samples
+                    delta_d = max(0.0, new_chord - self._prev_gps_dist_m)
+                    if avg_cmd_v > 0.025 and delta_d > 0.01:
+                        measured_v = delta_d / dt_fix
+                        raw_scale = max(0.50, min(2.20, measured_v / avg_cmd_v))
+                        self._gps_speed_scale = 0.35 * self._gps_speed_scale + 0.65 * raw_scale
+
+                self.chord_dist_m = new_chord
+                self._prev_gps_dist_m = new_chord
+                self._prev_gps_fix_time = now
+                self._gps_interfix_dist_m = 0.0
+                self._cmd_v_accum = 0.0
+                self._cmd_v_samples = 0
+
             if self.last_gps_accum_coords is not None:
                 step_m = gps_distance_m(
                     self.last_gps_accum_coords[0], self.last_gps_accum_coords[1],
@@ -681,6 +704,11 @@ class PrimitiveMotionController(Node):
         # Lock 2D Position & Path Distance Baselines
         self.chord_dist_m = 0.0
         self.accumulated_path_dist_m = 0.0
+        self._gps_interfix_dist_m = 0.0
+        self._prev_gps_dist_m = 0.0
+        self._prev_gps_fix_time = time.time()
+        self._cmd_v_accum = 0.0
+        self._cmd_v_samples = 0
         self.start_odom_pos = self.current_odom_pos
         self.last_odom_accum_pos = self.current_odom_pos
         self.start_gps_coords = self.current_gps_coords
@@ -736,8 +764,22 @@ class PrimitiveMotionController(Node):
         now = time.time()
         dt = 1.0 / self.control_rate_hz
 
+        # Update sub-second inter-fix displacement between 1 Hz RTK GPS updates
+        # (Strictly bounded to a single 1s GPS interval; resets to 0 on every /fix)
+        if (
+            self.active_sensor_mode == "GPS"
+            and self.active_motion_type in ["STRAIGHT", "ARC"]
+            and (now - self.last_gps_time) <= 1.05
+            and abs(self.last_cmd_v) > 0.01
+        ):
+            est_ground_v = abs(self.last_cmd_v) * self._gps_speed_scale
+            self._gps_interfix_dist_m = min(0.35, self._gps_interfix_dist_m + est_ground_v * dt)
+            self._cmd_v_accum += abs(self.last_cmd_v)
+            self._cmd_v_samples += 1
+
         # 1. Measure actual physical distance and heading change
-        actual_dist = self._get_measured_distance_m()
+        actual_dist = self._get_measured_distance_m(include_interfix=True)
+        true_sensor_dist = self._get_measured_distance_m(include_interfix=False)
         actual_yaw = self._get_measured_yaw_rad()
 
         # 2. Sample desired velocity & heading reference from MEASURED STATE (not time!)
@@ -850,6 +892,17 @@ class PrimitiveMotionController(Node):
 
         # When linear distance X is reached:
         if dist_or_rot_done:
+            # On 1 Hz RTK GPS, cut motors immediately when sub-second target is reached
+            # and wait at standstill for the next 1 Hz /fix packet to confirm true position.
+            if (
+                self.active_sensor_mode == "GPS"
+                and not is_full_circle
+                and (abs(self.target_dist_m) - true_sensor_dist) > self.distance_tolerance_m
+                and (now - self.last_gps_time) < 1.15
+            ):
+                self._publish_cmd_vel(0.0, 0.0)
+                return
+
             # For ARC: ensure final target heading Y is also satisfied within tolerance
             if self.active_motion_type == "ARC" and abs(yaw_error_to_target) > self.yaw_tolerance_rad:
                 turn_sign = 1.0 if yaw_error_to_target >= 0.0 else -1.0
@@ -861,7 +914,7 @@ class PrimitiveMotionController(Node):
             self._publish_cmd_vel(0.0, 0.0)
             self._set_state(ControllerState.COMPLETED, "Completed")
             self.get_logger().info(
-                f"[{self.active_motion_type} COMPLETED] Dist: {actual_dist:.3f}m "
+                f"[{self.active_motion_type} COMPLETED] Dist: {true_sensor_dist:.3f}m "
                 f"(Target: {abs(self.target_dist_m):.2f}m) | "
                 f"Yaw: {math.degrees(actual_yaw):+.1f}° (Target: {math.degrees(self.target_yaw_rad):+.1f}°)"
             )
@@ -892,16 +945,22 @@ class PrimitiveMotionController(Node):
             return 0.0
         return self.unrolled_yaw_rad - self.start_unrolled_yaw
 
-    def _get_measured_distance_m(self) -> float:
+    def _get_measured_distance_m(self, include_interfix: bool = False) -> float:
         """
         Returns physical ground distance traveled in meters from the active position sensor
-        (GPS or LiDAR Odom). Never uses elapsed time.
+        (GPS or LiDAR Odom). Never uses open-loop elapsed time.
         """
         if self.active_motion_type == "ROTATE":
             return 0.0
 
+        interfix = (
+            self._gps_interfix_dist_m
+            if (include_interfix and self.active_sensor_mode == "GPS")
+            else 0.0
+        )
+
         if self.active_motion_type == "STRAIGHT":
-            return self.chord_dist_m
+            return self.chord_dist_m + interfix
 
         if self.active_motion_type == "ARC":
             # For arcs <= 125 deg, convert direct chord displacement into exact arc length
@@ -912,12 +971,13 @@ class PrimitiveMotionController(Node):
                 if abs_yaw > 0.05:
                     half_yaw = 0.5 * abs_yaw
                     arc_factor = half_yaw / max(1e-4, math.sin(half_yaw))
-                    return max(self.chord_dist_m * arc_factor, self.accumulated_path_dist_m)
-                return self.chord_dist_m
+                    base_arc = max(self.chord_dist_m * arc_factor, self.accumulated_path_dist_m)
+                    return base_arc + interfix
+                return self.chord_dist_m + interfix
             # For large arcs (> 125 deg / U-turns / full circles), use incremental path odometer
-            return max(self.accumulated_path_dist_m, self.chord_dist_m)
+            return max(self.accumulated_path_dist_m, self.chord_dist_m) + interfix
 
-        return self.chord_dist_m
+        return self.chord_dist_m + interfix
 
     def _publish_cmd_vel(self, vx: float, wz: float) -> None:
         """Sends velocity target to the motor controller node."""

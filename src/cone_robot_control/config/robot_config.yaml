@@ -15,7 +15,7 @@ mdd10_motor_controller:
     wheel_track: 0.380         # Effective track width L_eff for skid-steer slip (meters)
     max_linear_speed: 1.00     # Physical track speed at 100% PWM duty cycle (m/s)
     max_angular_speed: 3.00    # Maximum turning speed (rad/s)
-    min_pwm: 0.08              # Static friction deadband duty cycle [0.0 - 0.35]
+    min_pwm: 0.05              # Static friction deadband duty cycle [0.0 - 0.35]
     left_motor_trim: 1.00      # Left track speed multiplier (adjust e.g. 0.98 or 1.02 if needed)
     right_motor_trim: 1.00     # Right track speed multiplier
     nominal_battery_v: 12.0    # Reference 3S LiPo voltage for automatic PWM compensation
