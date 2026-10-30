@@ -43,9 +43,9 @@ class MDD10MotorController(Node):
         self.declare_parameter('dir2_pin', 25)             # Right Motor Direction (GPIO 25 / Pin 22)
 
         self.declare_parameter('wheel_track', 0.380)       # Effective track width L_eff (meters)
-        self.declare_parameter('max_linear_speed', 0.50)   # Physical speed at 100% PWM (m/s)
-        self.declare_parameter('max_angular_speed', 2.50)  # Maximum angular speed (rad/s)
-        self.declare_parameter('min_pwm', 0.12)            # Static friction deadband duty cycle [0.0 - 0.35]
+        self.declare_parameter('max_linear_speed', 1.00)   # Physical speed at 100% PWM (m/s)
+        self.declare_parameter('max_angular_speed', 3.00)  # Maximum angular speed (rad/s)
+        self.declare_parameter('min_pwm', 0.08)            # Static friction deadband duty cycle [0.0 - 0.35]
         self.declare_parameter('left_motor_trim', 1.00)    # Left channel calibration multiplier
         self.declare_parameter('right_motor_trim', 1.00)   # Right channel calibration multiplier
         self.declare_parameter('nominal_battery_v', 12.0)  # Reference voltage for battery compensation

@@ -13,9 +13,9 @@ mdd10_motor_controller:
 
     # --- Physical Dimensions, Deadband & Trim Calibration ---
     wheel_track: 0.380         # Effective track width L_eff for skid-steer slip (meters)
-    max_linear_speed: 0.50     # Physical track speed at 100% PWM duty cycle (m/s)
-    max_angular_speed: 2.50    # Maximum turning speed (rad/s)
-    min_pwm: 0.12              # Static friction deadband duty cycle [0.0 - 0.35]
+    max_linear_speed: 1.00     # Physical track speed at 100% PWM duty cycle (m/s)
+    max_angular_speed: 3.00    # Maximum turning speed (rad/s)
+    min_pwm: 0.08              # Static friction deadband duty cycle [0.0 - 0.35]
     left_motor_trim: 1.00      # Left track speed multiplier (adjust e.g. 0.98 or 1.02 if needed)
     right_motor_trim: 1.00     # Right track speed multiplier
     nominal_battery_v: 12.0    # Reference 3S LiPo voltage for automatic PWM compensation
@@ -76,10 +76,10 @@ primitive_motion_controller:
     min_angular_speed: 0.65           # Minimum pivot speed to overcome track friction (rad/s)
 
     # --- Closed-Loop IMU Heading & Arc Curvature Gains ---
-    yaw_kp: 2.0                       # Proportional heading correction gain (rad/s per rad error)
+    yaw_kp: 2.8                       # Proportional heading correction gain (rad/s per rad error)
     yaw_ki: 0.60                      # Integral gain to automatically trim track asymmetry
-    yaw_kd: 0.20                      # Gyro rate damping gain
+    yaw_kd: 0.25                      # Gyro rate damping gain
     yaw_tolerance_rad: 0.031          # Angle completion tolerance (~1.8 deg)
     turn_settle_time_s: 0.15          # Standstill verification duration at target (seconds)
-    distance_tolerance_m: 0.03        # Distance completion tolerance (3 cm)
+    distance_tolerance_m: 0.02        # Distance completion tolerance (2 cm)
     stuck_detect_time_s: 2.5          # Stall watchdog abort timeout (seconds)

@@ -152,12 +152,23 @@ class MotionPrimitiveProfiler:
                 self._current_v_mag = 0.0
                 return 0.0, 0.0, self.target_dist, 0.0, True
 
-            # Smooth acceleration slew from standstill + kinematic braking from remaining distance
+            # Smooth acceleration slew from standstill
             self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
-            v_brake = math.sqrt(
-                self.min_linear_speed ** 2 + 2.0 * self.a_limit * max(0.0, dist_rem - dist_tolerance_m)
-            )
-            v_mag = max(self.min_linear_speed, min(self._current_v_mag, v_brake))
+
+            # Progressive 65 cm approach deceleration ramp down to gentle crawl speed
+            # Eliminates high-speed momentum & 10 Hz sensor-latency overshoot at target
+            crawl_speed = max(0.05, self.min_linear_speed * 0.70)
+            decel_zone_m = min(0.65, max(0.15, total_s * 0.50))
+            if dist_rem < decel_zone_m:
+                ramp_ratio = max(
+                    0.0,
+                    (dist_rem - dist_tolerance_m) / max(1e-3, decel_zone_m - dist_tolerance_m),
+                )
+                v_approach = crawl_speed + (self.v_limit - crawl_speed) * ramp_ratio
+            else:
+                v_approach = self.v_limit
+
+            v_mag = max(crawl_speed, min(self._current_v_mag, v_approach))
             self._current_v_mag = v_mag
 
             return dir_sign * v_mag, 0.0, dir_sign * s, 0.0, False
@@ -175,10 +186,19 @@ class MotionPrimitiveProfiler:
                 return 0.0, 0.0, self.target_dist, self.target_yaw, True
 
             self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
-            v_brake = math.sqrt(
-                self.min_linear_speed ** 2 + 2.0 * self.a_limit * max(0.0, dist_rem - dist_tolerance_m)
-            )
-            v_mag = max(self.min_linear_speed, min(self._current_v_mag, v_brake))
+
+            crawl_speed = max(0.05, self.min_linear_speed * 0.70)
+            decel_zone_m = min(0.65, max(0.15, total_s * 0.50))
+            if dist_rem < decel_zone_m:
+                ramp_ratio = max(
+                    0.0,
+                    (dist_rem - dist_tolerance_m) / max(1e-3, decel_zone_m - dist_tolerance_m),
+                )
+                v_approach = crawl_speed + (self.v_limit - crawl_speed) * ramp_ratio
+            else:
+                v_approach = self.v_limit
+
+            v_mag = max(crawl_speed, min(self._current_v_mag, v_approach))
             self._current_v_mag = v_mag
 
             v_ref = dir_sign * v_mag
