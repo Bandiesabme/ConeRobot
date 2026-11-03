@@ -278,6 +278,11 @@ class PrimitiveMotionController(Node):
         # IMU State (CCW+ radians, continuous unrolled yaw) & Global ENU Heading Fusion
         self.current_heading_rad: Optional[float] = None
         self.current_compass_rad: Optional[float] = None
+        self.compass_initialized: bool = False
+        self._compass_warmup_count: int = 0
+        self._compass_sample_count: int = 0
+        self._compass_sin_sum: float = 0.0
+        self._compass_cos_sum: float = 0.0
         self.enu_yaw_offset_rad: float = 0.0
         self.enu_yaw_locked_by_rtk: bool = False
         self._rtk_course_anchor_gps: Optional[Tuple[float, float]] = None
@@ -374,26 +379,40 @@ class PrimitiveMotionController(Node):
         self.current_heading_rad = norm_rad
         self.last_heading_time = time.time()
 
-        # When stationary before RTK course lock, keep ENU offset synced with 9-DOF compass
-        if (
-            not self.enu_yaw_locked_by_rtk
-            and self.current_compass_rad is not None
-            and abs(self.last_cmd_v) < 0.01
-            and abs(self.last_cmd_w) < 0.01
-        ):
-            self.enu_yaw_offset_rad = shortest_angular_diff_rad(self.current_compass_rad, norm_rad)
-
     def _compass_callback(self, msg: Float32) -> None:
-        """9-DOF Magnetometer-referenced heading for 0-movement initial orientation."""
+        """9-DOF Magnetometer-referenced heading averaged over 25 samples at startup, then locked."""
+        if self.compass_initialized or self.enu_yaw_locked_by_rtk:
+            return
         comp_rad = normalize_angle_rad(math.radians(normalize_angle_deg(msg.data)))
         self.current_compass_rad = comp_rad
-        if (
-            not self.enu_yaw_locked_by_rtk
-            and self.current_heading_rad is not None
-            and abs(self.last_cmd_v) < 0.01
-            and abs(self.last_cmd_w) < 0.01
-        ):
+        if self.current_heading_rad is None:
+            return
+
+        # If robot starts moving before all 25 samples finish, lock whatever average we have so far
+        if self.state != ControllerState.IDLE or abs(self.last_cmd_v) > 0.01 or abs(self.last_cmd_w) > 0.01:
+            if self._compass_sample_count > 0:
+                self.compass_initialized = True
+            return
+
+        # Skip the first 5 BNO08x filter warmup samples right at node boot
+        self._compass_warmup_count += 1
+        if self._compass_warmup_count <= 5:
             self.enu_yaw_offset_rad = shortest_angular_diff_rad(comp_rad, self.current_heading_rad)
+            return
+
+        # Circularly average 25 stationary samples (~1.5s) to eliminate sensor noise
+        sample_offset = shortest_angular_diff_rad(comp_rad, self.current_heading_rad)
+        self._compass_sin_sum += math.sin(sample_offset)
+        self._compass_cos_sum += math.cos(sample_offset)
+        self._compass_sample_count += 1
+        self.enu_yaw_offset_rad = math.atan2(self._compass_sin_sum, self._compass_cos_sum)
+
+        if self._compass_sample_count >= 25:
+            self.compass_initialized = True
+            self.get_logger().info(
+                f"[COMPASS INIT] Startup heading locked (averaged over {self._compass_sample_count} samples): "
+                f"{math.degrees(self._get_global_enu_yaw_rad()):+.1f}° ENU (6-DOF gyro active from now on)."
+            )
 
     def _base_fix_callback(self, msg: NavSatFix) -> None:
         """Locks the RTK Base Station (0, 0) coordinate decoded from RTCM 1005/1006."""
@@ -524,7 +543,7 @@ class PrimitiveMotionController(Node):
                         )
                         step_dist = math.hypot(step_e, step_n)
                         yaw_drift = abs(self._get_measured_yaw_rad() - self._rtk_course_anchor_yaw)
-                        if step_dist >= 0.18 and yaw_drift <= math.radians(5.0):
+                        if step_dist >= 0.20 and yaw_drift <= math.radians(4.0):
                             course_enu = math.atan2(step_n, step_e)
                             if self.last_cmd_v < 0.0:
                                 course_enu = normalize_angle_rad(course_enu + math.pi)
@@ -536,9 +555,10 @@ class PrimitiveMotionController(Node):
                                     f"[RTK HEADING LOCKED] Calibrated true ENU heading over "
                                     f"{step_dist*100:.0f}cm (Heading: {math.degrees(self._get_global_enu_yaw_rad()):+.1f}° ENU)"
                                 )
-                            else:
+                            elif step_dist >= 1.0:
+                                # Only apply a tiny 5% long-term gyro drift trim over >= 1.0m straight segments
                                 diff_off = shortest_angular_diff_rad(meas_offset, self.enu_yaw_offset_rad)
-                                self.enu_yaw_offset_rad = normalize_angle_rad(self.enu_yaw_offset_rad + 0.35 * diff_off)
+                                self.enu_yaw_offset_rad = normalize_angle_rad(self.enu_yaw_offset_rad + 0.05 * diff_off)
 
                 # For GOTO waypoint navigation in DRIVE phase: continuously home onto exact target coordinate
                 if (
