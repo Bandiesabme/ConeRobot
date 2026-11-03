@@ -44,6 +44,17 @@ def gps_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return math.sqrt(x * x + y * y) * earth_radius_m
 
 
+def gps_enu_delta_m(lat1: float, lon1: float, lat2: float, lon2: float):
+    """Return (east_m, north_m) from (lat1, lon1) to (lat2, lon2)."""
+    earth_radius_m = 6371000.0
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    lat_avg = math.radians((lat1 + lat2) / 2.0)
+    east_m = d_lon * math.cos(lat_avg) * earth_radius_m
+    north_m = d_lat * earth_radius_m
+    return east_m, north_m
+
+
 class SafeActionRunner(Node):
     def __init__(self):
         super().__init__('safe_action_runner')
@@ -51,9 +62,10 @@ class SafeActionRunner(Node):
         self._goal_handle = None
         self._is_done = False
 
-        # Real-time GPS RTK Fix, Position & /cmd_vel Monitor
+        # Real-time GPS RTK Fix, Base Station (0,0), Position & /cmd_vel Monitor
         self.gps_status_sub = self.create_subscription(String, '/gps/status', self._gps_status_cb, 10)
         self.gps_fix_sub = self.create_subscription(NavSatFix, '/fix', self._fix_cb, 10)
+        self.base_fix_sub = self.create_subscription(NavSatFix, '/gps/base_fix', self._base_fix_cb, 10)
         self.cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self._cmd_vel_cb, 20)
         self.current_fix_quality = "UNKNOWN"
         self.num_sats = 0
@@ -63,7 +75,10 @@ class SafeActionRunner(Node):
         self.motion_start_time = None
 
         self.current_pos = None
+        self.base_pos = None
         self.start_pos = None
+        self.waypoint_target_gps = None
+        self.waypoint_target_base_xy = None
         self.target_distance = 0.0
         self.active_motion_type = 0
 
@@ -100,6 +115,10 @@ class SafeActionRunner(Node):
                     "dt_since_fix": dt_since_fix,
                     "prev_cmd_v": self.last_nonzero_cmd_v,
                 })
+
+    def _base_fix_cb(self, msg: NavSatFix):
+        if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
+            self.base_pos = (msg.latitude, msg.longitude)
 
     def _fix_cb(self, msg: NavSatFix):
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
@@ -344,6 +363,60 @@ class SafeActionRunner(Node):
                     print(" ⚠️ GRADE: ELEVATED ERROR (> 20 cm) - Incomplete turn or track slip.")
                 print("=" * 65)
 
+            # Print Waypoint Navigation Accuracy Benchmark for GOTO_BASE_XY (4) & GOTO_REL_ENU (5)
+            elif self.current_pos and self.active_motion_type in (4, 5):
+                post_wait_end = time.time() + 1.15
+                while rclpy.ok() and time.time() < post_wait_end:
+                    rclpy.spin_once(self, timeout_sec=0.05)
+
+                print("\n" + "=" * 65)
+                print(" 🧭 WAYPOINT NAVIGATION ACCURACY BENCHMARK (RTK GPS)")
+                print("=" * 65)
+                if self.start_pos:
+                    print(f" Start Position (Lat, Lon)  : ({self.start_pos[0]:.7f}, {self.start_pos[1]:.7f})")
+                print(f" Final Position (Lat, Lon)  : ({self.current_pos[0]:.7f}, {self.current_pos[1]:.7f})")
+
+                err_cm = None
+                if self.active_motion_type == 4 and self.base_pos and self.waypoint_target_base_xy:
+                    tx, ty = self.waypoint_target_base_xy
+                    fx, fy = gps_enu_delta_m(
+                        self.base_pos[0], self.base_pos[1],
+                        self.current_pos[0], self.current_pos[1],
+                    )
+                    err_m = math.hypot(tx - fx, ty - fy)
+                    err_cm = err_m * 100.0
+                    print(f" RTK Base (0,0) Coordinate  : ({self.base_pos[0]:.7f}, {self.base_pos[1]:.7f})")
+                    print(f" Target Base XY (E, N)      : ({tx:+.3f} m, {ty:+.3f} m)")
+                    print(f" Final Base XY  (E, N)      : ({fx:+.3f} m, {fy:+.3f} m)")
+                    print(f" 2D Arrival Error           : {err_cm:.1f} cm (dX={fx - tx:+.3f}m, dY={fy - ty:+.3f}m)")
+                elif self.waypoint_target_gps:
+                    tlat, tlon = self.waypoint_target_gps
+                    de, dn = gps_enu_delta_m(
+                        tlat, tlon,
+                        self.current_pos[0], self.current_pos[1],
+                    )
+                    err_m = math.hypot(de, dn)
+                    err_cm = err_m * 100.0
+                    print(f" Target Global (Lat, Lon)   : ({tlat:.7f}, {tlon:.7f})")
+                    if self.base_pos:
+                        fx, fy = gps_enu_delta_m(
+                            self.base_pos[0], self.base_pos[1],
+                            self.current_pos[0], self.current_pos[1],
+                        )
+                        print(f" Final Base XY  (E, N)      : ({fx:+.3f} m, {fy:+.3f} m)")
+                    print(f" 2D Arrival Error           : {err_cm:.1f} cm (dE={de:+.3f}m, dN={dn:+.3f}m)")
+
+                if err_cm is not None:
+                    if err_cm <= 3.0:
+                        print(" 🏆 GRADE: SURVEY-GRADE (< 3.0 cm radius) - Pinpoint waypoint arrival!")
+                    elif err_cm <= 6.0:
+                        print(" 🟢 GRADE: HIGH PRECISION (< 6.0 cm radius) - Accurate waypoint arrival!")
+                    elif err_cm <= 15.0:
+                        print(" 🟡 GRADE: MODERATE (~6-15 cm) - Minor final alignment/slip offset.")
+                    else:
+                        print(" ⚠️ GRADE: ELEVATED ERROR (> 15 cm) - Check RTK Fix & compass/COG alignment.")
+                print("=" * 65)
+
             # Print GPS Performance & Stability Report
             print("\n" + "=" * 65)
             print(" 📡 RTK GPS INTEGRITY & STABILITY REPORT")
@@ -392,6 +465,18 @@ def main():
     rotate_parser.add_argument("--deg", type=float, default=90.0, help="Angle in degrees (+ left, - right)")
     rotate_parser.add_argument("--rate", type=float, default=1.0, help="Yaw rate in rad/s")
 
+    # Waypoint GoTo subparser (supports BOTH Base-relative X/Y meters AND Global WGS84 Lat/Lon)
+    goto_parser = subparsers.add_parser(
+        "goto",
+        help="Navigate to a 2D waypoint using Base-Station (0,0) meters (--x --y) OR Global GPS (--lat --lon)",
+    )
+    goto_parser.add_argument("--x", type=float, default=None, help="Target East (+X) in meters relative to RTK Base Station (0,0)")
+    goto_parser.add_argument("--y", type=float, default=None, help="Target North (+Y) in meters relative to RTK Base Station (0,0)")
+    goto_parser.add_argument("--lat", type=float, default=None, help="Target Global WGS84 Latitude (decimal degrees)")
+    goto_parser.add_argument("--lon", type=float, default=None, help="Target Global WGS84 Longitude (decimal degrees)")
+    goto_parser.add_argument("--speed", type=float, default=0.25, help="Max linear speed in m/s (default: 0.25 m/s)")
+    goto_parser.add_argument("--rate", type=float, default=0.8, help="Max turn yaw rate in rad/s (default: 0.8 rad/s)")
+
     # Stop subparser
     subparsers.add_parser("stop", help="Emergency stop active motion")
 
@@ -424,6 +509,46 @@ def main():
             yaw_rad = math.radians(args.deg)
             if runner.send_goal(1, 0.0, yaw_rad, 0.0, args.rate):
                 runner.wait_for_result()
+
+        elif args.command == "goto":
+            has_xy = (args.x is not None) and (args.y is not None)
+            has_latlon = (args.lat is not None) and (args.lon is not None)
+            if not has_xy and not has_latlon:
+                print("❌ Error: For 'goto', provide either --x <east_m> --y <north_m> (Base 0,0) OR --lat <deg> --lon <deg> (Global).")
+                return
+
+            # Spin briefly to receive current /fix and /gps/base_fix
+            wait_until = time.time() + 2.2
+            while rclpy.ok() and time.time() < wait_until:
+                rclpy.spin_once(runner, timeout_sec=0.05)
+                if runner.current_pos is not None and (has_latlon or runner.base_pos is not None):
+                    break
+
+            if has_xy:
+                runner.waypoint_target_base_xy = (args.x, args.y)
+                print(
+                    f"🧭 Navigating to Base-Station (0,0) Waypoint: "
+                    f"X_East={args.x:+.2f}m, Y_North={args.y:+.2f}m"
+                )
+                # motion_type=4 (GOTO_BASE_XY): distance = X_east (m), delta_yaw = Y_north (m)
+                if runner.send_goal(4, args.x, args.y, args.speed, args.rate):
+                    runner.wait_for_result()
+            else:
+                if runner.current_pos is None:
+                    print("❌ Error: No /fix received from GPS node yet; cannot compute global waypoint vector.")
+                    return
+                runner.waypoint_target_gps = (args.lat, args.lon)
+                de_m, dn_m = gps_enu_delta_m(
+                    runner.current_pos[0], runner.current_pos[1],
+                    args.lat, args.lon,
+                )
+                print(
+                    f"🌍 Navigating to Global WGS84 Waypoint: ({args.lat:.7f}, {args.lon:.7f}) "
+                    f"[Offset: dEast={de_m:+.2f}m, dNorth={dn_m:+.2f}m]"
+                )
+                # motion_type=5 (GOTO_REL_ENU): distance = dEast_m, delta_yaw = dNorth_m
+                if runner.send_goal(5, de_m, dn_m, args.speed, args.rate):
+                    runner.wait_for_result()
 
         elif args.command == "stop":
             print("Sending TYPE_STOP...")

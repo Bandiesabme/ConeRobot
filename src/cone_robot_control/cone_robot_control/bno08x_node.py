@@ -190,6 +190,7 @@ class BNO08xNode(Node):
         # --- Publishers & Broadcasters ---
         self.imu_pub = self.create_publisher(Imu, '/imu/data', 10)
         self.heading_pub = self.create_publisher(Float32, '/imu/heading', 10)
+        self.compass_pub = self.create_publisher(Float32, '/imu/compass_heading', 10)
 
         if self.enable_battery_monitor:
             self.battery_pub = self.create_publisher(BatteryState, '/battery_state', 10)
@@ -348,6 +349,9 @@ class BNO08xNode(Node):
                 self._enable_feature_safe(BNO_REPORT_GYROSCOPE, "Gyroscope", max_attempts=3)
                 time.sleep(0.05)
                 self._enable_feature_safe(BNO_REPORT_ACCELEROMETER, "Accelerometer", max_attempts=3)
+                if self.use_game_rotation:
+                    time.sleep(0.05)
+                    self._enable_feature_safe(BNO_REPORT_ROTATION_VECTOR, "9-DOF Compass (Standstill Heading)", max_attempts=2)
 
                 self.get_logger().info('✅ BNO08x hardware initialized successfully.')
                 return
@@ -529,6 +533,23 @@ class BNO08xNode(Node):
             heading_msg = Float32()
             heading_msg.data = float(yaw_deg)
             self.heading_pub.publish(heading_msg)
+
+            # Publish 9-DOF magnetometer-referenced compass heading for 0-movement startup alignment
+            try:
+                comp_raw = self.sensor.quaternion
+                if comp_raw is not None:
+                    cqx, cqy, cqz, cqw = comp_raw[0], comp_raw[1], comp_raw[2], comp_raw[3]
+                    if (cqx * cqx + cqy * cqy + cqz * cqz + cqw * cqw) > 0.0001:
+                        if self.mount_flipped:
+                            cq_corr = quaternion_multiply(self.q_flip, [cqx, cqy, cqz, cqw])
+                            comp_deg = quaternion_to_yaw_deg(cq_corr[0], cq_corr[1], cq_corr[2], cq_corr[3])
+                        else:
+                            comp_deg = quaternion_to_yaw_deg(cqx, cqy, cqz, cqw)
+                        comp_msg = Float32()
+                        comp_msg.data = float(comp_deg)
+                        self.compass_pub.publish(comp_msg)
+            except Exception:
+                pass
 
             # Broadcast Dynamic TF (odom -> base_link) for 3D Visualizer if available
             if self.tf_broadcaster:

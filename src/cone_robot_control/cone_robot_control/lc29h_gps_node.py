@@ -100,6 +100,7 @@ class LC29HGPSNode(Node):
 
         # ROS 2 Publishers
         self.fix_pub = self.create_publisher(NavSatFix, '/fix', 10)
+        self.base_fix_pub = self.create_publisher(NavSatFix, '/gps/base_fix', 10)
         self.status_pub = self.create_publisher(String, '/gps/status', 10)
 
         # Internal State
@@ -110,6 +111,8 @@ class LC29HGPSNode(Node):
         self.ntrip_connected = False
         self.rtcm_bytes_received = 0
         self._cached_base_ip: Optional[str] = None
+        self._rtcm_buffer = bytearray()
+        self.base_coords: Optional[Tuple[float, float, float]] = None  # (lat, lon, alt) from RTCM 1005/1006
 
         self.current_lat = 0.0
         self.current_lon = 0.0
@@ -484,6 +487,15 @@ class LC29HGPSNode(Node):
             data, addr = sock.recvfrom(2048)
             payload = json.loads(data.decode('utf-8'))
             if payload.get("service") == "conerobot-rtk-base":
+                if "lat" in payload and "lon" in payload:
+                    try:
+                        b_lat = float(payload["lat"])
+                        b_lon = float(payload["lon"])
+                        b_alt = float(payload.get("alt", 0.0))
+                        if abs(b_lat) > 1e-4 or abs(b_lon) > 1e-4:
+                            self._set_base_station_coords(b_lat, b_lon, b_alt, source="UDP Beacon")
+                    except (ValueError, TypeError):
+                        pass
                 base_ip = payload.get("ip") or addr[0]
                 with socket.create_connection((base_ip, self.ntrip_port), timeout=0.3):
                     return base_ip
@@ -675,6 +687,7 @@ class LC29HGPSNode(Node):
 
                 if initial_rtcm:
                     self.rtcm_bytes_received += len(initial_rtcm)
+                    self._parse_rtcm_for_base_arp(initial_rtcm)
                     if self.serial_conn and self.serial_conn.is_open:
                         with self.serial_lock:
                             self.serial_conn.write(initial_rtcm)
@@ -701,6 +714,7 @@ class LC29HGPSNode(Node):
                         raise ConnectionError("NTRIP socket returned 0 bytes (connection closed by server).")
 
                     self.rtcm_bytes_received += len(rtcm_data)
+                    self._parse_rtcm_for_base_arp(rtcm_data)
 
                     # Write RTCM3 binary bytes directly into the LC29H HAT UART
                     if self.serial_conn and self.serial_conn.is_open:
@@ -719,17 +733,127 @@ class LC29HGPSNode(Node):
                     except Exception:
                         pass
 
+    @staticmethod
+    def _extract_bits(payload: bytes, bit_offset: int, bit_len: int, signed: bool = False) -> int:
+        """Extracts an arbitrary bit-field (big-endian) from an RTCM3 payload."""
+        val = 0
+        for i in range(bit_offset, bit_offset + bit_len):
+            byte_idx = i >> 3
+            bit_idx = 7 - (i & 7)
+            bit = (payload[byte_idx] >> bit_idx) & 1
+            val = (val << 1) | bit
+        if signed and (val & (1 << (bit_len - 1))):
+            val -= (1 << bit_len)
+        return val
+
+    @staticmethod
+    def _ecef_to_wgs84(x_m: float, y_m: float, z_m: float) -> Tuple[float, float, float]:
+        """Converts ECEF (X, Y, Z) in meters to WGS84 (lat_deg, lon_deg, alt_m)."""
+        a = 6378137.0
+        f = 1.0 / 298.257223563
+        b = a * (1.0 - f)
+        e2 = 2.0 * f - f * f
+        ep2 = (a * a - b * b) / (b * b)
+        p = math.hypot(x_m, y_m)
+        if p < 1.0:
+            return 0.0, 0.0, 0.0
+        lon = math.atan2(y_m, x_m)
+        theta = math.atan2(z_m * a, p * b)
+        sin_t = math.sin(theta)
+        cos_t = math.cos(theta)
+        lat = math.atan2(
+            z_m + ep2 * b * (sin_t ** 3),
+            p - e2 * a * (cos_t ** 3),
+        )
+        sin_lat = math.sin(lat)
+        n_rad = a / math.sqrt(max(1e-9, 1.0 - e2 * sin_lat * sin_lat))
+        alt = (p / max(1e-9, math.cos(lat))) - n_rad
+        return math.degrees(lat), math.degrees(lon), alt
+
+    def _set_base_station_coords(self, lat: float, lon: float, alt: float, source: str = "RTCM") -> None:
+        """Locks and publishes the RTK Base Station (0, 0) reference coordinate."""
+        is_first = self.base_coords is None
+        self.base_coords = (lat, lon, alt)
+        if is_first:
+            self.get_logger().info(
+                f"[RTK BASE ORIGIN LOCKED] ({source}) Base (0, 0) = ({lat:.7f}, {lon:.7f}, {alt:.1f}m)"
+            )
+        self._publish_base_fix()
+
+    def _publish_base_fix(self) -> None:
+        """Publishes /gps/base_fix (NavSatFix) representing the RTK Base Station (0, 0) origin."""
+        if self.base_coords is None:
+            return
+        msg = NavSatFix()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "map"
+        msg.status.status = NavSatStatus.STATUS_GBAS_FIX
+        msg.latitude = float(self.base_coords[0])
+        msg.longitude = float(self.base_coords[1])
+        msg.altitude = float(self.base_coords[2])
+        self.base_fix_pub.publish(msg)
+
+    def _parse_rtcm_for_base_arp(self, data: bytes) -> None:
+        """
+        Scans incoming RTCM3 binary stream for Message Types 1005 or 1006
+        (Stationary RTK Reference Station ARP) and extracts the Base Station WGS84 coordinate.
+        """
+        try:
+            self._rtcm_buffer.extend(data)
+            if len(self._rtcm_buffer) > 8192:
+                self._rtcm_buffer = self._rtcm_buffer[-4096:]
+
+            idx = 0
+            buf_len = len(self._rtcm_buffer)
+            while idx + 6 <= buf_len:
+                if self._rtcm_buffer[idx] != 0xD3 or (self._rtcm_buffer[idx + 1] & 0xFC) != 0x00:
+                    idx += 1
+                    continue
+                length = ((self._rtcm_buffer[idx + 1] & 0x03) << 8) | self._rtcm_buffer[idx + 2]
+                frame_len = 3 + length + 3
+                if idx + frame_len > buf_len:
+                    break  # Wait for remaining bytes of this RTCM frame
+                payload = bytes(self._rtcm_buffer[idx + 3 : idx + 3 + length])
+                if length >= 19:
+                    msg_type = ((payload[0] << 4) | (payload[1] >> 4)) & 0x0FFF
+                    if msg_type in (1005, 1006):
+                        ecef_x = self._extract_bits(payload, 34, 38, signed=True) * 0.0001
+                        ecef_y = self._extract_bits(payload, 74, 38, signed=True) * 0.0001
+                        ecef_z = self._extract_bits(payload, 114, 38, signed=True) * 0.0001
+                        r_norm = math.sqrt(ecef_x * ecef_x + ecef_y * ecef_y + ecef_z * ecef_z)
+                        if 6000000.0 < r_norm < 6800000.0:
+                            b_lat, b_lon, b_alt = self._ecef_to_wgs84(ecef_x, ecef_y, ecef_z)
+                            if -90.0 <= b_lat <= 90.0 and -180.0 <= b_lon <= 180.0:
+                                self._set_base_station_coords(b_lat, b_lon, b_alt, source=f"RTCM {msg_type}")
+                idx += frame_len
+
+            if idx > 0:
+                del self._rtcm_buffer[:idx]
+        except Exception:
+            pass
+
     def _publish_diagnostic_status(self) -> None:
         """Publishes human-readable status string and logs periodic diagnostics."""
+        if self.base_coords is not None:
+            self._publish_base_fix()
         quality_str, _, _ = self.FIX_QUALITY_MAP.get(
             self.current_fix_quality, ("UNKNOWN", NavSatStatus.STATUS_NO_FIX, 100.0)
         )
         
         age_str = f"{self.current_diff_age:.1f}s" if self.current_diff_age is not None else "-"
+        base_enu_str = ""
+        if self.base_coords is not None and self.current_fix_quality > 0:
+            d_lat = math.radians(self.current_lat - self.base_coords[0])
+            d_lon = math.radians(self.current_lon - self.base_coords[1])
+            lat_avg = math.radians((self.current_lat + self.base_coords[0]) * 0.5)
+            east_m = d_lon * math.cos(lat_avg) * 6371000.0
+            north_m = d_lat * 6371000.0
+            base_enu_str = f" | BaseENU: ({east_m:+.2f}m E, {north_m:+.2f}m N)"
+
         status_msg = String()
         status_text = (
             f"Fix: {quality_str} | Sats: {self.current_num_sats} | HDOP: {self.current_hdop:.2f} | "
-            f"Pos: ({self.current_lat:.7f}, {self.current_lon:.7f}, {self.current_alt:.1f}m) | "
+            f"Pos: ({self.current_lat:.7f}, {self.current_lon:.7f}, {self.current_alt:.1f}m){base_enu_str} | "
             f"NTRIP: {'Connected' if self.ntrip_connected else ('Disabled' if not self.ntrip_enable else 'Connecting...')} "
             f"({self.rtcm_bytes_received / 1024.0:.1f} KB RTCM) | Corr. age: {age_str} | {self._get_cn0_summary()}"
         )

@@ -104,6 +104,16 @@ def gps_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return math.hypot(de, dn)
 
 
+def gps_enu_to_latlon(ref_lat: float, ref_lon: float, d_east_m: float, d_north_m: float) -> Tuple[float, float]:
+    """Convert local East-North metric offset (dE, dN) in meters from (ref_lat, ref_lon) into WGS84 (lat, lon)."""
+    earth_radius_m = 6371000.0
+    d_lat = math.degrees(d_north_m / earth_radius_m)
+    lat_out = ref_lat + d_lat
+    lat_avg_rad = math.radians((ref_lat + lat_out) * 0.5)
+    d_lon = math.degrees(d_east_m / max(1e-6, earth_radius_m * math.cos(lat_avg_rad)))
+    return lat_out, ref_lon + d_lon
+
+
 class ControllerState:
     IDLE = "IDLE"
     EXECUTING = "EXECUTING"
@@ -203,10 +213,16 @@ class PrimitiveMotionController(Node):
         self.cmd_prim_sub = self.create_subscription(
             Vector3, '/cmd_primitive', self._cmd_primitive_callback, 10, callback_group=self.cb_group
         )
+        self.cmd_waypoint_sub = self.create_subscription(
+            Vector3, '/cmd_waypoint', self._cmd_waypoint_callback, 10, callback_group=self.cb_group
+        )
 
         # Sensor Subscriptions
         self.heading_sub = self.create_subscription(
             Float32, '/imu/heading', self._heading_callback, 10, callback_group=self.cb_group
+        )
+        self.compass_sub = self.create_subscription(
+            Float32, '/imu/compass_heading', self._compass_callback, 10, callback_group=self.cb_group
         )
         self.imu_sub = self.create_subscription(
             Imu, '/imu/data', self._imu_data_callback, 10, callback_group=self.cb_group
@@ -219,6 +235,9 @@ class PrimitiveMotionController(Node):
             self.odom_sub = None
         self.fix_sub = self.create_subscription(
             NavSatFix, '/fix', self._fix_callback, 10, callback_group=self.cb_group
+        )
+        self.base_fix_sub = self.create_subscription(
+            NavSatFix, '/gps/base_fix', self._base_fix_callback, 10, callback_group=self.cb_group
         )
         self.gps_status_sub = self.create_subscription(
             String, '/gps/status', self._gps_status_callback, 10, callback_group=self.cb_group
@@ -256,8 +275,13 @@ class PrimitiveMotionController(Node):
         # ----------------------------------------------------------------------
         self.state = ControllerState.IDLE
 
-        # IMU State (CCW+ radians, continuous unrolled yaw)
+        # IMU State (CCW+ radians, continuous unrolled yaw) & Global ENU Heading Fusion
         self.current_heading_rad: Optional[float] = None
+        self.current_compass_rad: Optional[float] = None
+        self.enu_yaw_offset_rad: float = 0.0
+        self.enu_yaw_locked_by_rtk: bool = False
+        self._rtk_course_anchor_gps: Optional[Tuple[float, float]] = None
+        self._rtk_course_anchor_yaw: float = 0.0
         self.unrolled_yaw_rad: float = 0.0
         self.start_unrolled_yaw: float = 0.0
         self.current_yaw_rate: float = 0.0
@@ -279,10 +303,15 @@ class PrimitiveMotionController(Node):
         self._accum_dist_at_last_rtk_fix: float = 0.0
         self._odom_accum_since_last_rtk_fix: float = 0.0
 
-        # Raw GPS Sensor State & 1 Hz Sub-Second Inter-Fix Predictor
+        # Raw GPS Sensor State, RTK Base (0, 0) Origin & 1 Hz Sub-Second Inter-Fix Predictor
         self.current_gps_coords: Optional[Tuple[float, float]] = None
+        self.base_gps_coords: Optional[Tuple[float, float]] = None
         self.start_gps_coords: Optional[Tuple[float, float]] = None
         self.last_gps_accum_coords: Optional[Tuple[float, float]] = None
+        self.waypoint_target_gps: Optional[Tuple[float, float]] = None
+        self.waypoint_target_odom: Optional[Tuple[float, float]] = None
+        self._goto_phase: str = "NONE"          # "ALIGN" or "DRIVE"
+        self._goto_yaw_ref: float = 0.0
         self.gps_status: int = NavSatStatus.STATUS_NO_FIX
         self.gps_is_rtk_fix: bool = False
         self.last_gps_time: float = 0.0
@@ -344,6 +373,42 @@ class PrimitiveMotionController(Node):
 
         self.current_heading_rad = norm_rad
         self.last_heading_time = time.time()
+
+        # When stationary before RTK course lock, keep ENU offset synced with 9-DOF compass
+        if (
+            not self.enu_yaw_locked_by_rtk
+            and self.current_compass_rad is not None
+            and abs(self.last_cmd_v) < 0.01
+            and abs(self.last_cmd_w) < 0.01
+        ):
+            self.enu_yaw_offset_rad = shortest_angular_diff_rad(self.current_compass_rad, norm_rad)
+
+    def _compass_callback(self, msg: Float32) -> None:
+        """9-DOF Magnetometer-referenced heading for 0-movement initial orientation."""
+        comp_rad = normalize_angle_rad(math.radians(normalize_angle_deg(msg.data)))
+        self.current_compass_rad = comp_rad
+        if (
+            not self.enu_yaw_locked_by_rtk
+            and self.current_heading_rad is not None
+            and abs(self.last_cmd_v) < 0.01
+            and abs(self.last_cmd_w) < 0.01
+        ):
+            self.enu_yaw_offset_rad = shortest_angular_diff_rad(comp_rad, self.current_heading_rad)
+
+    def _base_fix_callback(self, msg: NavSatFix) -> None:
+        """Locks the RTK Base Station (0, 0) coordinate decoded from RTCM 1005/1006."""
+        if math.isnan(msg.latitude) or math.isnan(msg.longitude):
+            return
+        b_lat = float(msg.latitude)
+        b_lon = float(msg.longitude)
+        if abs(b_lat) > 1e-4 or abs(b_lon) > 1e-4:
+            self.base_gps_coords = (b_lat, b_lon)
+
+    def _get_global_enu_yaw_rad(self) -> float:
+        """Returns robot heading in global East-North-Up radians (0 = East, +pi/2 = North)."""
+        if self.current_heading_rad is None:
+            return 0.0
+        return normalize_angle_rad(self.current_heading_rad + self.enu_yaw_offset_rad)
 
     def _imu_data_callback(self, msg: Imu) -> None:
         self.current_yaw_rate = float(msg.angular_velocity.z)
@@ -445,6 +510,68 @@ class PrimitiveMotionController(Node):
                     self._odom_pos_at_last_rtk_fix = self.current_odom_pos
                     self._odom_accum_since_last_rtk_fix = 0.0
 
+                    # Live RTK Course-Over-Ground (COG) heading calibration while driving straight
+                    if (
+                        self.active_motion_type in ["STRAIGHT", "GOTO"]
+                        and self._goto_phase in ["NONE", "DRIVE"]
+                        and self._rtk_course_anchor_gps is not None
+                        and abs(self.last_cmd_v) > 0.02
+                        and self.current_heading_rad is not None
+                    ):
+                        step_e, step_n = gps_enu_delta_m(
+                            self._rtk_course_anchor_gps[0], self._rtk_course_anchor_gps[1],
+                            curr_lat, curr_lon,
+                        )
+                        step_dist = math.hypot(step_e, step_n)
+                        yaw_drift = abs(self._get_measured_yaw_rad() - self._rtk_course_anchor_yaw)
+                        if step_dist >= 0.18 and yaw_drift <= math.radians(5.0):
+                            course_enu = math.atan2(step_n, step_e)
+                            if self.last_cmd_v < 0.0:
+                                course_enu = normalize_angle_rad(course_enu + math.pi)
+                            meas_offset = shortest_angular_diff_rad(course_enu, self.current_heading_rad)
+                            if not self.enu_yaw_locked_by_rtk:
+                                self.enu_yaw_offset_rad = meas_offset
+                                self.enu_yaw_locked_by_rtk = True
+                                self.get_logger().info(
+                                    f"[RTK HEADING LOCKED] Calibrated true ENU heading over "
+                                    f"{step_dist*100:.0f}cm (Heading: {math.degrees(self._get_global_enu_yaw_rad()):+.1f}° ENU)"
+                                )
+                            else:
+                                diff_off = shortest_angular_diff_rad(meas_offset, self.enu_yaw_offset_rad)
+                                self.enu_yaw_offset_rad = normalize_angle_rad(self.enu_yaw_offset_rad + 0.35 * diff_off)
+
+                # For GOTO waypoint navigation in DRIVE phase: continuously home onto exact target coordinate
+                if (
+                    self.active_motion_type == "GOTO"
+                    and self._goto_phase == "DRIVE"
+                    and self.waypoint_target_gps is not None
+                ):
+                    rem_e, rem_n = gps_enu_delta_m(
+                        curr_lat, curr_lon,
+                        self.waypoint_target_gps[0], self.waypoint_target_gps[1],
+                    )
+                    rem_dist_wp = math.hypot(rem_e, rem_n)
+                    new_chord = max(0.0, abs(self.target_dist_m) - rem_dist_wp)
+                    self.chord_dist_m = new_chord
+                    self._prev_gps_dist_m = new_chord
+                    rem_to_target = rem_dist_wp
+
+                    if rem_dist_wp > 0.25:
+                        bearing_enu = math.atan2(rem_n, rem_e)
+                        bearing_err = shortest_angular_diff_rad(bearing_enu, self._get_global_enu_yaw_rad())
+                        if abs(bearing_err) > math.radians(35.0):
+                            # Large initial compass discrepancy revealed by RTK: pivot in place to true bearing
+                            self.get_logger().info(
+                                f"[GOTO RE-ALIGN] Adjusting heading by {math.degrees(bearing_err):+.1f}° to true RTK bearing."
+                            )
+                            self._goto_phase = "ALIGN"
+                            self.start_unrolled_yaw = self.unrolled_yaw_rad
+                            self.target_yaw_rad = bearing_err
+                            self.turn_settle_start = None
+                            self.profiler.start_rotate(bearing_err, max_w=self.current_max_w)
+                        else:
+                            self._goto_yaw_ref = self._get_measured_yaw_rad() + bearing_err
+
                 # Account for ~0.42s LC29H RTK computation + NMEA serial pipeline latency
                 # plus ~3.5 cm track spin-down lead while actively driving; reset to 0.0 when stopped.
                 if self._gps_stop_wait_start is None and abs(self.last_cmd_v) > 0.01:
@@ -509,6 +636,26 @@ class PrimitiveMotionController(Node):
         yaw_rad = float(msg.z)
         self._dispatch_topic_command(dist_m, yaw_rad)
 
+    def _cmd_waypoint_callback(self, msg: Vector3) -> None:
+        """
+        Receives /cmd_waypoint:
+          - If msg.z == 0.0: Base-relative ENU meters (msg.x = East_m, msg.y = North_m from Base 0,0)
+          - If msg.z == 1.0: Global WGS84 degrees (msg.x = Latitude, msg.y = Longitude)
+        """
+        if self._current_goal_handle is not None:
+            self._preempted_by_topic = True
+        if abs(float(msg.z) - 1.0) < 0.1:
+            if self.current_gps_coords is None:
+                self.get_logger().error("[WAYPOINT REJECTED] Current GPS position unknown!")
+                return
+            de_m, dn_m = gps_enu_delta_m(
+                self.current_gps_coords[0], self.current_gps_coords[1],
+                float(msg.x), float(msg.y),
+            )
+            self._start_motion("GOTO_REL_ENU", de_m, dn_m)
+        else:
+            self._start_motion("GOTO_BASE_XY", float(msg.x), float(msg.y))
+
     def _dispatch_topic_command(self, dist_m: float, yaw_rad: float) -> None:
         if self._current_goal_handle is not None:
             self.get_logger().warn(
@@ -553,7 +700,9 @@ class PrimitiveMotionController(Node):
         self._preempted_by_topic = False
         goal = goal_handle.request
 
-        # TYPE_DRIVE_STRAIGHT=0, TYPE_ROTATE_IN_PLACE=1, TYPE_DRIVE_ARC=2, TYPE_STOP=3
+        # TYPE_DRIVE_STRAIGHT=0, TYPE_ROTATE_IN_PLACE=1, TYPE_DRIVE_ARC=2, TYPE_STOP=3,
+        # TYPE_GOTO_BASE_XY=4 (distance=X_east_m, delta_yaw=Y_north_m from Base 0,0),
+        # TYPE_GOTO_REL_ENU=5 (distance=dEast_m, delta_yaw=dNorth_m from current pos / Global LatLon)
         if goal.motion_type == 0:
             m_type = "STRAIGHT"
         elif goal.motion_type == 1:
@@ -562,6 +711,10 @@ class PrimitiveMotionController(Node):
             m_type = "ARC"
         elif goal.motion_type == 3:
             m_type = "STOP"
+        elif goal.motion_type == 4:
+            m_type = "GOTO_BASE_XY"
+        elif goal.motion_type == 5:
+            m_type = "GOTO_REL_ENU"
         else:
             goal_handle.abort()
             result = ExecuteMotion.Result()
@@ -759,26 +912,70 @@ class PrimitiveMotionController(Node):
         """Initializes state-driven trajectory profiler and locks sensor baselines."""
         self._publish_cmd_vel(0.0, 0.0)
 
-        needs_distance = motion_type in ["STRAIGHT", "ARC"]
+        needs_distance = motion_type in ["STRAIGHT", "ARC", "GOTO_BASE_XY", "GOTO_REL_ENU", "GOTO"]
         sensor_ok, sensor_desc = self._resolve_active_sensor(needs_distance)
         if not sensor_ok:
             self.get_logger().error(f"[START REJECTED] {sensor_desc}")
             self._set_state(ControllerState.SENSOR_ERROR, sensor_desc)
             return False, sensor_desc
 
-        self.active_motion_type = motion_type
-        self.target_dist_m = float(dist_m)
-        self.target_yaw_rad = float(yaw_rad)
-        self.yaw_integral = 0.0
-        self.turn_settle_start = None
-
         self.current_max_v = max_v if (max_v and max_v > 0.0) else self.default_linear_speed
         self.current_max_w = max_w if (max_w and max_w > 0.0) else self.default_angular_speed
         self.last_cmd_v = 0.0
         self.last_cmd_w = 0.0
+        self.yaw_integral = 0.0
+        self.turn_settle_start = None
+        self._goto_phase = "NONE"
+        self._goto_yaw_ref = 0.0
+        self.waypoint_target_gps = None
+        self.waypoint_target_odom = None
+
+        # Resolve Coordinate Waypoint Goals (Base-relative X,Y or Global/Relative dE,dN)
+        if motion_type in ["GOTO_BASE_XY", "GOTO_REL_ENU"]:
+            if self.active_sensor_mode == "GPS":
+                if self.current_gps_coords is None:
+                    return False, "Current GPS position is unknown!"
+                curr_lat, curr_lon = self.current_gps_coords
+                if motion_type == "GOTO_BASE_XY":
+                    if self.base_gps_coords is None:
+                        return False, "RTK Base Station (0, 0) coordinate not yet received on /gps/base_fix!"
+                    t_lat, t_lon = gps_enu_to_latlon(
+                        self.base_gps_coords[0], self.base_gps_coords[1],
+                        float(dist_m), float(yaw_rad),
+                    )
+                    self.waypoint_target_gps = (t_lat, t_lon)
+                    rem_e, rem_n = gps_enu_delta_m(curr_lat, curr_lon, t_lat, t_lon)
+                else:  # GOTO_REL_ENU (dEast_m, dNorth_m computed from 64-bit Global Lat/Lon)
+                    rem_e, rem_n = float(dist_m), float(yaw_rad)
+                    t_lat, t_lon = gps_enu_to_latlon(curr_lat, curr_lon, rem_e, rem_n)
+                    self.waypoint_target_gps = (t_lat, t_lon)
+            else:  # ODOM mode
+                if self.current_odom_pos is None:
+                    return False, "Current LiDAR /odom position is unknown!"
+                curr_x, curr_y = self.current_odom_pos
+                if motion_type == "GOTO_BASE_XY":
+                    self.waypoint_target_odom = (float(dist_m), float(yaw_rad))
+                    rem_e = float(dist_m) - curr_x
+                    rem_n = float(yaw_rad) - curr_y
+                else:
+                    rem_e, rem_n = float(dist_m), float(yaw_rad)
+                    self.waypoint_target_odom = (curr_x + rem_e, curr_y + rem_n)
+
+            wp_dist = math.hypot(rem_e, rem_n)
+            desired_enu_yaw = math.atan2(rem_n, rem_e)
+            turn_delta = shortest_angular_diff_rad(desired_enu_yaw, self._get_global_enu_yaw_rad())
+            motion_type = "GOTO"
+            dist_m = wp_dist
+            yaw_rad = turn_delta
+
+        self.active_motion_type = motion_type
+        self.target_dist_m = float(dist_m)
+        self.target_yaw_rad = float(yaw_rad)
 
         # Lock IMU Heading Baseline
         self.start_unrolled_yaw = self.unrolled_yaw_rad
+        self._rtk_course_anchor_gps = self.current_gps_coords
+        self._rtk_course_anchor_yaw = 0.0
 
         # Lock 2D Position & Path Distance Baselines
         self.chord_dist_m = 0.0
@@ -811,6 +1008,18 @@ class PrimitiveMotionController(Node):
             self.profiler.start_rotate(yaw_rad, max_w=self.current_max_w)
         elif motion_type == "ARC":
             self.profiler.start_arc(dist_m, yaw_rad, max_v=self.current_max_v, max_w=self.current_max_w)
+        elif motion_type == "GOTO":
+            if abs(dist_m) <= self.distance_tolerance_m:
+                self._goto_phase = "DRIVE"
+                self.profiler.start_straight(0.0, max_v=self.current_max_v)
+            elif abs(yaw_rad) > self.yaw_tolerance_rad * 1.5:
+                self._goto_phase = "ALIGN"
+                self.profiler.start_rotate(yaw_rad, max_w=self.current_max_w)
+            else:
+                self._goto_phase = "DRIVE"
+                self._goto_yaw_ref = yaw_rad
+                self.target_yaw_rad = 0.0
+                self.profiler.start_straight(dist_m, max_v=self.current_max_v)
 
         self._set_state(
             ControllerState.EXECUTING,
@@ -855,7 +1064,7 @@ class PrimitiveMotionController(Node):
         if (
             self.distance_source == 'auto'
             and self.active_sensor_mode == "GPS"
-            and self.active_motion_type in ["STRAIGHT", "ARC"]
+            and self.active_motion_type in ["STRAIGHT", "ARC", "GOTO"]
             and (not self.gps_is_rtk_fix or (now - self.last_gps_time) > 2.0)
             and self.current_odom_pos is not None
             and (now - self.last_odom_time) < 1.5
@@ -884,7 +1093,10 @@ class PrimitiveMotionController(Node):
         # (Strictly bounded to a single 1s GPS interval; resets on every /fix)
         if (
             self.active_sensor_mode == "GPS"
-            and self.active_motion_type in ["STRAIGHT", "ARC"]
+            and (
+                self.active_motion_type in ["STRAIGHT", "ARC"]
+                or (self.active_motion_type == "GOTO" and self._goto_phase == "DRIVE")
+            )
             and self._gps_stop_wait_start is None
             and (now - self.last_gps_time) <= 1.05
             and abs(self.last_cmd_v) > 0.01
@@ -932,8 +1144,11 @@ class PrimitiveMotionController(Node):
         yaw_error_to_target = self.target_yaw_rad - actual_yaw
 
         is_near_target = (
-            (self.active_motion_type == "ROTATE" and abs(yaw_error_to_target) <= math.radians(4.0))
-            or (self.active_motion_type in ["STRAIGHT", "ARC"] and dist_remaining <= 0.20)
+            (
+                (self.active_motion_type == "ROTATE" or (self.active_motion_type == "GOTO" and self._goto_phase == "ALIGN"))
+                and abs(yaw_error_to_target) <= math.radians(4.0)
+            )
+            or (self.active_motion_type in ["STRAIGHT", "ARC", "GOTO"] and dist_remaining <= 0.20)
         )
 
         if is_commanding_movement and not is_near_target and (now - self.last_moved_time > self.stuck_detect_time_s):
@@ -964,9 +1179,9 @@ class PrimitiveMotionController(Node):
             self.step_status_pub.publish(step_msg)
 
         # ----------------------------------------------------------------------
-        # MODE A: ROTATE IN PLACE (Pure IMU Closed-Loop Angle Control)
+        # MODE A: ROTATE IN PLACE (or GOTO Initial/Mid Alignment Phase)
         # ----------------------------------------------------------------------
-        if self.active_motion_type == "ROTATE":
+        if self.active_motion_type == "ROTATE" or (self.active_motion_type == "GOTO" and self._goto_phase == "ALIGN"):
             # Deadband hysteresis: once settling has started within yaw_tolerance_rad,
             # stay in settle mode unless overshoot exceeds 2x yaw_tolerance_rad.
             in_settle_hysteresis = (
@@ -979,11 +1194,41 @@ class PrimitiveMotionController(Node):
                     self.turn_settle_start = now
                 is_stationary = abs(self.current_yaw_rate) < 0.08
                 if (now - self.turn_settle_start) >= self.turn_settle_time_s and is_stationary:
-                    self._set_state(ControllerState.COMPLETED, "Completed")
-                    self.get_logger().info(
-                        f"[ROTATE COMPLETED] Target: {math.degrees(self.target_yaw_rad):+.1f}°, "
-                        f"Actual: {math.degrees(actual_yaw):+.1f}° (Err: {math.degrees(yaw_error_to_target):+.2f}°)"
-                    )
+                    if self.active_motion_type == "GOTO":
+                        # Transition from ALIGN phase into DRIVE phase toward the waypoint
+                        self._goto_phase = "DRIVE"
+                        self.turn_settle_start = None
+                        self.start_unrolled_yaw = self.unrolled_yaw_rad
+                        self._goto_yaw_ref = 0.0
+                        self.target_yaw_rad = 0.0
+                        self.yaw_integral = 0.0
+                        self.chord_dist_m = 0.0
+                        self._gps_interfix_dist_m = 0.0
+                        self._prev_gps_dist_m = 0.0
+                        self._prev_gps_fix_time = now
+                        self._cmd_v_accum = 0.0
+                        self.start_gps_coords = self.current_gps_coords
+                        self.last_gps_accum_coords = self.current_gps_coords
+                        self.start_odom_pos = self.current_odom_pos
+                        self.last_odom_accum_pos = self.current_odom_pos
+                        self._rtk_course_anchor_gps = self.current_gps_coords
+                        self._rtk_course_anchor_yaw = 0.0
+                        if self.active_sensor_mode == "GPS" and self.waypoint_target_gps and self.current_gps_coords:
+                            re, rn = gps_enu_delta_m(
+                                self.current_gps_coords[0], self.current_gps_coords[1],
+                                self.waypoint_target_gps[0], self.waypoint_target_gps[1],
+                            )
+                            self.target_dist_m = math.hypot(re, rn)
+                        self.profiler.start_straight(self.target_dist_m, max_v=self.current_max_v)
+                        self.get_logger().info(
+                            f"[GOTO ALIGNED] Heading aligned -> Driving {self.target_dist_m:.2f}m to waypoint."
+                        )
+                    else:
+                        self._set_state(ControllerState.COMPLETED, "Completed")
+                        self.get_logger().info(
+                            f"[ROTATE COMPLETED] Target: {math.degrees(self.target_yaw_rad):+.1f}°, "
+                            f"Actual: {math.degrees(actual_yaw):+.1f}° (Err: {math.degrees(yaw_error_to_target):+.2f}°)"
+                        )
                 return
 
             self.turn_settle_start = None
@@ -1044,7 +1289,10 @@ class PrimitiveMotionController(Node):
 
         # 50 Hz Closed-Loop IMU Heading & Curvature Controller
         # For STRAIGHT: yaw_ref = 0.0 (locks initial heading).
+        # For GOTO:     yaw_ref = self._goto_yaw_ref (continuously homes onto waypoint).
         # For ARC:      yaw_ref = (s / |X|) * Y (tracks exact geometric arc curvature).
+        if self.active_motion_type == "GOTO":
+            yaw_ref = self._goto_yaw_ref
         yaw_error = yaw_ref - actual_yaw
         self.yaw_integral = max(-0.8, min(0.8, self.yaw_integral + yaw_error * dt))
 
