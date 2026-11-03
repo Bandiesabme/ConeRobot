@@ -13,6 +13,7 @@ def launch_setup(context, *args, **kwargs):
     ydlidar_launch_file = os.path.join(pkg_share, 'launch', 'ydlidar.launch.py')
 
     robot_type_val = LaunchConfiguration('robot_type').perform(context).lower()
+    distance_source_override = LaunchConfiguration('distance_source').perform(context).lower().strip()
     launch_gps_val = LaunchConfiguration('launch_gps').perform(context).lower() == 'true'
     launch_lidar_val = LaunchConfiguration('launch_lidar').perform(context).lower() == 'true'
     launch_imu_val = LaunchConfiguration('launch_imu').perform(context).lower() == 'true'
@@ -25,19 +26,24 @@ def launch_setup(context, *args, **kwargs):
     if robot_type_val == 'gps':
         enable_gps = True
         enable_lidar = False
-        motion_extra_params = [{'distance_source': 'gps'}]
+        resolved_dist_source = 'gps'
     elif robot_type_val == 'lidar':
         enable_gps = False
         enable_lidar = True
-        motion_extra_params = [{'distance_source': 'odom'}]
-    elif robot_type_val == 'all':
+        resolved_dist_source = 'odom'
+    elif robot_type_val in ['all', 'both']:
         enable_gps = True
         enable_lidar = True
-        motion_extra_params = []
+        resolved_dist_source = 'auto'
     else:  # Custom / manual flags
         enable_gps = launch_gps_val
         enable_lidar = launch_lidar_val
-        motion_extra_params = []
+        resolved_dist_source = ''
+
+    if distance_source_override in ['auto', 'gps', 'odom']:
+        resolved_dist_source = distance_source_override
+
+    motion_extra_params = [{'distance_source': resolved_dist_source}] if resolved_dist_source else []
 
     nodes_to_launch = []
 
@@ -106,12 +112,20 @@ def launch_setup(context, *args, **kwargs):
 
     # 5. YDLIDAR T-mini Plus Driver & 2D Laser Odometry
     if enable_lidar:
-        if os.path.exists(ydlidar_launch_file):
-            nodes_to_launch.append(
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(ydlidar_launch_file)
+        try:
+            get_package_share_directory('ydlidar_ros2_driver')
+            if os.path.exists(ydlidar_launch_file):
+                nodes_to_launch.append(
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(ydlidar_launch_file)
+                    )
                 )
-            )
+        except PackageNotFoundError:
+            print("\n" + "=" * 75)
+            print("  ⚠️  WARNING: 'ydlidar_ros2_driver' is NOT installed/built in workspace!")
+            print("  Skipping YDLIDAR node launch (GPS/IMU nodes will continue normally).")
+            print("=" * 75 + "\n")
+
         # 2D Laser Odometry Node (converts /scan -> /odom) if rf2o_laser_odometry is installed
         try:
             get_package_share_directory('rf2o_laser_odometry')
@@ -166,8 +180,13 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'robot_type',
-            default_value='gps',
-            description='Robot hardware preset: "gps" (IMU+GPS), "lidar" (IMU+LiDAR), "all" (IMU+GPS+LiDAR), or "custom"'
+            default_value='all',
+            description='Robot hardware preset: "all"/"both" (IMU+GPS+LiDAR with auto fallback), "gps" (IMU+GPS), "lidar" (IMU+LiDAR), or "custom"'
+        ),
+        DeclareLaunchArgument(
+            'distance_source',
+            default_value='',
+            description='Optional override for motion controller distance_source: "auto", "gps", or "odom"'
         ),
         DeclareLaunchArgument(
             'launch_lidar',

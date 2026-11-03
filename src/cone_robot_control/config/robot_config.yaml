@@ -61,9 +61,13 @@ primitive_motion_controller:
     control_rate_hz: 50.0             # Fast inner control loop (synced with 50 Hz IMU)
     feedback_rate_hz: 10.0            # Action feedback publication rate
 
-    # --- SINGLE ROBOT TYPE SWITCH: "gps" (GPS Robot) or "odom" (LiDAR Robot) ---
-    distance_source: "gps"            # Change ONLY this to "odom" for the LiDAR robot!
-    gps_require_rtk: false            # false = accepts RTK Fix/Float/DGPS/3D Fix; true = strict RTK only
+    # --- DISTANCE SOURCE MODE: "auto" (GPS+LiDAR Robot), "gps" (GPS-only), or "odom" (LiDAR-only) ---
+    # - "auto": Prefers RTK GPS (/fix) outdoors when RTK FIX is locked; automatically falls back
+    #           to LiDAR Odometry (/odom) when indoors or if GPS degrades (even mid-maneuver!).
+    # - "gps" : Strictly uses GPS (/fix).
+    # - "odom": Strictly uses LiDAR Odometry (/odom).
+    distance_source: "auto"
+    gps_require_rtk: false            # false = accepts RTK Fix/Float/DGPS/3D Fix when in "gps" mode; true = strict RTK only
 
     # --- Velocity Limits & State-Based Braking Profiles ---
     default_linear_speed: 0.22        # Cruising linear speed (m/s)

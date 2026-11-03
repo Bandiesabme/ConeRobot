@@ -150,9 +150,9 @@ class PrimitiveMotionController(Node):
         self.declare_parameter('distance_tolerance_m', 0.03)    # Target distance tolerance (3 cm)
 
         # Stuck Watchdog & Pluggable Distance Sensor Configuration
-        # SINGLE SWITCH FOR ROBOT TYPE: 'gps' (GPS Robot) or 'odom' (LiDAR Robot) or 'auto'
-        self.declare_parameter('distance_source', 'gps')
-        self.declare_parameter('gps_require_rtk', False)        # False = allow 3D/DGPS/RTK; True = require RTK Fix/Float
+        # DISTANCE SOURCE: 'auto' (RTK GPS outdoors -> LiDAR Odom fallback), 'gps', or 'odom'
+        self.declare_parameter('distance_source', 'auto')
+        self.declare_parameter('gps_require_rtk', False)        # False = allow 3D/DGPS/RTK in 'gps' mode; True = require RTK Fix/Float
         self.declare_parameter('stuck_detect_time_s', 2.5)      # Stall abort timeout when zero motion occurs (s)
 
         # Read Parameters
@@ -220,6 +220,9 @@ class PrimitiveMotionController(Node):
         self.fix_sub = self.create_subscription(
             NavSatFix, '/fix', self._fix_callback, 10, callback_group=self.cb_group
         )
+        self.gps_status_sub = self.create_subscription(
+            String, '/gps/status', self._gps_status_callback, 10, callback_group=self.cb_group
+        )
         self.battery_sub = self.create_subscription(
             BatteryState, '/battery_state', self._battery_callback, 10, callback_group=self.cb_group
         )
@@ -265,17 +268,23 @@ class PrimitiveMotionController(Node):
         self.chord_dist_m: float = 0.0          # Direct Euclidean distance from start (m)
         self.accumulated_path_dist_m: float = 0.0  # Incremental path length along curve/line (m)
 
-        # Raw Odom Sensor State
+        # Raw Odom Sensor State & Last-RTK-Fix Handover Snapshot
         self.current_odom_pos: Optional[Tuple[float, float]] = None
         self.start_odom_pos: Optional[Tuple[float, float]] = None
         self.last_odom_accum_pos: Optional[Tuple[float, float]] = None
         self.last_odom_time: float = 0.0
+        self._odom_handover_dist_m: float = 0.0
+        self._odom_pos_at_last_rtk_fix: Optional[Tuple[float, float]] = None
+        self._dist_at_last_rtk_fix: float = 0.0
+        self._accum_dist_at_last_rtk_fix: float = 0.0
+        self._odom_accum_since_last_rtk_fix: float = 0.0
 
         # Raw GPS Sensor State & 1 Hz Sub-Second Inter-Fix Predictor
         self.current_gps_coords: Optional[Tuple[float, float]] = None
         self.start_gps_coords: Optional[Tuple[float, float]] = None
         self.last_gps_accum_coords: Optional[Tuple[float, float]] = None
         self.gps_status: int = NavSatStatus.STATUS_NO_FIX
+        self.gps_is_rtk_fix: bool = False
         self.last_gps_time: float = 0.0
         self._gps_interfix_dist_m: float = 0.0
         self._gps_speed_scale: float = 1.32
@@ -345,9 +354,9 @@ class PrimitiveMotionController(Node):
         self.current_odom_pos = (curr_x, curr_y)
         self.last_odom_time = time.time()
 
-        if self.state == ControllerState.EXECUTING and self.active_sensor_mode == "ODOM":
-            if self.start_odom_pos is not None:
-                self.chord_dist_m = math.hypot(
+        if self.state == ControllerState.EXECUTING:
+            if self.active_sensor_mode == "ODOM" and self.start_odom_pos is not None:
+                self.chord_dist_m = self._odom_handover_dist_m + math.hypot(
                     curr_x - self.start_odom_pos[0],
                     curr_y - self.start_odom_pos[1],
                 )
@@ -359,20 +368,47 @@ class PrimitiveMotionController(Node):
                 if step_m > 0.50:
                     self.last_odom_accum_pos = (curr_x, curr_y)
                 elif step_m >= 0.004 and abs(self.last_cmd_v) > 0.01:
-                    self.accumulated_path_dist_m += step_m
+                    if self.active_sensor_mode == "ODOM":
+                        self.accumulated_path_dist_m += step_m
+                    else:
+                        self._odom_accum_since_last_rtk_fix += step_m
                     self.last_odom_accum_pos = (curr_x, curr_y)
+
+    def _gps_status_callback(self, msg: String) -> None:
+        text = msg.data
+        if "Fix:" in text:
+            fix_label = text.split("|")[0].replace("Fix:", "").strip().upper()
+            self.gps_is_rtk_fix = (fix_label == "RTK FIX")
 
     def _fix_callback(self, msg: NavSatFix) -> None:
         if math.isnan(msg.latitude) or math.isnan(msg.longitude):
             return
+        self.gps_status = int(msg.status.status)
+
+        # Detect RTK FIX vs RTK FLOAT from covariance when /gps/status has not yet arrived
+        cov0 = float(msg.position_covariance[0]) if len(msg.position_covariance) > 0 else 999.0
+        if self.gps_status == NavSatStatus.STATUS_GBAS_FIX and 0.0 < cov0 <= 0.008:
+            self.gps_is_rtk_fix = True
+        elif self.gps_status != NavSatStatus.STATUS_GBAS_FIX or cov0 > 0.01:
+            self.gps_is_rtk_fix = False
+
+        # Ignore invalid / lost fix packets (STATUS_NO_FIX or (0.0, 0.0) coordinates)
         curr_lat = float(msg.latitude)
         curr_lon = float(msg.longitude)
+        if self.gps_status == NavSatStatus.STATUS_NO_FIX or (abs(curr_lat) < 1e-4 and abs(curr_lon) < 1e-4):
+            return
+
         now = time.time()
         self.current_gps_coords = (curr_lat, curr_lon)
-        self.gps_status = int(msg.status.status)
         self.last_gps_time = now
 
         if self.state == ControllerState.EXECUTING and self.active_sensor_mode == "GPS":
+            # In 'auto' mode, if GPS degrades from RTK FIX to RTK FLOAT while LiDAR /odom
+            # is online, reject the noisy RTK FLOAT coordinate so handover stays anchored
+            # to the exact last RTK FIX position + corresponding LiDAR scan pose.
+            odom_online = (self.current_odom_pos is not None) and ((now - self.last_odom_time) < 1.5)
+            if self.distance_source == 'auto' and not self.gps_is_rtk_fix and odom_online:
+                return
             if not self._is_gps_fix_acceptable():
                 return
             if self.start_gps_coords is not None:
@@ -402,6 +438,13 @@ class PrimitiveMotionController(Node):
                 self._prev_gps_fix_time = now
                 self._cmd_v_accum = 0.0
 
+                # Snapshot the LiDAR /odom pose at this exact valid RTK FIX so any future
+                # RTK FIX -> RTK FLOAT switch measures LiDAR odometry from this exact point.
+                if self.gps_is_rtk_fix:
+                    self._dist_at_last_rtk_fix = new_chord
+                    self._odom_pos_at_last_rtk_fix = self.current_odom_pos
+                    self._odom_accum_since_last_rtk_fix = 0.0
+
                 # Account for ~0.42s LC29H RTK computation + NMEA serial pipeline latency
                 # plus ~3.5 cm track spin-down lead while actively driving; reset to 0.0 when stopped.
                 if self._gps_stop_wait_start is None and abs(self.last_cmd_v) > 0.01:
@@ -430,6 +473,8 @@ class PrimitiveMotionController(Node):
                 elif step_m >= 0.012 and abs(self.last_cmd_v) > 0.01:
                     self.accumulated_path_dist_m += step_m
                     self.last_gps_accum_coords = (curr_lat, curr_lon)
+                if self.gps_is_rtk_fix:
+                    self._accum_dist_at_last_rtk_fix = self.accumulated_path_dist_m
 
     def _battery_callback(self, msg: BatteryState) -> None:
         if msg.voltage > 5.0:
@@ -666,8 +711,13 @@ class PrimitiveMotionController(Node):
             and (now - self.last_gps_time < 2.0)
             and self._is_gps_fix_acceptable()
         )
+        gps_rtk_fix_fresh = (
+            (self.current_gps_coords is not None)
+            and (now - self.last_gps_time < 2.0)
+            and self.gps_is_rtk_fix
+        )
 
-        # Explicit GPS mode (GPS Robot)
+        # Explicit GPS mode (GPS-only preset)
         if self.distance_source == 'gps':
             if not gps_fresh:
                 req_str = "RTK Fix/Float" if self.gps_require_rtk else "valid 3D/RTK Fix"
@@ -675,20 +725,26 @@ class PrimitiveMotionController(Node):
             self.active_sensor_mode = "GPS"
             return True, "GPS (/fix)"
 
-        # Explicit ODOM mode (LiDAR Robot)
+        # Explicit ODOM mode (LiDAR-only preset)
         if self.distance_source == 'odom':
             if not odom_fresh:
                 return False, "LiDAR Odometry (/odom) is not publishing!"
             self.active_sensor_mode = "ODOM"
             return True, "ODOM (/odom)"
 
-        # Auto mode: prefer GPS if fresh, else ODOM
-        if gps_fresh:
+        # Auto-Priority mode (Dual GPS + LiDAR Robot):
+        # 1. Prefer RTK GPS outdoors when RTK FIX is locked
+        # 2. Automatically fall back to LiDAR /odom if GPS degrades or indoors
+        # 3. If LiDAR /odom is offline, use GPS if any acceptable fix is present
+        if gps_rtk_fix_fresh:
             self.active_sensor_mode = "GPS"
-            return True, "GPS (/fix)"
+            return True, "GPS (RTK FIX - Auto Priority)"
         if odom_fresh:
             self.active_sensor_mode = "ODOM"
-            return True, "ODOM (/odom)"
+            return True, "ODOM (LiDAR Auto-Fallback)"
+        if gps_fresh:
+            self.active_sensor_mode = "GPS"
+            return True, "GPS (Fallback - Odom Offline)"
 
         return False, "Neither GPS (/fix) nor LiDAR Odometry (/odom) is available! Refusing time-based drive."
 
@@ -727,6 +783,11 @@ class PrimitiveMotionController(Node):
         # Lock 2D Position & Path Distance Baselines
         self.chord_dist_m = 0.0
         self.accumulated_path_dist_m = 0.0
+        self._odom_handover_dist_m = 0.0
+        self._odom_pos_at_last_rtk_fix = self.current_odom_pos
+        self._dist_at_last_rtk_fix = 0.0
+        self._accum_dist_at_last_rtk_fix = 0.0
+        self._odom_accum_since_last_rtk_fix = 0.0
         self._gps_interfix_dist_m = 0.0
         self._gps_speed_scale = 1.32
         self._prev_gps_dist_m = 0.0
@@ -787,6 +848,37 @@ class PrimitiveMotionController(Node):
 
         now = time.time()
         dt = 1.0 / self.control_rate_hz
+
+        # Seamless mid-maneuver automatic fallback from RTK GPS to LiDAR /odom in 'auto' mode
+        # if RTK FIX degrades (e.g. to RTK FLOAT) or GPS times out while LiDAR odometry is online.
+        # Anchors directly to the LiDAR scan pose captured at the LAST valid RTK FIX!
+        if (
+            self.distance_source == 'auto'
+            and self.active_sensor_mode == "GPS"
+            and self.active_motion_type in ["STRAIGHT", "ARC"]
+            and (not self.gps_is_rtk_fix or (now - self.last_gps_time) > 2.0)
+            and self.current_odom_pos is not None
+            and (now - self.last_odom_time) < 1.5
+        ):
+            anchor_odom = self._odom_pos_at_last_rtk_fix or self.start_odom_pos or self.current_odom_pos
+            self._odom_handover_dist_m = self._dist_at_last_rtk_fix
+            self.start_odom_pos = anchor_odom
+            odom_delta_since_fix = math.hypot(
+                self.current_odom_pos[0] - anchor_odom[0],
+                self.current_odom_pos[1] - anchor_odom[1],
+            )
+            self.chord_dist_m = self._odom_handover_dist_m + odom_delta_since_fix
+            self.accumulated_path_dist_m = self._accum_dist_at_last_rtk_fix + max(
+                self._odom_accum_since_last_rtk_fix, odom_delta_since_fix
+            )
+            self._gps_interfix_dist_m = 0.0
+            self._gps_stop_wait_start = None
+            self.active_sensor_mode = "ODOM"
+            self.get_logger().warn(
+                f"[AUTO FALLBACK] GPS RTK Fix degraded -> Anchored to last RTK FIX "
+                f"({self._dist_at_last_rtk_fix:.2f}m) + LiDAR delta since fix "
+                f"(+{odom_delta_since_fix:.2f}m = {self.chord_dist_m:.2f}m)!"
+            )
 
         # Update sub-second inter-fix displacement between 1 Hz RTK GPS updates
         # (Strictly bounded to a single 1s GPS interval; resets on every /fix)
@@ -1028,12 +1120,33 @@ class PrimitiveMotionController(Node):
                     if val:
                         temp_c = round(float(val) / 1000.0, 1)
 
+            now = time.time()
+            if self.state != ControllerState.EXECUTING:
+                odom_ok = (self.current_odom_pos is not None) and (now - self.last_odom_time < 1.5)
+                rtk_ok = (self.current_gps_coords is not None) and (now - self.last_gps_time < 2.0) and self.gps_is_rtk_fix
+                gps_ok = (self.current_gps_coords is not None) and (now - self.last_gps_time < 2.0) and self._is_gps_fix_acceptable()
+                if self.distance_source == 'gps':
+                    sensor_label = "GPS" if gps_ok else "GPS (WAIT)"
+                elif self.distance_source == 'odom':
+                    sensor_label = "ODOM" if odom_ok else "ODOM (WAIT)"
+                else:
+                    if rtk_ok:
+                        sensor_label = "AUTO: GPS (RTK)"
+                    elif odom_ok:
+                        sensor_label = "AUTO: ODOM"
+                    elif gps_ok:
+                        sensor_label = "AUTO: GPS"
+                    else:
+                        sensor_label = "AUTO (WAIT)"
+            else:
+                sensor_label = self.active_sensor_mode
+
             diag = {
                 "cpu_temp": f"{temp_c:.1f} °C" if temp_c else "N/A",
                 "battery_v": f"{self.battery_voltage:.2f} V",
                 "state": self.state,
                 "motion_type": self.active_motion_type,
-                "sensor_mode": self.active_sensor_mode,
+                "sensor_mode": sensor_label,
             }
             msg = String()
             msg.data = json.dumps(diag)
