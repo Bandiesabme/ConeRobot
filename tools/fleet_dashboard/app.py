@@ -107,7 +107,17 @@ def get_primary_subnet():
         parts = local_ip.split(".")
         return f"{parts[0]}.{parts[1]}.{parts[2]}"
     except Exception:
-        return "192.168.1"
+        pass
+    # Fallback to local network interfaces if offline (no internet)
+    try:
+        hostname = socket.gethostname()
+        for ip in socket.gethostbyname_ex(hostname)[2]:
+            if not ip.startswith("127.") and not ip.startswith("169.254.") and "." in ip:
+                parts = ip.split(".")
+                return f"{parts[0]}.{parts[1]}.{parts[2]}"
+    except Exception:
+        pass
+    return "192.168.1"
 
 def get_all_subnets():
     subnets = set()

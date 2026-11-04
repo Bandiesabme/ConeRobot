@@ -10,6 +10,19 @@ let activeRobotId = null;
 let activeRobotsList = {};
 // Note: activeWebSockets, reconnectTimers and realTelemetry are already declared globally in state.js
 
+// Cached DOM references & diffing helper to eliminate layout thrashing
+const domCache = {};
+function getDom(id) {
+  if (!domCache[id]) domCache[id] = document.getElementById(id);
+  return domCache[id];
+}
+function setDomText(id, text) {
+  const el = getDom(id);
+  if (el && el.textContent !== text) {
+    el.textContent = text;
+  }
+}
+
 // Per-robot breadcrumb trail history: { [id]: [{x, y}, ...] }
 const robotTrails = {};
 
@@ -296,7 +309,9 @@ async function fetchFleetList() {
       html = '<option value="">No online robots found (Click Scan Network)</option>';
     }
 
-    select.innerHTML = html;
+    if (select.innerHTML !== html) {
+      select.innerHTML = html;
+    }
 
     if (currentVal && robots[currentVal] && robots[currentVal].online) {
       select.value = currentVal;
@@ -547,46 +562,57 @@ function latLonToEnuMeters(lat, lon, refLat, refLon) {
 function updateTelemetryUI() {
   const signX = robotTelemetry.pos.x >= 0 ? '+' : '';
   const signY = robotTelemetry.pos.y >= 0 ? '+' : '';
-  document.getElementById('tel-base-pos').textContent = `X: ${signX}${robotTelemetry.pos.x.toFixed(2)}m, Y: ${signY}${robotTelemetry.pos.y.toFixed(2)}m`;
-  document.getElementById('tel-sensor-mode').textContent = robotTelemetry.sensorMode;
+  setDomText('tel-base-pos', `X: ${signX}${robotTelemetry.pos.x.toFixed(2)}m, Y: ${signY}${robotTelemetry.pos.y.toFixed(2)}m`);
+  setDomText('tel-sensor-mode', robotTelemetry.sensorMode);
 
-  const rtkEl = document.getElementById('tel-rtk-status');
-  rtkEl.textContent = `${robotTelemetry.rtkStatus} (${robotTelemetry.satCount} Sats)`;
-  if (robotTelemetry.rtkStatus.includes('FIX')) rtkEl.style.color = '#10b981';
-  else if (robotTelemetry.rtkStatus.includes('FLOAT')) rtkEl.style.color = '#f59e0b';
-  else rtkEl.style.color = '#ef4444';
+  const rtkEl = getDom('tel-rtk-status');
+  if (rtkEl) {
+    const rtkText = `${robotTelemetry.rtkStatus} (${robotTelemetry.satCount} Sats)`;
+    if (rtkEl.textContent !== rtkText) rtkEl.textContent = rtkText;
+    const targetColor = robotTelemetry.rtkStatus.includes('FIX') ? '#10b981' : (robotTelemetry.rtkStatus.includes('FLOAT') ? '#f59e0b' : '#ef4444');
+    if (rtkEl.style.color !== targetColor) rtkEl.style.color = targetColor;
+  }
 
-  document.getElementById('tel-diff-age').textContent = robotTelemetry.diffAge;
-  document.getElementById('tel-heading').textContent = `${robotTelemetry.headingDeg.toFixed(1)}° ENU`;
-  document.getElementById('tel-battery').textContent = robotTelemetry.battery ? `${robotTelemetry.battery} V` : '-- V';
+  setDomText('tel-diff-age', robotTelemetry.diffAge);
+  setDomText('tel-heading', `${robotTelemetry.headingDeg.toFixed(1)}° ENU`);
+  setDomText('tel-battery', robotTelemetry.battery ? `${robotTelemetry.battery} V` : '-- V');
 
-  const stateBadge = document.getElementById('telemetry-state-badge');
-  stateBadge.textContent = robotTelemetry.state;
-  if (robotTelemetry.state === 'IDLE') stateBadge.className = 'state-badge idle';
-  else if (robotTelemetry.state === 'EXECUTING') stateBadge.className = 'state-badge executing';
-  else stateBadge.className = 'state-badge error';
+  const stateBadge = getDom('telemetry-state-badge');
+  if (stateBadge) {
+    if (stateBadge.textContent !== robotTelemetry.state) stateBadge.textContent = robotTelemetry.state;
+    const cls = robotTelemetry.state === 'IDLE' ? 'state-badge idle' : (robotTelemetry.state === 'EXECUTING' ? 'state-badge executing' : 'state-badge error');
+    if (stateBadge.className !== cls) stateBadge.className = cls;
+  }
 }
 
 function updateBaseStationUI() {
   if (baseStationGPS.lat !== null && baseStationGPS.lon !== null) {
-    document.getElementById('header-base-coords').textContent = `${baseStationGPS.lat.toFixed(6)}°, ${baseStationGPS.lon.toFixed(6)}°`;
-    document.getElementById('base-input-lat').value = baseStationGPS.lat.toFixed(7);
-    document.getElementById('base-input-lon').value = baseStationGPS.lon.toFixed(7);
-    document.getElementById('base-ref-source').textContent = baseStationGPS.source;
-    document.getElementById('base-lock-badge').className = 'state-badge idle';
-    document.getElementById('base-lock-badge').textContent = 'Locked (0, 0)';
+    setDomText('header-base-coords', `${baseStationGPS.lat.toFixed(6)}°, ${baseStationGPS.lon.toFixed(6)}°`);
+    const inLat = getDom('base-input-lat');
+    const inLon = getDom('base-input-lon');
+    if (inLat && document.activeElement !== inLat) inLat.value = baseStationGPS.lat.toFixed(7);
+    if (inLon && document.activeElement !== inLon) inLon.value = baseStationGPS.lon.toFixed(7);
+    setDomText('base-ref-source', baseStationGPS.source);
+    const badge = getDom('base-lock-badge');
+    if (badge) {
+      if (badge.className !== 'state-badge idle') badge.className = 'state-badge idle';
+      if (badge.textContent !== 'Locked (0, 0)') badge.textContent = 'Locked (0, 0)';
+    }
   } else {
-    document.getElementById('header-base-coords').textContent = 'Not Set (Click Fetch :8080)';
-    document.getElementById('base-lock-badge').className = 'state-badge error';
-    document.getElementById('base-lock-badge').textContent = 'Unset';
+    setDomText('header-base-coords', 'Not Set (Click Fetch :8080)');
+    const badge = getDom('base-lock-badge');
+    if (badge) {
+      if (badge.className !== 'state-badge error') badge.className = 'state-badge error';
+      if (badge.textContent !== 'Unset') badge.textContent = 'Unset';
+    }
   }
 }
 
 function updateTargetMetrics() {
   if (!targetWaypoint.active) {
-    document.getElementById('metric-dist').textContent = '-- m';
-    document.getElementById('metric-bearing').textContent = '--°';
-    document.getElementById('header-active-target').textContent = 'None';
+    setDomText('metric-dist', '-- m');
+    setDomText('metric-bearing', '--°');
+    setDomText('header-active-target', 'None');
     return;
   }
 
@@ -597,9 +623,9 @@ function updateTargetMetrics() {
   let bearingRad = Math.atan2(dy, dx);
   let bearingDeg = (bearingRad * 180.0 / Math.PI + 360.0) % 360.0;
 
-  document.getElementById('metric-dist').textContent = `${dist.toFixed(2)} m`;
-  document.getElementById('metric-bearing').textContent = `${bearingDeg.toFixed(1)}°`;
-  document.getElementById('header-active-target').textContent = `(${targetWaypoint.x >= 0 ? '+' : ''}${targetWaypoint.x.toFixed(2)}m, ${targetWaypoint.y >= 0 ? '+' : ''}${targetWaypoint.y.toFixed(2)}m)`;
+  setDomText('metric-dist', `${dist.toFixed(2)} m`);
+  setDomText('metric-bearing', `${bearingDeg.toFixed(1)}°`);
+  setDomText('header-active-target', `(${targetWaypoint.x >= 0 ? '+' : ''}${targetWaypoint.x.toFixed(2)}m, ${targetWaypoint.y >= 0 ? '+' : ''}${targetWaypoint.y.toFixed(2)}m)`);
 }
 
 function logMission(msg, type = 'info') {
@@ -761,6 +787,11 @@ function applyManualCoordinates() {
 // 6. HIGH-PERFORMANCE 2D CANVAS CARTESIAN ENGINE
 // ==============================================================================
 let canvas, ctx;
+let cachedCanvasRect = null;
+
+function updateCanvasRect() {
+  if (canvas) cachedCanvasRect = canvas.getBoundingClientRect();
+}
 
 function initCanvas() {
   canvas = document.getElementById('waypoint-canvas');
@@ -773,6 +804,7 @@ function initCanvas() {
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
+    cachedCanvasRect = rect;
     const w = rect.width || canvas.parentElement?.clientWidth || (window.innerWidth - 420);
     const h = rect.height || canvas.parentElement?.clientHeight || (window.innerHeight - 100);
     canvas.width = Math.max(300, Math.floor(w)) * dpr;
@@ -780,18 +812,22 @@ function initCanvas() {
   }
 
   window.addEventListener('resize', resizeCanvas);
+  window.addEventListener('scroll', updateCanvasRect, true);
   resizeCanvas();
 
   // Mouse Interactivity
   canvas.addEventListener('mousedown', (e) => {
+    updateCanvasRect();
     viewState.isDragging = true;
     viewState.dragStartX = e.clientX;
     viewState.dragStartY = e.clientY;
     viewState.downTime = Date.now();
   });
 
+  let cursorRafPending = false;
+
   window.addEventListener('mousemove', (e) => {
-    const rect = canvas.getBoundingClientRect();
+    const rect = cachedCanvasRect || canvas.getBoundingClientRect();
     const screenX = e.clientX - rect.left;
     const screenY = e.clientY - rect.top;
     viewState.mouseScreenX = screenX;
@@ -810,19 +846,24 @@ function initCanvas() {
     viewState.mouseWorldX = world.x;
     viewState.mouseWorldY = world.y;
 
-    const distFromBase = Math.hypot(world.x, world.y);
-    const signX = world.x >= 0 ? '+' : '';
-    const signY = world.y >= 0 ? '+' : '';
-    document.getElementById('cursor-coord-text').textContent =
-      `X: ${signX}${world.x.toFixed(2)} m (${world.x >= 0 ? 'E' : 'W'}) | Y: ${signY}${world.y.toFixed(2)} m (${world.y >= 0 ? 'N' : 'S'})`;
-    document.getElementById('cursor-dist-text').textContent = `(Dist: ${distFromBase.toFixed(2)} m)`;
+    if (!cursorRafPending) {
+      cursorRafPending = true;
+      requestAnimationFrame(() => {
+        cursorRafPending = false;
+        const distFromBase = Math.hypot(viewState.mouseWorldX, viewState.mouseWorldY);
+        const signX = viewState.mouseWorldX >= 0 ? '+' : '';
+        const signY = viewState.mouseWorldY >= 0 ? '+' : '';
+        setDomText('cursor-coord-text', `X: ${signX}${viewState.mouseWorldX.toFixed(2)} m (${viewState.mouseWorldX >= 0 ? 'E' : 'W'}) | Y: ${signY}${viewState.mouseWorldY.toFixed(2)} m (${viewState.mouseWorldY >= 0 ? 'N' : 'S'})`);
+        setDomText('cursor-dist-text', `(Dist: ${distFromBase.toFixed(2)} m)`);
+      });
+    }
   });
 
   window.addEventListener('mouseup', (e) => {
     if (!viewState.isDragging) return;
     viewState.isDragging = false;
 
-    const rect = canvas.getBoundingClientRect();
+    const rect = cachedCanvasRect || canvas.getBoundingClientRect();
     if (
       e.clientX >= rect.left && e.clientX <= rect.right &&
       e.clientY >= rect.top && e.clientY <= rect.bottom
@@ -1082,36 +1123,46 @@ function drawGrid(width, height) {
   }
   ctx.stroke();
 
-  // 2. Major Lines with Numbers
+  // 2. Major Lines with Numbers (Batched)
   ctx.lineWidth = 1.2;
   ctx.strokeStyle = '#22304d';
+  ctx.beginPath();
+
+  const origin = worldToCanvas(0, 0);
+
+  for (let x = Math.floor(topLeft.x / majorStep) * majorStep; x <= endX; x += majorStep) {
+    if (Math.abs(x) < 0.001) continue;
+    const scrX = origin.x + x * scale;
+    ctx.moveTo(scrX, 0); ctx.lineTo(scrX, height);
+  }
+
+  for (let y = Math.floor(bottomRight.y / majorStep) * majorStep; y <= endY; y += majorStep) {
+    if (Math.abs(y) < 0.001) continue;
+    const scrY = origin.y - y * scale;
+    ctx.moveTo(0, scrY); ctx.lineTo(width, scrY);
+  }
+  ctx.stroke();
+
+  // Major Text Labels
   ctx.fillStyle = '#64748b';
   ctx.font = '10px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
 
+  const labelY = Math.max(16, Math.min(height - 24, origin.y + 6));
   for (let x = Math.floor(topLeft.x / majorStep) * majorStep; x <= endX; x += majorStep) {
     if (Math.abs(x) < 0.001) continue;
-    const scr = worldToCanvas(x, 0);
-    ctx.beginPath();
-    ctx.moveTo(scr.x, 0); ctx.lineTo(scr.x, height);
-    ctx.stroke();
-
-    const labelY = Math.max(16, Math.min(height - 24, worldToCanvas(0, 0).y + 6));
-    ctx.fillText(`${x > 0 ? '+' : ''}${x.toFixed(0)}m`, scr.x, labelY);
+    const scrX = origin.x + x * scale;
+    ctx.fillText(`${x > 0 ? '+' : ''}${x.toFixed(0)}m`, scrX, labelY);
   }
 
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
+  const labelX = Math.max(34, Math.min(width - 16, origin.x - 6));
   for (let y = Math.floor(bottomRight.y / majorStep) * majorStep; y <= endY; y += majorStep) {
     if (Math.abs(y) < 0.001) continue;
-    const scr = worldToCanvas(0, y);
-    ctx.beginPath();
-    ctx.moveTo(0, scr.y); ctx.lineTo(width, scr.y);
-    ctx.stroke();
-
-    const labelX = Math.max(34, Math.min(width - 16, worldToCanvas(0, 0).x - 6));
-    ctx.fillText(`${y > 0 ? '+' : ''}${y.toFixed(0)}m`, labelX, scr.y);
+    const scrY = origin.y - y * scale;
+    ctx.fillText(`${y > 0 ? '+' : ''}${y.toFixed(0)}m`, labelX, scrY);
   }
 }
 
@@ -1180,6 +1231,14 @@ function drawAllRobotLidarPoints() {
 
   const now = Date.now();
   const pointSize = Math.max(2.0, Math.min(4.5, 0.09 * viewState.scale));
+  const halfSize = pointSize / 2;
+
+  const dpr = window.devicePixelRatio || 1;
+  const cw = canvas.width / dpr;
+  const ch = canvas.height / dpr;
+  const originX = cw / 2 + viewState.panX;
+  const originY = ch / 2 + viewState.panY;
+  const scale = viewState.scale;
 
   for (let id = 1; id <= 13; id++) {
     const r = realTelemetry[id];
@@ -1208,6 +1267,8 @@ function drawAllRobotLidarPoints() {
       ptColor = palette[(id - 1) % palette.length];
     }
     ctx.fillStyle = ptColor;
+    ctx.beginPath();
+    let drawn = 0;
 
     for (let i = 0; i < len; i++) {
       const p = pts[i];
@@ -1218,30 +1279,42 @@ function drawAllRobotLidarPoints() {
       const gx = rx + (lx * cosYaw - ly * sinYaw);
       const gy = ry + (lx * sinYaw + ly * cosYaw);
 
-      const scr = worldToCanvas(gx, gy);
+      // Fast inline canvas projection without object allocations
+      const scrX = originX + gx * scale;
+      const scrY = originY - gy * scale;
 
-      if (scr.x < -10 || scr.x > canvas.width || scr.y < -10 || scr.y > canvas.height) {
+      if (scrX < -10 || scrX > cw + 10 || scrY < -10 || scrY > ch + 10) {
         continue;
       }
 
-      ctx.fillRect(scr.x - pointSize / 2, scr.y - pointSize / 2, pointSize, pointSize);
+      ctx.rect(scrX - halfSize, scrY - halfSize, pointSize, pointSize);
+      drawn++;
+    }
+
+    if (drawn > 0) {
+      ctx.fill();
     }
   }
 }
 
 function drawAllRobotTrails() {
+  const dpr = window.devicePixelRatio || 1;
+  const cw = canvas.width / dpr;
+  const ch = canvas.height / dpr;
+  const originX = cw / 2 + viewState.panX;
+  const originY = ch / 2 + viewState.panY;
+  const scale = viewState.scale;
+
   for (let id = 1; id <= 13; id++) {
     const trail = robotTrails[id];
     if (!trail || trail.length < 2) continue;
 
     const isSelected = (id === activeRobotId);
     ctx.beginPath();
-    const start = worldToCanvas(trail[0].x, trail[0].y);
-    ctx.moveTo(start.x, start.y);
+    ctx.moveTo(originX + trail[0].x * scale, originY - trail[0].y * scale);
 
     for (let i = 1; i < trail.length; i++) {
-      const pt = worldToCanvas(trail[i].x, trail[i].y);
-      ctx.lineTo(pt.x, pt.y);
+      ctx.lineTo(originX + trail[i].x * scale, originY - trail[i].y * scale);
     }
 
     ctx.strokeStyle = isSelected ? 'rgba(56, 189, 248, 0.45)' : 'rgba(148, 163, 184, 0.2)';
