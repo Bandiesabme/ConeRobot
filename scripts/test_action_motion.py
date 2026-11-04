@@ -23,6 +23,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 from sensor_msgs.msg import NavSatFix
 
@@ -62,10 +63,11 @@ class SafeActionRunner(Node):
         self._goal_handle = None
         self._is_done = False
 
-        # Real-time GPS RTK Fix, Base Station (0,0), Position & /cmd_vel Monitor
+        # Real-time GPS RTK Fix, Base Station (0,0), LiDAR /odom, Position & /cmd_vel Monitor
         self.gps_status_sub = self.create_subscription(String, '/gps/status', self._gps_status_cb, 10)
         self.gps_fix_sub = self.create_subscription(NavSatFix, '/fix', self._fix_cb, 10)
         self.base_fix_sub = self.create_subscription(NavSatFix, '/gps/base_fix', self._base_fix_cb, 10)
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
         self.cmd_vel_sub = self.create_subscription(Twist, '/cmd_vel', self._cmd_vel_cb, 20)
         self.current_fix_quality = "UNKNOWN"
         self.num_sats = 0
@@ -77,6 +79,9 @@ class SafeActionRunner(Node):
         self.current_pos = None
         self.base_pos = None
         self.start_pos = None
+        self.current_odom_pos = None
+        self.start_odom_pos = None
+        self._last_odom_log_time = 0.0
         self.waypoint_target_gps = None
         self.waypoint_target_base_xy = None
         self.target_distance = 0.0
@@ -119,6 +124,48 @@ class SafeActionRunner(Node):
     def _base_fix_cb(self, msg: NavSatFix):
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
             self.base_pos = (msg.latitude, msg.longitude)
+
+    def _odom_cb(self, msg: Odometry):
+        ox = float(msg.pose.pose.position.x)
+        oy = float(msg.pose.pose.position.y)
+        now = time.time()
+        self.current_odom_pos = (ox, oy)
+        if self.motion_start_time and self.start_odom_pos is None:
+            self.start_odom_pos = (ox, oy)
+            if self.current_pos is None:
+                self._prev_fix_time = now
+                self._prev_fix_dist = 0.0
+                self._last_odom_log_time = now
+
+        # On a LiDAR-only robot (no GPS /fix), record 1 Hz telemetry rows from LiDAR /odom
+        if self.motion_start_time and self.current_pos is None and self.start_odom_pos is not None:
+            if (now - self._last_odom_log_time) >= 0.95:
+                elapsed = now - self.motion_start_time
+                dist_m = math.hypot(ox - self.start_odom_pos[0], oy - self.start_odom_pos[1])
+                dt_fix = (now - self._prev_fix_time) if self._prev_fix_time else 0.0
+                step_m = dist_m - self._prev_fix_dist
+                true_v = (step_m / dt_fix) if dt_fix > 0.1 else 0.0
+                avg_cmd_v = (self._cmd_v_sum / self._cmd_v_count) if self._cmd_v_count > 0 else abs(self.last_cmd_v)
+                scale = (true_v / avg_cmd_v) if avg_cmd_v > 0.015 else 0.0
+
+                self.fix_history.append({
+                    "idx": len(self.fix_history) + 1,
+                    "t": elapsed,
+                    "dt": dt_fix,
+                    "dist_m": dist_m,
+                    "step_cm": step_m * 100.0,
+                    "true_v": true_v,
+                    "avg_cmd_v": avg_cmd_v,
+                    "curr_cmd_v": self.last_cmd_v,
+                    "scale": scale,
+                    "lat": ox,
+                    "lon": oy,
+                })
+                self._prev_fix_time = now
+                self._prev_fix_dist = dist_m
+                self._last_odom_log_time = now
+                self._cmd_v_sum = 0.0
+                self._cmd_v_count = 0
 
     def _fix_cb(self, msg: NavSatFix):
         if not math.isnan(msg.latitude) and not math.isnan(msg.longitude):
@@ -204,6 +251,8 @@ class SafeActionRunner(Node):
         self.active_motion_type = motion_type
         self.target_distance = float(distance)
         self.start_pos = self.current_pos
+        self.start_odom_pos = self.current_odom_pos
+        self._last_odom_log_time = self.motion_start_time
         self.fix_history = []
         self.motor_cut_events = []
         self._prev_fix_time = self.motion_start_time
@@ -241,19 +290,21 @@ class SafeActionRunner(Node):
         fb = feedback_msg.feedback
         pct = fb.progress_ratio * 100.0
 
-        # Real-time GPS status badge
+        # Real-time GPS or LiDAR Odometry status badge
         if "RTK FIX" in self.current_fix_quality:
             gps_badge = "🟢 RTK FIX"
         elif "RTK FLOAT" in self.current_fix_quality:
             gps_badge = "🟡 RTK FLOAT"
         elif "3D" in self.current_fix_quality:
             gps_badge = "🔵 3D FIX"
+        elif self.current_odom_pos is not None:
+            gps_badge = "🟣 LIDAR ODOM"
         else:
             gps_badge = f"⚪ {self.current_fix_quality}"
 
         sat_str = f"|{self.num_sats}s" if self.num_sats > 0 else ""
         sys.stdout.write(
-            f"\rExecuting: [{pct:5.1f}%] | Dist Rem: {fb.distance_remaining:4.2f}m | Yaw Rem: {math.degrees(fb.yaw_remaining):5.1f}° | Speed: {fb.current_velocity:4.2f}m/s | GPS: [{gps_badge}{sat_str}]   "
+            f"\rExecuting: [{pct:5.1f}%] | Dist Rem: {fb.distance_remaining:4.2f}m | Yaw Rem: {math.degrees(fb.yaw_remaining):5.1f}° | Speed: {fb.current_velocity:4.2f}m/s | Sensor: [{gps_badge}{sat_str}]   "
         )
         sys.stdout.flush()
 
@@ -417,22 +468,80 @@ class SafeActionRunner(Node):
                         print(" ⚠️ GRADE: ELEVATED ERROR (> 15 cm) - Check RTK Fix & compass/COG alignment.")
                 print("=" * 65)
 
-            # Print GPS Performance & Stability Report
-            print("\n" + "=" * 65)
-            print(" 📡 RTK GPS INTEGRITY & STABILITY REPORT")
-            print("=" * 65)
-            print(f" Initial Status at Start : {self.initial_fix_quality or 'N/A'}")
-            print(f" Final Status at Finish  : {self.current_fix_quality} (Sats: {self.num_sats}, HDOP: {self.hdop:.2f})")
-            if not self.drop_events:
-                if "RTK FIX" in self.current_fix_quality:
-                    print(" 🏆 PERFECT RTK LOCK: Fix remained solid RTK FIX throughout entire motion!")
+            # LiDAR-Only Robot Fallback Benchmarks (when /fix is absent and /odom is active)
+            elif self.current_pos is None and self.start_odom_pos and self.current_odom_pos:
+                sx, sy = self.start_odom_pos
+                fx, fy = self.current_odom_pos
+                odom_dist = math.hypot(fx - sx, fy - sy)
+                if self.fix_history and self.active_motion_type == 0:
+                    print("\n" + "=" * 78)
+                    print(" 📊 1 Hz LIDAR ODOMETRY STEP-BY-STEP TELEMETRY & MOTOR CUT-OFF LOG")
+                    print("=" * 78)
+                    print(f" {'#':>2} | {'t (s)':>6} | {'OdomDist':>9} | {'Step':>8} | {'True V':>8} | {'AvgCmdV':>8} | {'NowCmdV':>8} | {'Scale':>5}")
+                    print("-" * 78)
+                    for row in self.fix_history:
+                        scale_str = f"{row['scale']:.2f}x" if row['scale'] > 0 else "  -  "
+                        print(
+                            f" {row['idx']:2d} | {row['t']:5.2f}s | {row['dist_m']:8.3f}m | "
+                            f"{row['step_cm']:+6.1f}cm | {row['true_v']:6.2f}m/s | "
+                            f"{row['avg_cmd_v']:6.2f}m/s | {row['curr_cmd_v']:+6.2f}m/s | {scale_str}"
+                        )
+                    print("=" * 78)
+
+                if self.active_motion_type == 0 and abs(self.target_distance) > 0.05:
+                    target_mag = abs(self.target_distance)
+                    err_m = odom_dist - target_mag
+                    err_cm = abs(err_m) * 100.0
+                    print("\n" + "=" * 65)
+                    print(" 🎯 LINEAR DISPLACEMENT ACCURACY BENCHMARK (LIDAR ODOMETRY)")
+                    print("=" * 65)
+                    print(f" Commanded Target Distance : {target_mag:.3f} m ({self.target_distance:+.2f} m)")
+                    print(f" Measured LiDAR Odom Dist  : {odom_dist:.3f} m")
+                    print(f" Net Displacement Error    : {err_cm:.1f} cm ({err_m:+.3f} m)")
+                    print(f" Start Odom (X, Y)         : ({sx:+.3f} m, {sy:+.3f} m)")
+                    print(f" Final Odom (X, Y)         : ({fx:+.3f} m, {fy:+.3f} m)")
+                    print(f" Final Heading Error       : {math.degrees(res.result.actual_yaw):+.1f}°")
+                    print("=" * 65)
+                elif self.active_motion_type == 2:
+                    gap_cm = odom_dist * 100.0
+                    print("\n" + "=" * 65)
+                    print(" 🔄 CIRCULAR LOOP CLOSURE ACCURACY BENCHMARK (LIDAR ODOMETRY)")
+                    print("=" * 65)
+                    print(f" Path Target Distance      : {self.target_distance:.3f} m")
+                    print(f" Start Odom (X, Y)         : ({sx:+.3f} m, {sy:+.3f} m)")
+                    print(f" Final Odom (X, Y)         : ({fx:+.3f} m, {fy:+.3f} m)")
+                    print(f" Loop Closure Gap Distance : {gap_cm:.1f} cm ({odom_dist:+.3f} m from start)")
+                    print("=" * 65)
+                elif self.active_motion_type in (4, 5) and self.waypoint_target_base_xy:
+                    tx, ty = self.waypoint_target_base_xy
+                    err_cm = math.hypot(fx - tx, fy - ty) * 100.0
+                    print("\n" + "=" * 65)
+                    print(" 🧭 WAYPOINT NAVIGATION ACCURACY BENCHMARK (LIDAR ODOMETRY)")
+                    print("=" * 65)
+                    print(f" Target Odom XY            : ({tx:+.3f} m, {ty:+.3f} m)")
+                    print(f" Final  Odom XY            : ({fx:+.3f} m, {fy:+.3f} m)")
+                    print(f" 2D Arrival Error          : {err_cm:.1f} cm (dX={fx - tx:+.3f}m, dY={fy - ty:+.3f}m)")
+                    print("=" * 65)
+
+            # Print GPS / Sensor Performance & Stability Report
+            if self.current_pos is not None or self.initial_fix_quality is not None:
+                print("\n" + "=" * 65)
+                print(" 📡 RTK GPS INTEGRITY & STABILITY REPORT")
+                print("=" * 65)
+                print(f" Initial Status at Start : {self.initial_fix_quality or 'N/A'}")
+                print(f" Final Status at Finish  : {self.current_fix_quality} (Sats: {self.num_sats}, HDOP: {self.hdop:.2f})")
+                if not self.drop_events:
+                    if "RTK FIX" in self.current_fix_quality:
+                        print(" 🏆 PERFECT RTK LOCK: Fix remained solid RTK FIX throughout entire motion!")
+                    else:
+                        print(f" ℹ️ Constant State: Remained in {self.current_fix_quality} (no state drop observed).")
                 else:
-                    print(f" ℹ️ Constant State: Remained in {self.current_fix_quality} (no state drop observed).")
-            else:
-                print(f" ⚠️ {len(self.drop_events)} DROP EVENT(S) DETECTED DURING MOTION:")
-                for ev in self.drop_events:
-                    print(f"    • {ev}")
-            print("=" * 65 + "\n")
+                    print(f" ⚠️ {len(self.drop_events)} DROP EVENT(S) DETECTED DURING MOTION:")
+                    for ev in self.drop_events:
+                        print(f"    • {ev}")
+                print("=" * 65 + "\n")
+            elif self.current_odom_pos is not None:
+                print(f"\n🟣 [SENSOR REPORT] Motion executed purely on LiDAR Odometry (/odom).\n")
 
     def cancel_active_goal(self):
         """Immediately sends cancel request and halts robot."""
@@ -492,36 +601,45 @@ def main():
         return
 
     try:
+        # Spin briefly to capture initial /fix or /odom before recording start_pos / start_odom_pos
+        init_wait = time.time() + 0.6
+        while rclpy.ok() and time.time() < init_wait:
+            rclpy.spin_once(runner, timeout_sec=0.05)
+            if runner.current_pos is not None or runner.current_odom_pos is not None:
+                break
+
         if args.command == "circle":
             r = abs(args.radius)
             circumference = 2.0 * math.pi * r
             sign = 1.0 if args.direction == "left" else -1.0
             delta_yaw = sign * 2.0 * math.pi
             w_max = args.speed / r
-            if runner.send_goal(2, circumference, delta_yaw, args.speed, w_max):
+            if runner.send_goal(ExecuteMotion.Goal.TYPE_DRIVE_ARC, circumference, delta_yaw, args.speed, w_max):
                 runner.wait_for_result()
 
         elif args.command == "straight":
-            if runner.send_goal(0, args.distance, 0.0, args.speed, 0.0):
+            if runner.send_goal(ExecuteMotion.Goal.TYPE_DRIVE_STRAIGHT, args.distance, 0.0, args.speed, 0.0):
                 runner.wait_for_result()
 
         elif args.command == "rotate":
             yaw_rad = math.radians(args.deg)
-            if runner.send_goal(1, 0.0, yaw_rad, 0.0, args.rate):
+            if runner.send_goal(ExecuteMotion.Goal.TYPE_ROTATE_IN_PLACE, 0.0, yaw_rad, 0.0, args.rate):
                 runner.wait_for_result()
 
         elif args.command == "goto":
             has_xy = (args.x is not None) and (args.y is not None)
             has_latlon = (args.lat is not None) and (args.lon is not None)
             if not has_xy and not has_latlon:
-                print("❌ Error: For 'goto', provide either --x <east_m> --y <north_m> (Base 0,0) OR --lat <deg> --lon <deg> (Global).")
+                print("❌ Error: For 'goto', provide either --x <east_m> --y <north_m> (Base/Odom 0,0) OR --lat <deg> --lon <deg> (Global).")
                 return
 
-            # Spin briefly to receive current /fix and /gps/base_fix
-            wait_until = time.time() + 2.2
+            # Spin briefly to receive current /fix, /gps/base_fix, or /odom
+            wait_until = time.time() + 2.0
             while rclpy.ok() and time.time() < wait_until:
                 rclpy.spin_once(runner, timeout_sec=0.05)
                 if runner.current_pos is not None and (has_latlon or runner.base_pos is not None):
+                    break
+                if runner.current_pos is None and runner.current_odom_pos is not None and has_xy:
                     break
 
             if has_xy:
@@ -530,8 +648,8 @@ def main():
                     f"🧭 Navigating to Base-Station (0,0) Waypoint: "
                     f"X_East={args.x:+.2f}m, Y_North={args.y:+.2f}m"
                 )
-                # motion_type=4 (GOTO_BASE_XY): distance = X_east (m), delta_yaw = Y_north (m)
-                if runner.send_goal(4, args.x, args.y, args.speed, args.rate):
+                m_type = getattr(ExecuteMotion.Goal, 'TYPE_GOTO_BASE_XY', 4)
+                if runner.send_goal(m_type, args.x, args.y, args.speed, args.rate):
                     runner.wait_for_result()
             else:
                 if runner.current_pos is None:
@@ -546,13 +664,13 @@ def main():
                     f"🌍 Navigating to Global WGS84 Waypoint: ({args.lat:.7f}, {args.lon:.7f}) "
                     f"[Offset: dEast={de_m:+.2f}m, dNorth={dn_m:+.2f}m]"
                 )
-                # motion_type=5 (GOTO_REL_ENU): distance = dEast_m, delta_yaw = dNorth_m
-                if runner.send_goal(5, de_m, dn_m, args.speed, args.rate):
+                m_type = getattr(ExecuteMotion.Goal, 'TYPE_GOTO_REL_ENU', 5)
+                if runner.send_goal(m_type, de_m, dn_m, args.speed, args.rate):
                     runner.wait_for_result()
 
         elif args.command == "stop":
             print("Sending TYPE_STOP...")
-            runner.send_goal(3, 0.0, 0.0, 0.0, 0.0)
+            runner.send_goal(ExecuteMotion.Goal.TYPE_STOP, 0.0, 0.0, 0.0, 0.0)
             runner.wait_for_result()
 
     except KeyboardInterrupt:

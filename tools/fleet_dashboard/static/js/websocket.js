@@ -76,6 +76,11 @@ function connectToRobotWebSocket(robotId, ip, port) {
     logDebug(`🟢 [Robot ${robotId}] Connected to ${wsUrl}!`, 'success');
     realTelemetry[robotId].online = true;
 
+    // Reset sensor telemetry to clean state upon new connection
+    if (typeof resetRobotSensors === 'function') {
+      resetRobotSensors(robotId);
+    }
+
     try {
       ws.send(JSON.stringify({
         op: "clientInfo",
@@ -146,8 +151,17 @@ function connectToRobotWebSocket(robotId, ip, port) {
             }
           });
 
-          if (hasLidarTopic) realTelemetry[robotId].lidar.present = true;
-          if (hasGpsTopic) realTelemetry[robotId].gps.present = true;
+          if (hasLidarTopic) {
+            realTelemetry[robotId].lidar.present = true;
+          } else if (typeof resetRobotLidar === 'function') {
+            resetRobotLidar(robotId);
+          }
+
+          if (hasGpsTopic) {
+            realTelemetry[robotId].gps.present = true;
+          } else if (typeof resetRobotGps === 'function') {
+            resetRobotGps(robotId);
+          }
 
           const topicNames = subscriptions.map(s => subIdToTopic[s.id]).join(', ');
           logDebug(`🛰️ [Robot ${robotId}] Subscribed to ${subscriptions.length} topics: ${topicNames}`, 'topic');
@@ -156,7 +170,21 @@ function connectToRobotWebSocket(robotId, ip, port) {
             ws.send(JSON.stringify({ op: "subscribe", subscriptions: subscriptions }));
           }
         }
-        // 2. Message Data
+        // 2. Channel Unadvertisement
+        else if (msg.op === "unadvertise" && Array.isArray(msg.channelIds)) {
+          msg.channelIds.forEach(chId => {
+            const rawTopic = channelIdToTopic[chId] || '';
+            const topic = rawTopic.startsWith('/') ? rawTopic : '/' + rawTopic;
+            if (topic === configuredTopics.gps_fix || topic === '/fix' || topic.endsWith('/fix')) {
+              if (typeof resetRobotGps === 'function') resetRobotGps(robotId);
+            }
+            if (topic === configuredTopics.scan || topic === '/scan' || topic.endsWith('/scan')) {
+              if (typeof resetRobotLidar === 'function') resetRobotLidar(robotId);
+            }
+            delete channelIdToTopic[chId];
+          });
+        }
+        // 3. Message Data
         else if (msg.op === "message" && msg.data) {
           const topic = subIdToTopic[msg.subscriptionId] || channelIdToTopic[msg.channelId] || subIdToTopic[msg.id] || channelIdToTopic[msg.id];
           handleParsedRobotMessage(robotId, topic, msg.data);
@@ -174,6 +202,9 @@ function connectToRobotWebSocket(robotId, ip, port) {
     delete activeWebSockets[robotId];
     if (realTelemetry[robotId]) {
       realTelemetry[robotId].online = false;
+      if (typeof resetRobotSensors === 'function') {
+        resetRobotSensors(robotId);
+      }
     }
     scheduleReconnect(robotId, ip, port);
   };

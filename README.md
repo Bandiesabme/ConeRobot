@@ -12,6 +12,7 @@ The system uses a **Remote-Brain + Onboard State-Driven Motion Primitive Archite
 | :--- | :--- |
 | 🏗️ **[Remote-Brain Architecture](documentation/ARCHITECTURE.md)** | Deep dive into the Remote-Brain paradigm, state-driven control loops, topic registry, and single-parameter GPS/LiDAR switching. |
 | 🚀 **[Motion Primitive Architecture](documentation/MOTION_PRIMITIVE_ARCHITECTURE.md)** | High-level Action interface (`/execute_motion`), state-based velocity profiling, and dual-rate IMU + GPS/LiDAR feedback. |
+| 🧭 **[Navigation, Waypoint Homing & Field Testing](documentation/NAVIGATION_AND_WAYPOINT_TESTING.md)** | Complete guide to `test_action_motion.py` and `test_waypoint_navigation.py`, RTK Base `(0, 0)` auto-origin, 25-sample startup compass, and dual-sensor (`GPS + LiDAR`) handover. |
 | 🍓 **[Raspberry Pi 5 Setup & Wiring Guide](documentation/RPI5_SETUP.md)** | Hardware setup for Pi 5, swap memory, udev GPIO rules, I2C speed, and Cytron MDD10 / BNO08x wiring pinouts. |
 | ⚡ **[Raspberry Pi Zero Setup Guide](documentation/RPI_ZERO_SETUP.md)** | Headless Pi Zero OS configuration, PL011 hardware UART (`dtoverlay=disable-bt`), and Wi-Fi optimization. |
 | 📡 **[GPS/RTK Setup Guide](documentation/GPS_RTK_SETUP.md)** | Waveshare LC29H(DA) Dual-band GPS/RTK setup, Pi 5 `/dev/ttyAMA0` serial config, NTRIP rover client, and ROS 2 `/fix` topic. |
@@ -76,23 +77,32 @@ The system uses a **Remote-Brain + Onboard State-Driven Motion Primitive Archite
 colcon build --symlink-install --parallel-workers 2
 source install/setup.bash
 
-# Option A: Launch GPS Robot (Default — Motors + IMU + RTK GPS + Motion Primitive Controller)
+# Option A: Launch Dual-Sensor Robot (Default — Motors + IMU + RTK GPS + LiDAR Auto-Fallback)
+ros2 launch cone_robot_control robot.launch.py robot_type:=all
+
+# Option B: Launch GPS-Only Robot (Motors + IMU + RTK GPS)
 ros2 launch cone_robot_control robot.launch.py robot_type:=gps
 
-# Option B: Launch LiDAR Robot (Motors + IMU + YDLIDAR + rf2o Odom + Motion Primitive Controller)
+# Option C: Launch LiDAR-Only Robot (Motors + IMU + YDLIDAR + rf2o Odom)
 ros2 launch cone_robot_control robot.launch.py robot_type:=lidar
 ```
 
-### High-Level Motion Primitive Testing (Action `/execute_motion`):
+### Safe CLI Motion & Waypoint Testing (`scripts/test_action_motion.py` & `scripts/test_waypoint_navigation.py`):
 ```bash
-# 1. Drive Straight 4.0 meters forward (closed-loop GPS/Odom distance + 50 Hz IMU yaw lock)
-ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 0, distance: 4.0, delta_yaw: 0.0, max_velocity: 0.22}"
+# 1. Drive Straight 4.0m (with 1 Hz RTK telemetry table & Ctrl+C auto-cancel)
+python3 scripts/test_action_motion.py straight --distance 4.0 --speed 0.25
 
-# 2. Rotate In-Place 90° CCW (Turn Left by +pi/2 radians ~ 1.5708 rad)
-ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 1, distance: 0.0, delta_yaw: 1.5708, max_yaw_rate: 1.0}"
+# 2. Check Startup 25-Sample Compass & Decoded RTK Base Station (0, 0) Coordinate
+python3 scripts/test_waypoint_navigation.py status
 
-# 3. Drive Continuous Arc: 3.0 meters path while turning +45° left (~0.7854 rad)
-ros2 action send_goal --feedback /execute_motion cone_robot_interfaces/action/ExecuteMotion "{motion_type: 2, distance: 3.0, delta_yaw: 0.7854, max_velocity: 0.22}"
+# 3. Drive +3.0m East, +2.0m North from current spot & automatically return to start
+python3 scripts/test_waypoint_navigation.py offset --east 3.0 --north 2.0 --speed 0.25 --return-start
+
+# 4. Navigate to RTK Base Station (0, 0) Meter Coordinates (X_East, Y_North)
+python3 scripts/test_action_motion.py goto --x 4.0 --y 2.5 --speed 0.25
+
+# 5. Navigate to Global WGS84 (Lat, Lon) Coordinates
+python3 scripts/test_action_motion.py goto --lat 47.4484520 --lon 18.7532365 --speed 0.25
 
 # Quick Topic Testing via /cmd_primitive (Vector3: x=distance_m, z=delta_yaw_rad):
 ros2 topic pub --once /cmd_primitive geometry_msgs/msg/Vector3 "{x: 3.0, y: 0.0, z: 0.7854}"

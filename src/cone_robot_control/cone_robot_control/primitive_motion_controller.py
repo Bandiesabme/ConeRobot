@@ -317,6 +317,10 @@ class PrimitiveMotionController(Node):
         self.waypoint_target_odom: Optional[Tuple[float, float]] = None
         self._goto_phase: str = "NONE"          # "ALIGN" or "DRIVE"
         self._goto_yaw_ref: float = 0.0
+        self._min_rem_dist_wp: Optional[float] = None
+        self._goto_arrival_reached: bool = False
+        self.goal_start_time: float = 0.0
+        self.goal_timeout_s: float = 60.0
         self.gps_status: int = NavSatStatus.STATUS_NO_FIX
         self.gps_is_rtk_fix: bool = False
         self.last_gps_time: float = 0.0
@@ -440,10 +444,26 @@ class PrimitiveMotionController(Node):
 
         if self.state == ControllerState.EXECUTING:
             if self.active_sensor_mode == "ODOM" and self.start_odom_pos is not None:
-                self.chord_dist_m = self._odom_handover_dist_m + math.hypot(
-                    curr_x - self.start_odom_pos[0],
-                    curr_y - self.start_odom_pos[1],
-                )
+                if (
+                    self.active_motion_type == "GOTO"
+                    and self._goto_phase == "DRIVE"
+                    and self.waypoint_target_odom is not None
+                ):
+                    rem_x = self.waypoint_target_odom[0] - curr_x
+                    rem_y = self.waypoint_target_odom[1] - curr_y
+                    rem_dist_wp = math.hypot(rem_x, rem_y)
+                    self.chord_dist_m = max(0.0, abs(self.target_dist_m) - rem_dist_wp)
+                    if rem_dist_wp > 0.18 and self.current_heading_rad is not None:
+                        bearing_odom = math.atan2(rem_y, rem_x)
+                        bearing_err = shortest_angular_diff_rad(bearing_odom, self.current_heading_rad)
+                        self._goto_yaw_ref = self._get_measured_yaw_rad() + max(
+                            -math.radians(20.0), min(math.radians(20.0), bearing_err)
+                        )
+                else:
+                    self.chord_dist_m = self._odom_handover_dist_m + math.hypot(
+                        curr_x - self.start_odom_pos[0],
+                        curr_y - self.start_odom_pos[1],
+                    )
             if self.last_odom_accum_pos is not None:
                 step_m = math.hypot(
                     curr_x - self.last_odom_accum_pos[0],
@@ -576,10 +596,27 @@ class PrimitiveMotionController(Node):
                     self._prev_gps_dist_m = new_chord
                     rem_to_target = rem_dist_wp
 
-                    if rem_dist_wp > 0.25:
+                    # Track closest point of approach achieved during this drive
+                    if self._min_rem_dist_wp is None or rem_dist_wp < self._min_rem_dist_wp:
+                        self._min_rem_dist_wp = rem_dist_wp
+
+                    # Precision Arrival / CPA (Closest Point of Approach) Detection:
+                    # 1. Direct hit within tolerance
+                    # 2. Reached closest point of approach within close range (<= 8 cm) and started increasing
+                    is_direct_hit = rem_dist_wp <= self.distance_tolerance_m
+                    is_cpa_reached = (
+                        self._min_rem_dist_wp is not None
+                        and self._min_rem_dist_wp <= 0.08
+                        and rem_dist_wp >= (self._min_rem_dist_wp + 0.012)
+                    )
+                    if is_direct_hit or is_cpa_reached:
+                        self._goto_arrival_reached = True
+
+                    # Fine-steering homing down to 5 cm (gentle clamp inside 25 cm)
+                    if rem_dist_wp > 0.05 and not self._goto_arrival_reached:
                         bearing_enu = math.atan2(rem_n, rem_e)
                         bearing_err = shortest_angular_diff_rad(bearing_enu, self._get_global_enu_yaw_rad())
-                        if abs(bearing_err) > math.radians(35.0):
+                        if abs(bearing_err) > math.radians(35.0) and rem_dist_wp > 0.35:
                             # Large initial compass discrepancy revealed by RTK: pivot in place to true bearing
                             self.get_logger().info(
                                 f"[GOTO RE-ALIGN] Adjusting heading by {math.degrees(bearing_err):+.1f}° to true RTK bearing."
@@ -590,20 +627,23 @@ class PrimitiveMotionController(Node):
                             self.turn_settle_start = None
                             self.profiler.start_rotate(bearing_err, max_w=self.current_max_w)
                         else:
-                            self._goto_yaw_ref = self._get_measured_yaw_rad() + bearing_err
+                            max_trim = math.radians(10.0) if rem_dist_wp <= 0.25 else math.radians(30.0)
+                            clamped_err = max(-max_trim, min(max_trim, bearing_err))
+                            self._goto_yaw_ref = self._get_measured_yaw_rad() + clamped_err
 
                 # Account for ~0.42s LC29H RTK computation + NMEA serial pipeline latency
                 # plus ~3.5 cm track spin-down lead while actively driving; reset to 0.0 when stopped.
-                if self._gps_stop_wait_start is None and abs(self.last_cmd_v) > 0.01:
+                if self._gps_stop_wait_start is None and abs(self.last_cmd_v) > 0.01 and not self._goto_arrival_reached:
                     eff_cmd_v = abs(self.last_cmd_v) + 0.025
                     est_v = eff_cmd_v * self._gps_speed_scale
                     self._gps_interfix_dist_m = min(0.14, est_v * 0.42 + 0.035)
                 else:
                     self._gps_interfix_dist_m = 0.0
                     # If this is a true post-stop stationary fix (>= 0.45s after motor cut)
-                    # and the robot stopped slightly short of target, allow a gentle creep
+                    # and the robot stopped slightly short of target, allow gentle creep only if CPA not yet reached
                     if (
                         self._gps_stop_wait_start is not None
+                        and not self._goto_arrival_reached
                         and (now - self._gps_stop_wait_start) >= 0.45
                         and rem_to_target > self.distance_tolerance_m
                     ):
@@ -696,8 +736,8 @@ class PrimitiveMotionController(Node):
     # ROS 2 Action Server Callbacks
     # --------------------------------------------------------------------------
     def _goal_callback(self, goal_request):
-        # Always allow TYPE_STOP (3) to execute immediately
-        if getattr(goal_request, 'motion_type', None) == 3:
+        # Always allow TYPE_STOP to execute immediately
+        if getattr(goal_request, 'motion_type', None) in [3, getattr(ExecuteMotion.Goal, 'TYPE_STOP', 3)]:
             self._cancel_requested = True
             return GoalResponse.ACCEPT
 
@@ -720,20 +760,18 @@ class PrimitiveMotionController(Node):
         self._preempted_by_topic = False
         goal = goal_handle.request
 
-        # TYPE_DRIVE_STRAIGHT=0, TYPE_ROTATE_IN_PLACE=1, TYPE_DRIVE_ARC=2, TYPE_STOP=3,
-        # TYPE_GOTO_BASE_XY=4 (distance=X_east_m, delta_yaw=Y_north_m from Base 0,0),
-        # TYPE_GOTO_REL_ENU=5 (distance=dEast_m, delta_yaw=dNorth_m from current pos / Global LatLon)
-        if goal.motion_type == 0:
+        # Resolve motion type from Action Constants (compatible with integer codes 0-5)
+        if goal.motion_type in [0, getattr(ExecuteMotion.Goal, 'TYPE_DRIVE_STRAIGHT', 0)]:
             m_type = "STRAIGHT"
-        elif goal.motion_type == 1:
+        elif goal.motion_type in [1, getattr(ExecuteMotion.Goal, 'TYPE_ROTATE_IN_PLACE', 1)]:
             m_type = "ROTATE"
-        elif goal.motion_type == 2:
+        elif goal.motion_type in [2, getattr(ExecuteMotion.Goal, 'TYPE_DRIVE_ARC', 2)]:
             m_type = "ARC"
-        elif goal.motion_type == 3:
+        elif goal.motion_type in [3, getattr(ExecuteMotion.Goal, 'TYPE_STOP', 3)]:
             m_type = "STOP"
-        elif goal.motion_type == 4:
+        elif goal.motion_type in [4, getattr(ExecuteMotion.Goal, 'TYPE_GOTO_BASE_XY', 4)]:
             m_type = "GOTO_BASE_XY"
-        elif goal.motion_type == 5:
+        elif goal.motion_type in [5, getattr(ExecuteMotion.Goal, 'TYPE_GOTO_REL_ENU', 5)]:
             m_type = "GOTO_REL_ENU"
         else:
             goal_handle.abort()
@@ -947,6 +985,13 @@ class PrimitiveMotionController(Node):
         self.turn_settle_start = None
         self._goto_phase = "NONE"
         self._goto_yaw_ref = 0.0
+        self._min_rem_dist_wp = None
+        self._goto_arrival_reached = False
+        self.goal_start_time = time.time()
+        if motion_type == "ROTATE":
+            self.goal_timeout_s = max(12.0, (abs(yaw_rad) / max(0.3, self.min_angular_speed)) * 2.5 + 6.0)
+        else:
+            self.goal_timeout_s = max(18.0, (abs(dist_m) / max(0.08, self.min_linear_speed)) * 2.5 + 10.0)
         self.waypoint_target_gps = None
         self.waypoint_target_odom = None
 
@@ -983,7 +1028,12 @@ class PrimitiveMotionController(Node):
 
             wp_dist = math.hypot(rem_e, rem_n)
             desired_enu_yaw = math.atan2(rem_n, rem_e)
-            turn_delta = shortest_angular_diff_rad(desired_enu_yaw, self._get_global_enu_yaw_rad())
+            ref_yaw = (
+                self._get_global_enu_yaw_rad()
+                if self.active_sensor_mode == "GPS"
+                else (self.current_heading_rad or 0.0)
+            )
+            turn_delta = shortest_angular_diff_rad(desired_enu_yaw, ref_yaw)
             motion_type = "GOTO"
             dist_m = wp_dist
             yaw_rad = turn_delta
@@ -1139,7 +1189,7 @@ class PrimitiveMotionController(Node):
             dist_tolerance_m=self.distance_tolerance_m,
             yaw_tolerance_rad=self.yaw_tolerance_rad,
         )
-        if self._gps_stop_wait_start is not None:
+        if self._gps_stop_wait_start is not None or self._goto_arrival_reached:
             dist_or_rot_done = True
 
         # 3. Physical Motion Progress Check (Stuck / Stall Watchdog)
@@ -1170,6 +1220,15 @@ class PrimitiveMotionController(Node):
             )
             or (self.active_motion_type in ["STRAIGHT", "ARC", "GOTO"] and dist_remaining <= 0.20)
         )
+
+        # Global Action Timeout Watchdog (prevents runaway if goal is unreachable)
+        if (now - self.goal_start_time) > self.goal_timeout_s:
+            self.get_logger().error(
+                f"[GOAL TIMEOUT] Motion exceeded deadline of {self.goal_timeout_s:.1f}s! Stopping robot."
+            )
+            self._publish_cmd_vel(0.0, 0.0)
+            self._set_state(ControllerState.STUCK, "GOAL TIMEOUT")
+            return
 
         if is_commanding_movement and not is_near_target and (now - self.last_moved_time > self.stuck_detect_time_s):
             self.get_logger().error(
@@ -1223,6 +1282,9 @@ class PrimitiveMotionController(Node):
                         self.target_yaw_rad = 0.0
                         self.yaw_integral = 0.0
                         self.chord_dist_m = 0.0
+                        self._min_rem_dist_wp = None
+                        self._goto_arrival_reached = False
+                        self.goal_start_time = now
                         self._gps_interfix_dist_m = 0.0
                         self._prev_gps_dist_m = 0.0
                         self._prev_gps_fix_time = now
@@ -1239,6 +1301,7 @@ class PrimitiveMotionController(Node):
                                 self.waypoint_target_gps[0], self.waypoint_target_gps[1],
                             )
                             self.target_dist_m = math.hypot(re, rn)
+                        self.goal_timeout_s = max(18.0, (abs(self.target_dist_m) / max(0.08, self.min_linear_speed)) * 2.5 + 10.0)
                         self.profiler.start_straight(self.target_dist_m, max_v=self.current_max_v)
                         self.get_logger().info(
                             f"[GOTO ALIGNED] Heading aligned -> Driving {self.target_dist_m:.2f}m to waypoint."

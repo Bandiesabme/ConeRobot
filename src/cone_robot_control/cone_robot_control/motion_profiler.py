@@ -155,10 +155,9 @@ class MotionPrimitiveProfiler:
             # Smooth acceleration slew from standstill
             self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
 
-            # Progressive 90 cm approach deceleration ramp down to gentle crawl speed
-            # Uses a concave profile (ramp_ratio ** 1.35) so the final 15-20 cm is traversed
-            # at ~4-5 cm/s, eliminating 1 Hz GPS latency & track momentum overshoot.
-            crawl_speed = max(0.035, self.min_linear_speed * 0.45)
+            # Progressive 90 cm approach deceleration ramp down to clean minimum speed
+            # Keeps velocity at or above min_linear_speed so motors never stall or emit PWM whine
+            crawl_speed = self.min_linear_speed
             decel_zone_m = min(0.90, max(0.25, total_s * 0.50))
             if dist_rem < decel_zone_m:
                 ramp_ratio = max(
@@ -188,7 +187,7 @@ class MotionPrimitiveProfiler:
 
             self._current_v_mag = min(self.v_limit, self._current_v_mag + self.a_limit * dt)
 
-            crawl_speed = max(0.035, self.min_linear_speed * 0.45)
+            crawl_speed = self.min_linear_speed
             decel_zone_m = min(0.90, max(0.25, total_s * 0.50))
             if dist_rem < decel_zone_m:
                 ramp_ratio = max(
@@ -223,7 +222,7 @@ class MotionPrimitiveProfiler:
             fine_band_rad = math.radians(8.0)
             err_above_tol = max(0.0, abs_err - yaw_tolerance_rad)
             taper_ratio = min(1.0, err_above_tol / max(1e-4, fine_band_rad))
-            fine_floor_w = 0.35 + (self.min_angular_speed - 0.35) * taper_ratio
+            fine_floor_w = self.min_angular_speed
 
             w_brake = math.sqrt(
                 fine_floor_w ** 2 + 2.0 * self.alpha_limit * err_above_tol

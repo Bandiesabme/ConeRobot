@@ -9,10 +9,12 @@ uint8 TYPE_DRIVE_STRAIGHT  = 0
 uint8 TYPE_ROTATE_IN_PLACE = 1
 uint8 TYPE_DRIVE_ARC       = 2
 uint8 TYPE_STOP            = 3
+uint8 TYPE_GOTO_BASE_XY    = 4  # (distance = X_East meters, delta_yaw = Y_North meters from Base 0,0)
+uint8 TYPE_GOTO_REL_ENU    = 5  # (distance = dEast meters, delta_yaw = dNorth meters relative/global)
 
 uint8 motion_type           # Motion primitive type (constants above)
-float32 distance            # Path distance in meters (+ forward, - reverse)
-float32 delta_yaw           # Heading change in radians (+ CCW/left, - CW/right)
+float32 distance            # Distance (m) OR Target X_East / dEast (m) for GOTO
+float32 delta_yaw           # Angle (rad) OR Target Y_North / dNorth (m) for GOTO
 float32 max_velocity        # Linear speed limit in m/s (0.0 = use parameter default)
 float32 max_yaw_rate        # Angular speed limit in rad/s (0.0 = use parameter default)
 

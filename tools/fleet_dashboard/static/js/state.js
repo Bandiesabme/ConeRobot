@@ -63,6 +63,50 @@ function createEmptyRobotTelemetry(id) {
   };
 }
 
+function resetRobotGps(id) {
+  if (!realTelemetry[id]) return;
+  realTelemetry[id].gps = {
+    present: false,
+    mode: 'NO FIX',
+    lat: null,
+    lon: null,
+    alt: null,
+    sats: 0,
+    hdop: null,
+    diff_age: null,
+    avg_snr: null,
+    strong_signals: 0,
+    total_signals: 0,
+    snr_sats: []
+  };
+}
+
+function resetRobotLidar(id) {
+  if (!realTelemetry[id]) return;
+  realTelemetry[id].lidar = {
+    present: false,
+    freq_hz: 0,
+    sample_count: 0,
+    min_dist: null,
+    min_angle_deg: null,
+    last_scan_time: 0,
+    points: [],
+    odom_present: false,
+    odom_x: null,
+    odom_y: null,
+    odom_vx: null
+  };
+}
+
+function resetRobotSensors(id) {
+  resetRobotGps(id);
+  resetRobotLidar(id);
+  if (realTelemetry[id]) {
+    realTelemetry[id].imu = { heading: null, pitch: null, roll: null, yaw: null, last_heading_topic_time: 0 };
+    realTelemetry[id].motion = { state: 'Offline', step_progress: '--' };
+  }
+}
+
 function logDebug(msg, level = 'info') {
   const container = document.getElementById('debug-log-container');
   if (!container) return;
