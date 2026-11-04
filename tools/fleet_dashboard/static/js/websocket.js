@@ -13,6 +13,10 @@ async function startDiscoveryLoop() {
         configuredTopics = data.topics || configuredTopics;
         const robots = data.robots || {};
 
+        if (data.base_station && typeof updateBaseStationLink === 'function') {
+          updateBaseStationLink(data.base_station);
+        }
+
         for (let i = 1; i <= 13; i++) {
           const rob = robots[i];
           if (rob && rob.online && rob.ip) {

@@ -59,6 +59,44 @@ def save_config(cfg):
 discovered_cache = {}
 discovered_lock = threading.Lock()
 
+# Discovered RTK Base Station cache & lock
+discovered_base_station = {
+    "ip": None,
+    "port": 8080,
+    "caster_port": 2101,
+    "online": False,
+    "host": "conerobotbasestation.local",
+    "url": "http://conerobotbasestation.local:8080",
+    "last_seen": 0.0
+}
+discovered_base_lock = threading.Lock()
+
+def check_base_station_host(host_or_ip, port=8080, timeout=0.3):
+    """
+    Checks if host_or_ip responds on port 8080 (Base Station Web Dashboard)
+    or port 2101 (NTRIP Caster).
+    Returns resolved_ip if reachable, None otherwise.
+    """
+    try:
+        resolved_ip = socket.gethostbyname(host_or_ip)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        result = s.connect_ex((resolved_ip, port))
+        s.close()
+        if result == 0:
+            return resolved_ip
+
+        # Also check NTRIP port 2101 as fallback
+        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s2.settimeout(timeout)
+        result2 = s2.connect_ex((resolved_ip, 2101))
+        s2.close()
+        if result2 == 0:
+            return resolved_ip
+    except Exception:
+        pass
+    return None
+
 def get_primary_subnet():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -115,7 +153,7 @@ def scan_network_job():
     start_t = time.time()
     
     try:
-        print("[DISCOVERY] Scanning network for active ConeRobots on Port 8765...")
+        print("[DISCOVERY] Scanning network for active ConeRobots and RTK Base Station...")
         cfg = load_config()
         robot_port = cfg.get("server", {}).get("robot_port", 8765)
 
@@ -130,7 +168,19 @@ def scan_network_job():
                 with discovered_lock:
                     discovered_cache.pop(slot_id, None)
 
-        # 1. Candidate hostnames
+        # 0b. Health-check previously discovered base station
+        found_base_ip = None
+        found_base_host = None
+        with discovered_base_lock:
+            prev_base_ip = discovered_base_station.get("ip")
+            prev_base_port = discovered_base_station.get("port", 8080)
+            prev_base_host = discovered_base_station.get("host")
+
+        if prev_base_ip and check_base_station_host(prev_base_ip, prev_base_port, timeout=0.3):
+            found_base_ip = prev_base_ip
+            found_base_host = prev_base_host
+
+        # 1. Candidate hostnames for robots & Base Station
         candidate_hosts = ["conerobot.local", "conerobot", "raspberrypi.local"]
         for i in range(1, 14):
             candidate_hosts.extend([f"conerobot{i:02d}.local", f"conerobot{i}.local", f"robot{i:02d}.local", f"robot{i}.local"])
@@ -140,8 +190,20 @@ def scan_network_job():
             if r.get("ip") and r["ip"] not in candidate_hosts:
                 candidate_hosts.append(r["ip"])
 
+        # Base Station candidate hostnames
+        base_candidates = [
+            "conerobotbasestation.local",
+            "conerobotbasestation",
+            "conerobot-base.local",
+            "conerobotbase.local",
+            "basestation.local",
+            "basestation"
+        ]
+
         with ThreadPoolExecutor(max_workers=20) as executor:
             host_futures = {executor.submit(check_robot_host, h, robot_port, 0.5): h for h in candidate_hosts}
+            base_futures = {executor.submit(check_base_station_host, bh, 8080, 0.4): bh for bh in base_candidates} if not found_base_ip else {}
+
             for fut in host_futures:
                 h = host_futures[fut]
                 res_ip = fut.result()
@@ -149,7 +211,7 @@ def scan_network_job():
                     with discovered_lock:
                         used_ips = {v["ip"] for v in discovered_cache.values()}
                         if res_ip in used_ips:
-                            continue  # Prevent adding duplicate cards for the same physical robot
+                            continue  # Prevent duplicate cards
 
                         # Extract numeric robot ID from hostname if present
                         import re
@@ -170,36 +232,90 @@ def scan_network_job():
                             "online": True
                         }
 
+            for fut in base_futures:
+                bh = base_futures[fut]
+                b_res_ip = fut.result()
+                if b_res_ip and not found_base_ip:
+                    found_base_ip = b_res_ip
+                    found_base_host = bh
+
         # 2. Local subnet sweep (Scans primary Wi-Fi AND Windows Mobile Hotspot 192.168.137.X)
         all_subnets = get_all_subnets()
         ips_to_check = []
         for subnet in all_subnets:
             ips_to_check.extend([f"{subnet}.{i}" for i in range(1, 255)])
 
+        def probe_target_ip(ip):
+            r_ip = check_robot_host(ip, robot_port, 0.2)
+            b_ip = None
+            if not found_base_ip:
+                b_ip = check_base_station_host(ip, 8080, 0.2)
+            return (ip, r_ip, b_ip)
+
         with ThreadPoolExecutor(max_workers=50) as executor:
-            ip_futures = {executor.submit(check_robot_host, ip, robot_port, 0.2): ip for ip in ips_to_check}
+            ip_futures = [executor.submit(probe_target_ip, ip) for ip in ips_to_check]
             for fut in ip_futures:
-                res_ip = fut.result()
-                if res_ip:
+                ip, res_robot_ip, res_base_ip = fut.result()
+                if res_robot_ip:
                     with discovered_lock:
                         used_ips = {v["ip"] for v in discovered_cache.values()}
                         free_slots = [r["id"] for r in cfg.get("robots", []) if r["id"] not in discovered_cache]
-                        if res_ip not in used_ips and free_slots:
+                        if res_robot_ip not in used_ips and free_slots:
                             slot_id = free_slots.pop(0)
-                            print(f"[DISCOVERY] Found Unit on IP {res_ip}:{robot_port} -> Assigned to Slot {slot_id:02d}")
+                            print(f"[DISCOVERY] Found Unit on IP {res_robot_ip}:{robot_port} -> Assigned to Slot {slot_id:02d}")
                             discovered_cache[slot_id] = {
                                 "id": slot_id,
                                 "name": f"ConeRobot {slot_id:02d}",
-                                "host": f"robot-{res_ip.replace('.', '-')}",
-                                "ip": res_ip,
+                                "host": f"robot-{res_robot_ip.replace('.', '-')}",
+                                "ip": res_robot_ip,
                                 "port": robot_port,
                                 "online": True
                             }
 
+                if res_base_ip and not found_base_ip:
+                    # Validate that this IP is indeed the Base Station (NTRIP port 2101 or status endpoint)
+                    is_real_base = False
+                    try:
+                        s_nt = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s_nt.settimeout(0.2)
+                        if s_nt.connect_ex((res_base_ip, 2101)) == 0:
+                            is_real_base = True
+                        s_nt.close()
+                    except Exception:
+                        pass
+                    if not is_real_base:
+                        try:
+                            import urllib.request
+                            req = urllib.request.Request(f"http://{res_base_ip}:8080/api/status", headers={'User-Agent': 'ConeRobotDashboard/1.0'})
+                            with urllib.request.urlopen(req, timeout=0.3) as resp:
+                                if resp.status == 200:
+                                    is_real_base = True
+                        except Exception:
+                            pass
+                    if is_real_base:
+                        found_base_ip = res_base_ip
+                        found_base_host = f"base-{res_base_ip.replace('.', '-')}"
+
+        # Update discovered Base Station status
+        with discovered_base_lock:
+            if found_base_ip:
+                discovered_base_station["ip"] = found_base_ip
+                discovered_base_station["host"] = found_base_host or found_base_ip
+                discovered_base_station["port"] = 8080
+                discovered_base_station["caster_port"] = 2101
+                discovered_base_station["online"] = True
+                discovered_base_station["url"] = f"http://{found_base_ip}:8080"
+                discovered_base_station["last_seen"] = time.time()
+                print(f"[DISCOVERY] 📡 RTK Base Station online at {found_base_ip}:8080 (URL: {discovered_base_station['url']})")
+            else:
+                if time.time() - discovered_base_station.get("last_seen", 0) > 30:
+                    discovered_base_station["online"] = False
+
         with discovered_lock:
             act_count = len(discovered_cache)
         elapsed = round(time.time() - start_t, 2)
-        print(f"[DISCOVERY] Scan complete ({elapsed}s). Active robots: {act_count}")
+        base_status_str = f"Base: {found_base_ip or 'Offline'}"
+        print(f"[DISCOVERY] Scan complete ({elapsed}s). Active robots: {act_count} | {base_status_str}")
     finally:
         is_scanning = False
 
@@ -275,12 +391,41 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
             with discovered_lock:
                 disc_count = len(discovered_cache)
 
+            with discovered_base_lock:
+                bs_snapshot = dict(discovered_base_station)
+
             response_data = {
                 "discovered_count": disc_count,
                 "topics": cfg.get("topics", {}),
-                "robots": robots_list
+                "robots": robots_list,
+                "base_station": bs_snapshot
             }
             self.wfile.write(json.dumps(response_data).encode("utf-8"))
+            return
+
+        # API: Discovered RTK Base Station
+        if parsed.path == "/api/base_station":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            with discovered_base_lock:
+                bs_snapshot = dict(discovered_base_station)
+            self.wfile.write(json.dumps(bs_snapshot).encode("utf-8"))
+            return
+
+        # Direct Dynamic Navigation Redirect to Base Station Dashboard
+        norm_path = parsed.path.rstrip("/")
+        if norm_path in ("/goto_base", "/base_station") or parsed.path == "/goto_base.html":
+            with discovered_base_lock:
+                target_url = discovered_base_station.get("url")
+                if not target_url or not discovered_base_station.get("online"):
+                    target_url = "http://conerobotbasestation.local:8080"
+            self.send_response(302)
+            self.send_header("Location", target_url)
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
             return
 
         # API: Config
@@ -300,6 +445,55 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             threading.Thread(target=scan_network_job, daemon=True).start()
             self.wfile.write(json.dumps({"status": "Scan started"}).encode("utf-8"))
+            return
+
+        # API: Query Base Station Caster (port 8080)
+        if parsed.path == "/api/base_status":
+            import urllib.request
+            from urllib.parse import parse_qs
+            query = parse_qs(parsed.query)
+            target_host = query.get("host", [None])[0]
+            port = query.get("port", ["8080"])[0]
+
+            with discovered_base_lock:
+                known_base_ip = discovered_base_station.get("ip")
+
+            hosts_to_try = []
+            if target_host:
+                hosts_to_try.append(target_host)
+            if known_base_ip and known_base_ip not in hosts_to_try:
+                hosts_to_try.append(known_base_ip)
+            if "127.0.0.1" not in hosts_to_try:
+                hosts_to_try.append("127.0.0.1")
+            hosts_to_try.extend(["conerobotbasestation.local", "conerobotbasestation", "basestation.local", "192.168.1.100", "192.168.1.50"])
+
+            res_data = None
+            for h in hosts_to_try:
+                try:
+                    url = f"http://{h}:{port}/api/status"
+                    req = urllib.request.Request(url, headers={'User-Agent': 'ConeRobotDashboard/1.0'})
+                    with urllib.request.urlopen(req, timeout=0.8) as resp:
+                        if resp.status == 200:
+                            res_data = json.loads(resp.read().decode('utf-8'))
+                            res_data["connected_host"] = h
+                            with discovered_base_lock:
+                                discovered_base_station["online"] = True
+                                if not discovered_base_station.get("ip") and not h.endswith(".local") and h != "127.0.0.1":
+                                    discovered_base_station["ip"] = h
+                                discovered_base_station["url"] = f"http://{h}:{port}"
+                                discovered_base_station["last_seen"] = time.time()
+                            break
+                except Exception:
+                    continue
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            if res_data:
+                self.wfile.write(json.dumps(res_data).encode("utf-8"))
+            else:
+                self.wfile.write(json.dumps({"error": "Base station caster not reachable on port 8080"}).encode("utf-8"))
             return
 
         super().do_GET()

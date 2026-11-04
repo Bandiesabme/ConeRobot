@@ -469,6 +469,15 @@
 
       <!-- Navigation Actions -->
       <div class="header-actions">
+        <a id="btn-base-station" href="goto_base.html" target="_blank" rel="noopener noreferrer" class="action-btn" title="Open RTK Base Station Live Dashboard" style="text-decoration: none; font-weight: 600;">
+          <span class="stat-dot red" id="base-status-dot" style="margin-right: 2px;"></span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a10 10 0 0 0-7.07 17.07l1.41-1.41A8 8 0 0 1 12 4a8 8 0 0 1 5.66 13.66l1.41 1.41A10 10 0 0 0 12 2z"/>
+            <path d="M12 6a6 6 0 0 0-4.24 10.24l1.41-1.41A4 4 0 0 1 12 8a4 4 0 0 1 2.83 6.83l1.41 1.41A6 6 0 0 0 12 6z"/>
+            <circle cx="12" cy="18" r="2"/>
+          </svg>
+          📡 Base Station
+        </a>
         <a href="index.html" class="action-btn" title="Back to Fleet Dashboard">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M19 12H5M12 19l-7-7 7-7"/>
@@ -494,6 +503,7 @@
         <div class="canvas-overlay-top-left">
           <button id="btn-zoom-in" class="canvas-btn" title="Zoom In (+)">➕</button>
           <button id="btn-zoom-out" class="canvas-btn" title="Zoom Out (-)">➖</button>
+          <button id="btn-toggle-lidar" class="canvas-btn active" title="Toggle 2D LiDAR Obstacle Points on Map">📡 LiDAR: ON</button>
           <button id="btn-center-base" class="canvas-btn" title="Center View on Base Station (0, 0)">🏰 Center Base</button>
           <button id="btn-center-robot" class="canvas-btn" title="Center View on Selected Robot">🤖 Center Robot</button>
           <button id="btn-fit-view" class="canvas-btn" title="Fit Robot and Target into view">📐 Fit All</button>
@@ -665,19 +675,40 @@
             <span class="planner-card-title">
               🏰 Base Station (0, 0) Origin
             </span>
-            <button id="btn-edit-base" class="canvas-btn" style="padding: 2px 8px; font-size: 0.72rem;">Set Manual</button>
+            <span id="base-lock-badge" class="state-badge idle" style="font-size: 0.7rem;">Active</span>
           </div>
-          <div class="telemetry-row">
-            <span class="telemetry-label">Latitude:</span>
-            <span class="telemetry-val" id="base-ref-lat">47.49790000°</span>
+
+          <div class="coord-grid" style="margin-bottom: 8px;">
+            <div class="coord-input-group">
+              <label>Base Latitude (°)</label>
+              <div class="coord-input-wrap">
+                <input type="number" id="base-input-lat" step="0.0000001" placeholder="47.xxxxxxx">
+              </div>
+            </div>
+            <div class="coord-input-group">
+              <label>Base Longitude (°)</label>
+              <div class="coord-input-wrap">
+                <input type="number" id="base-input-lon" step="0.0000001" placeholder="19.xxxxxxx">
+              </div>
+            </div>
           </div>
-          <div class="telemetry-row">
-            <span class="telemetry-label">Longitude:</span>
-            <span class="telemetry-val" id="base-ref-lon">19.04020000°</span>
+
+          <div class="action-button-row" style="margin-bottom: 8px;">
+            <button id="btn-save-base" class="btn-secondary-action" title="Save Base Coordinates as (0, 0)">
+              💾 Apply Base (0, 0)
+            </button>
+            <button id="btn-fetch-caster" class="btn-secondary-action" title="Fetch locked coordinates from Base Station Caster (Port 8080)">
+              🔄 Fetch :8080
+            </button>
           </div>
+
+          <button id="btn-set-robot-as-base" class="btn-secondary-action" style="width: 100%; margin-bottom: 8px;" title="Set Base (0, 0) to Robot's current GPS position">
+            📍 Set Selected Robot GPS as Base (0, 0)
+          </button>
+
           <div class="telemetry-row">
             <span class="telemetry-label">Source:</span>
-            <span class="telemetry-val" id="base-ref-source" style="color: #38bdf8;">RTCM 1005 / Caster</span>
+            <span class="telemetry-val" id="base-ref-source" style="color: #38bdf8; font-size: 0.75rem;">Manual / Caster</span>
           </div>
         </div>
 
@@ -698,8 +729,9 @@
     </main>
   </div>
 
-  <!-- Scripts -->
-  <script src="js/cdr_decoder.js"></script>
-  <script src="js/waypoint_planner.js"></script>
+  <!-- Scripts with cache busters -->
+  <script src="js/state.js?v=v241"></script>
+  <script src="js/cdr_decoder.js?v=v241"></script>
+  <script src="js/waypoint_planner.js?v=v241"></script>
 </body>
 </html>

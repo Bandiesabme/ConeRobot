@@ -127,3 +127,37 @@ function logDebug(msg, level = 'info') {
   }
   container.scrollTop = container.scrollHeight;
 }
+
+// Dynamic Base Station Link Manager (works across Fleet Dashboard and Waypoint Planner)
+function updateBaseStationLink(bs) {
+  const btn = document.getElementById('btn-base-station');
+  const dot = document.getElementById('base-status-dot');
+  if (!btn) return;
+
+  if (bs && bs.online) {
+    const url = bs.url || (bs.ip ? `http://${bs.ip}:${bs.port || 8080}` : 'http://conerobotbasestation.local:8080');
+    btn.href = url;
+    btn.title = `Open RTK Base Station Live Dashboard (${bs.ip || bs.host || 'Online'})`;
+    btn.setAttribute('data-online', 'true');
+    if (dot) {
+      dot.className = 'stat-dot green';
+    }
+  } else {
+    btn.href = 'goto_base.html';
+    btn.title = 'RTK Base Station offline or searching... Click to open default (conerobotBaseStation.local:8080)';
+    btn.setAttribute('data-online', 'false');
+    if (dot) {
+      dot.className = 'stat-dot red';
+    }
+  }
+}
+
+// Initial probe for Base Station endpoint on load
+if (typeof window !== 'undefined') {
+  window.addEventListener('DOMContentLoaded', () => {
+    fetch('/api/base_station')
+      .then(r => r.json())
+      .then(bs => updateBaseStationLink(bs))
+      .catch(() => {});
+  });
+}

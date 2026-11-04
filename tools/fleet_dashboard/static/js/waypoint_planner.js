@@ -2,49 +2,52 @@
    ConeRobot 2D Cartesian Waypoint Planner
    Coordinate Origin: RTK Base Station (0, 0)
    +X = East in meters, +Y = North in meters
-   0 MB extra RAM on rovers - Pure Browser Canvas & Direct WebSocket Streaming
+   Multi-Robot Fleet Visualization & Direct Single-Robot Dispatch
    ========================================================================== */
 
-// --- Global State ---
+// --- Global Fleet State ---
 let activeRobotId = null;
 let activeRobotsList = {};
-let activeWs = null;
-let reconnectTimer = null;
+// Note: activeWebSockets, reconnectTimers and realTelemetry are already declared globally in state.js
+
+// Per-robot breadcrumb trail history: { [id]: [{x, y}, ...] }
+const robotTrails = {};
 
 // Base Station Metric Origin (WGS84 Lat/Lon)
-// Will be auto-populated if /gps/base_fix arrives from rover RTCM 1005
 let baseStationGPS = {
-  lat: 47.4979000,
-  lon: 19.0402000,
-  alt: 100.0,
+  lat: null,
+  lon: null,
+  alt: 0.0,
   locked: false,
-  source: 'Default Config'
+  source: 'Not Set'
 };
 
-// Robot Telemetry Cache
+// Selected Robot Telemetry View State
 const robotTelemetry = {
   online: false,
   ip: '',
   port: 8765,
   state: 'IDLE',
-  sensorMode: 'GPS (RTK FIX)',
+  sensorMode: 'GPS',
   battery: null,
   headingDeg: 0.0,
   headingRad: 0.0,
   pos: {
     lat: null,
     lon: null,
-    x: 0.0, // East in meters from Base
-    y: 0.0, // North in meters from Base
+    x: 0.0, // East in meters from Base (0, 0)
+    y: 0.0, // North in meters from Base (0, 0)
   },
   odomPos: { x: 0.0, y: 0.0 },
   rtkStatus: 'Waiting...',
   diffAge: '--',
   satCount: 0,
-  trail: [] // Array of {x, y}
 };
 
-// Active Target Waypoint
+// Global LiDAR point cloud display toggle
+window.showLidarOnMap = true;
+
+// Active Target Waypoint for the Selected Robot
 let targetWaypoint = {
   active: false,
   x: 0.0, // East meters from Base (0, 0)
@@ -53,7 +56,7 @@ let targetWaypoint = {
 
 // Canvas Viewport Transformation
 const viewState = {
-  scale: 22,       // Pixels per meter
+  scale: 25,       // Pixels per meter
   panX: 0,         // Pan offset X in pixels
   panY: 0,         // Pan offset Y in pixels
   isDragging: false,
@@ -73,33 +76,117 @@ const CLIENT_CHANNELS = {
 };
 
 // ==============================================================================
-// 1. INITIALIZATION & DOM BINDINGS
+// 1. INITIALIZATION & BASE COORDINATE PERSISTENCE
 // ==============================================================================
 window.addEventListener('DOMContentLoaded', () => {
+  if (typeof realTelemetry === 'undefined') {
+    window.realTelemetry = {};
+  }
+  for (let i = 1; i <= 13; i++) {
+    if (!realTelemetry[i] && typeof createEmptyRobotTelemetry === 'function') {
+      realTelemetry[i] = createEmptyRobotTelemetry(i);
+    }
+    robotTrails[i] = [];
+  }
+
   initCanvas();
   bindUIEvents();
+  loadSavedBaseStation();
   fetchFleetList();
-  setInterval(fetchFleetList, 5000);
+  setInterval(fetchFleetList, 4000);
 
-  // Load config to check if base station coords are pre-set
+  // Sync telemetry loop at 20 Hz
+  setInterval(syncTelemetryFromSharedState, 50);
+
+  logMission('Multi-Robot Cartesian Waypoint Planner initialized.', 'info');
+  requestAnimationFrame(renderLoop);
+});
+
+function loadSavedBaseStation() {
+  const saved = localStorage.getItem('conerobot_base_station');
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed.lat && parsed.lon) {
+        baseStationGPS.lat = parseFloat(parsed.lat);
+        baseStationGPS.lon = parseFloat(parsed.lon);
+        baseStationGPS.alt = parseFloat(parsed.alt || 0);
+        baseStationGPS.locked = true;
+        baseStationGPS.source = 'Saved (LocalStorage)';
+        updateBaseStationUI();
+        logMission(`Loaded saved Base Station: ${baseStationGPS.lat.toFixed(7)}°, ${baseStationGPS.lon.toFixed(7)}°`, 'info');
+        return;
+      }
+    } catch (e) {}
+  }
+
   fetch('/api/config')
     .then(r => r.json())
     .then(cfg => {
       if (cfg.base_station && cfg.base_station.lat) {
-        baseStationGPS.lat = cfg.base_station.lat;
-        baseStationGPS.lon = cfg.base_station.lon;
+        baseStationGPS.lat = parseFloat(cfg.base_station.lat);
+        baseStationGPS.lon = parseFloat(cfg.base_station.lon);
+        baseStationGPS.alt = parseFloat(cfg.base_station.alt || 0);
+        baseStationGPS.locked = true;
         baseStationGPS.source = 'fleet_config.json';
         updateBaseStationUI();
-      } else if (cfg.map && cfg.map.default_lat) {
-        baseStationGPS.lat = cfg.map.default_lat;
-        baseStationGPS.lon = cfg.map.default_lon;
-        updateBaseStationUI();
+      } else {
+        fetchBaseFromCaster(true);
       }
-    }).catch(() => {});
+    }).catch(() => {
+      fetchBaseFromCaster(true);
+    });
+}
 
-  logMission('System ready. Please select an active robot to begin planning.', 'info');
-  requestAnimationFrame(renderLoop);
-});
+function saveBaseStation(lat, lon, alt = 0.0, source = 'Manual') {
+  baseStationGPS.lat = Number(lat);
+  baseStationGPS.lon = Number(lon);
+  baseStationGPS.alt = Number(alt);
+  baseStationGPS.locked = true;
+  baseStationGPS.source = source;
+
+  localStorage.setItem('conerobot_base_station', JSON.stringify({
+    lat: baseStationGPS.lat,
+    lon: baseStationGPS.lon,
+    alt: baseStationGPS.alt,
+    source: source
+  }));
+
+  updateBaseStationUI();
+  for (let i = 1; i <= 13; i++) {
+    robotTrails[i] = [];
+  }
+  centerOnBase();
+  logMission(`Base Station (0, 0) updated & locked to: ${baseStationGPS.lat.toFixed(8)}°, ${baseStationGPS.lon.toFixed(8)}°`, 'success');
+}
+
+function fetchBaseFromCaster(isSilent = false) {
+  if (!isSilent) logMission('Querying RTK Base Station Caster (port 8080)...', 'info');
+
+  fetch('/api/base_status')
+    .then(r => r.json())
+    .then(data => {
+      if (data && data.latitude && data.longitude) {
+        const bLat = parseFloat(data.latitude);
+        const bLon = parseFloat(data.longitude);
+        const bAlt = parseFloat(data.altitude || 0);
+        const host = data.connected_host || 'Port 8080';
+        saveBaseStation(bLat, bLon, bAlt, `Base Caster (${host})`);
+      } else if (!isSilent) {
+        logMission('Could not fetch from Caster on port 8080. Enter coordinates manually or click "Set Robot as Base".', 'warn');
+      }
+    }).catch(err => {
+      if (!isSilent) logMission(`Base Caster query error: ${err.message}`, 'warn');
+    });
+}
+
+function setRobotAsBase() {
+  if (robotTelemetry.pos.lat === null || robotTelemetry.pos.lon === null) {
+    alert('Selected robot has not reported a valid GPS fix yet!');
+    return;
+  }
+  saveBaseStation(robotTelemetry.pos.lat, robotTelemetry.pos.lon, 0.0, `Robot ${activeRobotId} GPS Position`);
+}
 
 function bindUIEvents() {
   const robotSelect = document.getElementById('select-active-robot');
@@ -111,6 +198,17 @@ function bindUIEvents() {
   // Canvas View Controls
   document.getElementById('btn-zoom-in').addEventListener('click', () => zoomView(1.25));
   document.getElementById('btn-zoom-out').addEventListener('click', () => zoomView(0.80));
+
+  const btnToggleLidar = document.getElementById('btn-toggle-lidar');
+  if (btnToggleLidar) {
+    btnToggleLidar.addEventListener('click', () => {
+      window.showLidarOnMap = !window.showLidarOnMap;
+      btnToggleLidar.textContent = window.showLidarOnMap ? '📡 LiDAR: ON' : '📡 LiDAR: OFF';
+      btnToggleLidar.className = window.showLidarOnMap ? 'canvas-btn active' : 'canvas-btn';
+      logMission(`LiDAR obstacle points on map: ${window.showLidarOnMap ? 'ENABLED' : 'DISABLED'}`, 'info');
+    });
+  }
+
   document.getElementById('btn-center-base').addEventListener('click', centerOnBase);
   document.getElementById('btn-center-robot').addEventListener('click', centerOnRobot);
   document.getElementById('btn-fit-view').addEventListener('click', fitAll);
@@ -122,18 +220,29 @@ function bindUIEvents() {
   document.getElementById('btn-clear-target').addEventListener('click', clearTarget);
   document.getElementById('btn-set-manual').addEventListener('click', applyManualCoordinates);
 
+  // Base Station Controls
+  document.getElementById('btn-save-base').addEventListener('click', () => {
+    const lat = parseFloat(document.getElementById('base-input-lat').value);
+    const lon = parseFloat(document.getElementById('base-input-lon').value);
+    if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+      saveBaseStation(lat, lon, 0.0, 'Manual User Input');
+    } else {
+      alert('Please enter valid Latitude [-90..90] and Longitude [-180..180].');
+    }
+  });
+
+  document.getElementById('btn-fetch-caster').addEventListener('click', () => fetchBaseFromCaster(false));
+  document.getElementById('btn-set-robot-as-base').addEventListener('click', setRobotAsBase);
+
   // Network Scan
   document.getElementById('btn-scan-network').addEventListener('click', () => {
     fetch('/api/scan')
       .then(r => r.json())
       .then(() => {
-        logMission('Triggered background network scan for active rovers...', 'info');
+        logMission('Scanning Wi-Fi network for active ConeRobots...', 'info');
         setTimeout(fetchFleetList, 1500);
       });
   });
-
-  // Manual Base Station Override
-  document.getElementById('btn-edit-base').addEventListener('click', promptManualBaseCoords);
 
   // Coordinate Inputs
   document.getElementById('input-target-x').addEventListener('change', updateTargetFromInputs);
@@ -141,13 +250,16 @@ function bindUIEvents() {
 }
 
 // ==============================================================================
-// 2. FLEET DISCOVERY & WEBSOCKET ENGINE
+// 2. FLEET DISCOVERY & MULTI-ROBOT WEBSOCKET ENGINE
 // ==============================================================================
 async function fetchFleetList() {
   try {
     const res = await fetch('/api/fleet');
     if (!res.ok) return;
     const data = await res.json();
+    if (data.base_station && typeof updateBaseStationLink === 'function') {
+      updateBaseStationLink(data.base_station);
+    }
     const robots = data.robots || {};
     activeRobotsList = robots;
 
@@ -160,12 +272,23 @@ async function fetchFleetList() {
 
     for (let id = 1; id <= 13; id++) {
       const r = robots[id];
-      if (r && r.online) {
+      if (r && r.online && r.ip) {
         onlineCount++;
         if (!firstOnlineId) firstOnlineId = id;
         html += `<option value="${id}">🤖 ${r.name || `ConeRobot ${id < 10 ? '0' + id : id}`} (${r.ip}) [ONLINE]</option>`;
-      } else if (r) {
-        html += `<option value="${id}" style="color: #64748b;">ConeRobot ${id < 10 ? '0' + id : id} [Offline]</option>`;
+
+        // Connect WebSocket to each online robot in parallel
+        if (!activeWebSockets[id] && !reconnectTimers[id]) {
+          connectRobotWebSocket(id, r.ip, r.port || 8765);
+        }
+      } else {
+        if (r) {
+          html += `<option value="${id}" style="color: #64748b;">ConeRobot ${id < 10 ? '0' + id : id} [Offline]</option>`;
+        }
+        if (activeWebSockets[id]) {
+          try { activeWebSockets[id].close(); } catch (e) {}
+          delete activeWebSockets[id];
+        }
       }
     }
 
@@ -187,38 +310,35 @@ async function fetchFleetList() {
 }
 
 function selectRobot(id) {
-  if (activeRobotId === id && activeWs && activeWs.readyState === WebSocket.OPEN) return;
   activeRobotId = id;
-  const r = activeRobotsList[id];
-  if (!r) return;
+  const select = document.getElementById('select-active-robot');
+  if (select && select.value !== String(id)) {
+    select.value = id;
+  }
 
-  logMission(`Connecting to Robot ${id < 10 ? '0' + id : id} at ${r.ip}:${r.port || 8765}...`, 'info');
-  connectWebSocket(id, r.ip, r.port || 8765);
+  const r = activeRobotsList[id];
+  const isOnline = Boolean(r && r.online && activeWebSockets[id] && activeWebSockets[id].readyState === WebSocket.OPEN);
+  updateConnBadge(isOnline, r?.ip || '');
+
+  syncTelemetryFromSharedState();
+  updateTargetMetrics();
+  logMission(`Selected Robot ${id < 10 ? '0' + id : id} for control.`, 'info');
 }
 
-function connectWebSocket(id, ip, port) {
-  if (activeWs) {
-    try { activeWs.close(); } catch (e) {}
-    activeWs = null;
-  }
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
+function connectRobotWebSocket(id, ip, port) {
   const wsUrl = `ws://${ip}:${port}`;
   let ws;
   try {
     ws = new WebSocket(wsUrl, ["foxglove.sdk.v1", "foxglove.websocket.v1"]);
   } catch (e) {
     try { ws = new WebSocket(wsUrl); } catch (err) {
-      handleWsDisconnect(id, ip, port, err.message);
+      scheduleReconnect(id, ip, port);
       return;
     }
   }
 
   ws.binaryType = "arraybuffer";
-  activeWs = ws;
+  activeWebSockets[id] = ws;
 
   const subIdToTopic = {};
   const channelIdToTopic = {};
@@ -226,10 +346,13 @@ function connectWebSocket(id, ip, port) {
 
   ws.onopen = () => {
     logMission(`🟢 Connected to Robot ${id < 10 ? '0' + id : id} (${ip}:${port})!`, 'success');
-    updateConnBadge(true, ip);
-    robotTelemetry.online = true;
-    robotTelemetry.ip = ip;
-    robotTelemetry.trail = []; // reset trail on fresh connect
+    if (activeRobotId === id) updateConnBadge(true, ip);
+
+    if (!realTelemetry[id]) {
+      realTelemetry[id] = createEmptyRobotTelemetry(id);
+    }
+    realTelemetry[id].online = true;
+    realTelemetry[id].ip = ip;
 
     // 1. Identify Client
     try {
@@ -255,10 +378,7 @@ function connectWebSocket(id, ip, port) {
           }
         ]
       }));
-      logMission('Advertised client channels: /cmd_waypoint and /cmd_primitive (Vector3 CDR).', 'info');
-    } catch (e) {
-      console.error('Failed to advertise client channels:', e);
-    }
+    } catch (e) {}
   };
 
   ws.onmessage = (event) => {
@@ -268,6 +388,7 @@ function connectWebSocket(id, ip, port) {
         if (msg.op === "advertise" && Array.isArray(msg.channels)) {
           const subscriptions = [];
           const targetTopics = [
+            '/scan',
             '/fix',
             '/gps/base_fix',
             '/gps/status',
@@ -291,30 +412,32 @@ function connectWebSocket(id, ip, port) {
           if (subscriptions.length > 0) {
             ws.send(JSON.stringify({ op: "subscribe", subscriptions: subscriptions }));
           }
-        } else if (msg.op === "message" && msg.data) {
-          const topic = subIdToTopic[msg.subscriptionId] || channelIdToTopic[msg.channelId];
-          handleTelemetryMessage(topic, msg.data);
         }
       } catch (e) {}
     } else if (event.data instanceof ArrayBuffer) {
-      handleBinaryFoxgloveMessage(event.data, subIdToTopic, channelIdToTopic);
+      if (typeof handleBinaryFoxgloveMessage === 'function') {
+        handleBinaryFoxgloveMessage(id, event.data, subIdToTopic, channelIdToTopic);
+      }
     }
   };
 
   ws.onerror = () => {};
 
   ws.onclose = () => {
-    handleWsDisconnect(id, ip, port, 'Closed');
+    delete activeWebSockets[id];
+    if (realTelemetry[id]) realTelemetry[id].online = false;
+    if (activeRobotId === id) updateConnBadge(false);
+    scheduleReconnect(id, ip, port);
   };
 }
 
-function handleWsDisconnect(id, ip, port, reason) {
-  updateConnBadge(false);
-  robotTelemetry.online = false;
-  activeWs = null;
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(() => {
-    if (activeRobotId === id) connectWebSocket(id, ip, port);
+function scheduleReconnect(id, ip, port) {
+  if (reconnectTimers[id]) return;
+  reconnectTimers[id] = setTimeout(() => {
+    delete reconnectTimers[id];
+    if (activeRobotsList[id] && activeRobotsList[id].online) {
+      connectRobotWebSocket(id, ip, port);
+    }
   }, 4000);
 }
 
@@ -330,179 +453,85 @@ function updateConnBadge(isOnline, ip) {
 }
 
 // ==============================================================================
-// 3. TELEMETRY PROCESSING & COORDINATE MAPPING
+// 3. SYNCHRONIZE TELEMETRY & MULTI-ROBOT METRIC PROJECTION
 // ==============================================================================
-function handleBinaryFoxgloveMessage(buffer, subIdToTopic, channelIdToTopic) {
-  if (buffer.byteLength < 17) return;
-  const view = new DataView(buffer);
-  const subId = view.getUint32(1, true);
-  const topic = subIdToTopic[subId];
-  if (!topic) return;
-
-  const dataStart = 17; // ROS2 CDR payload starts after Foxglove 13-byte envelope + 4-byte CDR header
-
-  // 1. /fix (sensor_msgs/msg/NavSatFix)
-  if (topic === '/fix' || topic.endsWith('/fix')) {
-    if (topic.includes('base')) {
-      handleBaseFixBinary(view, dataStart);
-    } else {
-      handleRoverFixBinary(view, dataStart);
+function syncTelemetryFromSharedState() {
+  if (baseStationGPS.lat === null || baseStationGPS.lon === null) {
+    // If not set, check if any robot received /gps/base_fix
+    for (let id = 1; id <= 13; id++) {
+      const r = realTelemetry[id];
+      if (r && r.base_gps && r.base_gps.lat) {
+        saveBaseStation(r.base_gps.lat, r.base_gps.lon, r.base_gps.alt || 0, `Rover R${id} RTCM 1005`);
+        break;
+      }
+    }
+    // Or lock to first available rover GPS fix
+    if (baseStationGPS.lat === null) {
+      for (let id = 1; id <= 13; id++) {
+        const r = realTelemetry[id];
+        if (r && r.gps && r.gps.lat && Math.abs(r.gps.lat) > 0.001) {
+          saveBaseStation(r.gps.lat, r.gps.lon, 0.0, `Auto (Robot R${id} First Fix)`);
+          break;
+        }
+      }
     }
   }
-  // 2. /imu/heading (std_msgs/msg/Float32)
-  else if (topic === '/imu/heading' || topic.endsWith('/heading')) {
-    try {
-      const headingRad = view.getFloat32(dataStart, true);
-      robotTelemetry.headingRad = headingRad;
-      robotTelemetry.headingDeg = (headingRad * 180.0 / Math.PI + 360.0) % 360.0;
-      updateTelemetryUI();
-    } catch (e) {}
-  }
-  // 3. /step_status (std_msgs/msg/String)
-  else if (topic === '/step_status' || topic.endsWith('/step_status')) {
-    try {
-      const strLen = view.getUint32(dataStart, true);
-      if (strLen > 0 && strLen < 256) {
-        let str = '';
-        for (let i = 0; i < strLen - 1; i++) {
-          str += String.fromCharCode(view.getUint8(dataStart + 4 + i));
-        }
-        handleStepStatusString(str);
-      }
-    } catch (e) {}
-  }
-  // 4. /battery_state (sensor_msgs/msg/BatteryState)
-  else if (topic === '/battery_state' || topic.includes('battery')) {
-    try {
-      // Float32 voltage at offset after Header
-      let ptr = dataStart;
-      ptr += 8; // skip stamp
-      const frameIdLen = view.getUint32(ptr, true);
-      ptr += 4 + Math.ceil(frameIdLen / 4) * 4;
-      const voltage = view.getFloat32(ptr, true);
-      if (voltage > 5.0 && voltage < 30.0) {
-        robotTelemetry.battery = voltage.toFixed(1);
-        updateTelemetryUI();
-      }
-    } catch (e) {}
-  }
-  // 5. /gps/status (std_msgs/msg/String)
-  else if (topic === '/gps/status' || topic.endsWith('/gps/status')) {
-    try {
-      const strLen = view.getUint32(dataStart, true);
-      if (strLen > 0 && strLen < 512) {
-        let str = '';
-        for (let i = 0; i < strLen - 1; i++) {
-          str += String.fromCharCode(view.getUint8(dataStart + 4 + i));
-        }
-        handleGpsStatusString(str);
-      }
-    } catch (e) {}
-  }
-}
 
-function handleRoverFixBinary(view, dataStart) {
-  try {
-    let ptr = dataStart;
-    ptr += 8; // skip timestamp (sec, nanosec)
-    const frameIdLen = view.getUint32(ptr, true);
-    ptr += 4 + Math.ceil(frameIdLen / 4) * 4; // aligned frame_id
+  // Update Cartesian (X, Y) for ALL robots
+  for (let id = 1; id <= 13; id++) {
+    const r = realTelemetry[id];
+    if (!r || !r.online) continue;
 
-    // NavSatStatus (status: int8, service: uint16)
-    const status = view.getInt8(ptr);
-    ptr += 1;
-    ptr += 1; // alignment padding
-    ptr += 2; // service uint16
-    ptr += 4; // align to 8 bytes for float64
+    const lat = r.gps?.lat;
+    const lon = r.gps?.lon;
 
-    const lat = view.getFloat64(ptr, true);
-    const lon = view.getFloat64(ptr + 8, true);
-    const alt = view.getFloat64(ptr + 16, true);
-
-    if (Math.abs(lat) > 0.0001 && Math.abs(lon) > 0.0001) {
-      robotTelemetry.pos.lat = lat;
-      robotTelemetry.pos.lon = lon;
-
-      // Transform Global Lat/Lon into Base (0, 0) Metric Cartesian Coordinates
+    if (lat && lon && Math.abs(lat) > 0.001 && Math.abs(lon) > 0.001 && baseStationGPS.lat !== null) {
       const enu = latLonToEnuMeters(lat, lon, baseStationGPS.lat, baseStationGPS.lon);
-      robotTelemetry.pos.x = enu.x; // East in meters
-      robotTelemetry.pos.y = enu.y; // North in meters
+      r.metricX = enu.x;
+      r.metricY = enu.y;
 
-      // Add to breadcrumb trail
-      const last = robotTelemetry.trail[robotTelemetry.trail.length - 1];
+      // Update breadcrumb trail for this robot
+      if (!robotTrails[id]) robotTrails[id] = [];
+      const trail = robotTrails[id];
+      const last = trail[trail.length - 1];
       if (!last || Math.hypot(enu.x - last.x, enu.y - last.y) >= 0.15) {
-        robotTelemetry.trail.push({ x: enu.x, y: enu.y });
-        if (robotTelemetry.trail.length > 500) robotTelemetry.trail.shift();
-      }
-
-      updateTelemetryUI();
-      updateTargetMetrics();
-    }
-  } catch (e) {}
-}
-
-function handleBaseFixBinary(view, dataStart) {
-  try {
-    let ptr = dataStart + 8;
-    const frameIdLen = view.getUint32(ptr, true);
-    ptr += 4 + Math.ceil(frameIdLen / 4) * 4;
-    ptr += 4; // status + service
-    ptr += 4; // alignment to float64
-
-    const bLat = view.getFloat64(ptr, true);
-    const bLon = view.getFloat64(ptr + 8, true);
-    const bAlt = view.getFloat64(ptr + 16, true);
-
-    if (Math.abs(bLat) > 0.001 && Math.abs(bLon) > 0.001) {
-      if (!baseStationGPS.locked || Math.abs(baseStationGPS.lat - bLat) > 1e-6) {
-        baseStationGPS.lat = bLat;
-        baseStationGPS.lon = bLon;
-        baseStationGPS.alt = bAlt;
-        baseStationGPS.locked = true;
-        baseStationGPS.source = 'RTCM 1005 (Decoded from Rover)';
-        logMission(`🏰 RTK Base Station (0, 0) locked via RTCM 1005: ${bLat.toFixed(7)}°, ${bLon.toFixed(7)}°`, 'success');
-        updateBaseStationUI();
+        trail.push({ x: enu.x, y: enu.y });
+        if (trail.length > 300) trail.shift();
       }
     }
-  } catch (e) {}
-}
-
-function handleGpsStatusString(str) {
-  if (!str) return;
-  // Parse RTK fix mode
-  if (str.includes('RTK FIX') || str.includes('RTK Fix')) {
-    robotTelemetry.rtkStatus = 'RTK FIX (Mode 4)';
-    robotTelemetry.sensorMode = 'GPS (RTK FIX)';
-  } else if (str.includes('FLOAT') || str.includes('Float')) {
-    robotTelemetry.rtkStatus = 'RTK FLOAT (Mode 5)';
-    robotTelemetry.sensorMode = 'GPS (RTK FLOAT)';
-  } else if (str.includes('3D FIX') || str.includes('3D Fix')) {
-    robotTelemetry.rtkStatus = '3D FIX (Mode 1/2)';
-    robotTelemetry.sensorMode = 'GPS (3D FIX)';
   }
 
-  // Parse age of diff corrections
-  const ageMatch = str.match(/Corr\.\s*age:\s*([\d.]+s|-)/i);
-  if (ageMatch) robotTelemetry.diffAge = ageMatch[1];
+  // Sync selected active robot view
+  if (activeRobotId && realTelemetry[activeRobotId]) {
+    const sel = realTelemetry[activeRobotId];
+    robotTelemetry.online = sel.online;
+    robotTelemetry.ip = sel.ip;
+    robotTelemetry.pos.lat = sel.gps?.lat;
+    robotTelemetry.pos.lon = sel.gps?.lon;
+    robotTelemetry.pos.x = sel.metricX || 0.0;
+    robotTelemetry.pos.y = sel.metricY || 0.0;
 
-  updateTelemetryUI();
+    if (sel.imu && sel.imu.heading !== null && !isNaN(sel.imu.heading)) {
+      robotTelemetry.headingDeg = sel.imu.heading;
+      robotTelemetry.headingRad = (sel.imu.heading * Math.PI) / 180.0;
+    }
+
+    robotTelemetry.rtkStatus = sel.gps?.mode || 'NO FIX';
+    robotTelemetry.diffAge = sel.gps?.diff_age || '--';
+    robotTelemetry.satCount = sel.gps?.sats || 0;
+    robotTelemetry.battery = sel.health?.battery_v || null;
+
+    if (sel.gps?.mode === 'RTK FIX') robotTelemetry.sensorMode = 'GPS (RTK FIX)';
+    else if (sel.gps?.mode === 'FLOAT') robotTelemetry.sensorMode = 'GPS (RTK FLOAT)';
+    else if (sel.gps?.mode) robotTelemetry.sensorMode = `GPS (${sel.gps.mode})`;
+
+    updateTelemetryUI();
+    updateTargetMetrics();
+  }
 }
 
-function handleStepStatusString(str) {
-  if (!str) return;
-  let state = 'IDLE';
-  if (str.includes('IDLE')) state = 'IDLE';
-  else if (str.includes('EXECUTING') || str.includes('MOVING') || str.includes('DRIVE') || str.includes('TURN')) state = 'EXECUTING';
-  else if (str.includes('SENSOR_ERROR')) state = 'SENSOR_ERROR';
-  else if (str.includes('CANCELING')) state = 'CANCELING';
-
-  robotTelemetry.state = state;
-  updateTelemetryUI();
-}
-
-// Convert WGS84 Lat/Lon to local Cartesian ENU meters relative to reference (Base 0, 0)
 function latLonToEnuMeters(lat, lon, refLat, refLon) {
-  const R = 6371000.0; // Earth radius in meters
+  const R = 6371000.0;
   const dLatRad = (lat - refLat) * Math.PI / 180.0;
   const dLonRad = (lon - refLon) * Math.PI / 180.0;
   const latAvgRad = ((lat + refLat) / 2.0) * Math.PI / 180.0;
@@ -516,11 +545,13 @@ function latLonToEnuMeters(lat, lon, refLat, refLon) {
 // 4. UI UPDATE HELPERS
 // ==============================================================================
 function updateTelemetryUI() {
-  document.getElementById('tel-base-pos').textContent = `X: ${robotTelemetry.pos.x >= 0 ? '+' : ''}${robotTelemetry.pos.x.toFixed(2)}m, Y: ${robotTelemetry.pos.y >= 0 ? '+' : ''}${robotTelemetry.pos.y.toFixed(2)}m`;
+  const signX = robotTelemetry.pos.x >= 0 ? '+' : '';
+  const signY = robotTelemetry.pos.y >= 0 ? '+' : '';
+  document.getElementById('tel-base-pos').textContent = `X: ${signX}${robotTelemetry.pos.x.toFixed(2)}m, Y: ${signY}${robotTelemetry.pos.y.toFixed(2)}m`;
   document.getElementById('tel-sensor-mode').textContent = robotTelemetry.sensorMode;
 
   const rtkEl = document.getElementById('tel-rtk-status');
-  rtkEl.textContent = robotTelemetry.rtkStatus;
+  rtkEl.textContent = `${robotTelemetry.rtkStatus} (${robotTelemetry.satCount} Sats)`;
   if (robotTelemetry.rtkStatus.includes('FIX')) rtkEl.style.color = '#10b981';
   else if (robotTelemetry.rtkStatus.includes('FLOAT')) rtkEl.style.color = '#f59e0b';
   else rtkEl.style.color = '#ef4444';
@@ -537,10 +568,18 @@ function updateTelemetryUI() {
 }
 
 function updateBaseStationUI() {
-  document.getElementById('header-base-coords').textContent = `${baseStationGPS.lat.toFixed(6)}°, ${baseStationGPS.lon.toFixed(6)}°`;
-  document.getElementById('base-ref-lat').textContent = `${baseStationGPS.lat.toFixed(8)}°`;
-  document.getElementById('base-ref-lon').textContent = `${baseStationGPS.lon.toFixed(8)}°`;
-  document.getElementById('base-ref-source').textContent = baseStationGPS.source;
+  if (baseStationGPS.lat !== null && baseStationGPS.lon !== null) {
+    document.getElementById('header-base-coords').textContent = `${baseStationGPS.lat.toFixed(6)}°, ${baseStationGPS.lon.toFixed(6)}°`;
+    document.getElementById('base-input-lat').value = baseStationGPS.lat.toFixed(7);
+    document.getElementById('base-input-lon').value = baseStationGPS.lon.toFixed(7);
+    document.getElementById('base-ref-source').textContent = baseStationGPS.source;
+    document.getElementById('base-lock-badge').className = 'state-badge idle';
+    document.getElementById('base-lock-badge').textContent = 'Locked (0, 0)';
+  } else {
+    document.getElementById('header-base-coords').textContent = 'Not Set (Click Fetch :8080)';
+    document.getElementById('base-lock-badge').className = 'state-badge error';
+    document.getElementById('base-lock-badge').textContent = 'Unset';
+  }
 }
 
 function updateTargetMetrics() {
@@ -555,7 +594,6 @@ function updateTargetMetrics() {
   const dy = targetWaypoint.y - robotTelemetry.pos.y;
   const dist = Math.hypot(dx, dy);
 
-  // Bearing in standard ENU: 0 = East (+X), 90 = North (+Y)
   let bearingRad = Math.atan2(dy, dx);
   let bearingDeg = (bearingRad * 180.0 / Math.PI + 360.0) % 360.0;
 
@@ -589,13 +627,6 @@ function escapeHtml(s) {
 // 5. WAYPOINT DISPATCH & ACTION LOGIC
 // ==============================================================================
 function encodeVector3CDR(channelId, x, y, z) {
-  // 33-byte ArrayBuffer:
-  // Byte 0: Opcode 1 (clientMessage)
-  // Byte 1..4: uint32 LE (channelId)
-  // Byte 5..8: ROS 2 CDR Header [0x00, 0x01, 0x00, 0x00] (CDR_LE)
-  // Byte 9..16: Float64 LE (x)
-  // Byte 17..24: Float64 LE (y)
-  // Byte 25..32: Float64 LE (z)
   const buf = new ArrayBuffer(33);
   const view = new DataView(buf);
   view.setUint8(0, 1);
@@ -622,24 +653,23 @@ function dispatchWaypoint() {
 
   const x = targetWaypoint.x;
   const y = targetWaypoint.y;
-  const z = 0.0; // 0.0 indicates Base-relative ENU meters to primitive_motion_controller
+  const z = 0.0;
 
   logMission(`🚀 Dispatching Robot ${activeRobotId} -> Target: (X: ${x.toFixed(2)}m, Y: ${y.toFixed(2)}m)...`, 'info');
 
-  // 1. Direct Foxglove WebSocket Binary Dispatch (0 MB rover RAM)
   let sentViaWs = false;
-  if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+  const ws = activeWebSockets[activeRobotId];
+  if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       const cdrBuf = encodeVector3CDR(CLIENT_CHANNELS.CMD_WAYPOINT, x, y, z);
-      activeWs.send(cdrBuf);
+      ws.send(cdrBuf);
       sentViaWs = true;
-      logMission(`✔ Sent /cmd_waypoint via Foxglove WebSocket to Rover!`, 'success');
+      logMission(`✔ Sent /cmd_waypoint to Robot ${activeRobotId} via WebSocket!`, 'success');
     } catch (err) {
       console.warn('WebSocket send error:', err);
     }
   }
 
-  // 2. HTTP Relay Fallback to /api/waypoint
   fetch('/api/waypoint', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -653,13 +683,9 @@ function dispatchWaypoint() {
     })
   }).then(r => r.json())
     .then(data => {
-      if (!sentViaWs) {
-        logMission(`✔ Dispatched via HTTP Backend Relay!`, 'success');
-      }
+      if (!sentViaWs) logMission(`✔ Dispatched via HTTP Backend Relay!`, 'success');
     }).catch(err => {
-      if (!sentViaWs) {
-        logMission(`✖ Failed to send command: ${err.message}`, 'error');
-      }
+      if (!sentViaWs) logMission(`✖ Failed to send command: ${err.message}`, 'error');
     });
 }
 
@@ -675,13 +701,13 @@ function returnToBase() {
 }
 
 function triggerEmergencyStop() {
-  logMission(`🛑 EMERGENCY STOP TRIGGERED! Halting robot immediately...`, 'error');
+  logMission(`🛑 EMERGENCY STOP TRIGGERED! Halting selected robot...`, 'error');
 
-  // Send /cmd_primitive with {x: 0, y: 0, z: 0}
-  if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+  const ws = activeWebSockets[activeRobotId];
+  if (ws && ws.readyState === WebSocket.OPEN) {
     try {
       const stopBuf = encodeVector3CDR(CLIENT_CHANNELS.CMD_PRIMITIVE, 0.0, 0.0, 0.0);
-      activeWs.send(stopBuf);
+      ws.send(stopBuf);
       logMission(`✔ Emergency stop packet broadcasted on /cmd_primitive!`, 'warn');
     } catch (e) {}
   }
@@ -728,32 +754,7 @@ function updateTargetFromInputs() {
 
 function applyManualCoordinates() {
   updateTargetFromInputs();
-  logMission(`Applied manual coordinates: (X: ${targetWaypoint.x.toFixed(2)}m, Y: ${targetWaypoint.y.toFixed(2)}m)`, 'info');
-}
-
-function promptManualBaseCoords() {
-  const current = `${baseStationGPS.lat.toFixed(7)}, ${baseStationGPS.lon.toFixed(7)}`;
-  const input = prompt('Enter RTK Base Station Latitude, Longitude (WGS84 degrees):', current);
-  if (!input) return;
-  const parts = input.split(',').map(s => parseFloat(s.trim()));
-  if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-    baseStationGPS.lat = parts[0];
-    baseStationGPS.lon = parts[1];
-    baseStationGPS.locked = true;
-    baseStationGPS.source = 'Manual User Override';
-    logMission(`Base Station reference updated: ${parts[0]}°, ${parts[1]}°`, 'success');
-    updateBaseStationUI();
-    // Re-project robot position
-    if (robotTelemetry.pos.lat !== null) {
-      const enu = latLonToEnuMeters(robotTelemetry.pos.lat, robotTelemetry.pos.lon, parts[0], parts[1]);
-      robotTelemetry.pos.x = enu.x;
-      robotTelemetry.pos.y = enu.y;
-      updateTelemetryUI();
-      updateTargetMetrics();
-    }
-  } else {
-    alert('Invalid coordinate format. Example: 47.4979123, 19.0402123');
-  }
+  logMission(`Applied coordinates: (X: ${targetWaypoint.x.toFixed(2)}m, Y: ${targetWaypoint.y.toFixed(2)}m)`, 'info');
 }
 
 // ==============================================================================
@@ -763,13 +764,19 @@ let canvas, ctx;
 
 function initCanvas() {
   canvas = document.getElementById('waypoint-canvas');
+  if (!canvas) {
+    console.error('Cannot find #waypoint-canvas element!');
+    return;
+  }
   ctx = canvas.getContext('2d');
 
   function resizeCanvas() {
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+    const w = rect.width || canvas.parentElement?.clientWidth || (window.innerWidth - 420);
+    const h = rect.height || canvas.parentElement?.clientHeight || (window.innerHeight - 100);
+    canvas.width = Math.max(300, Math.floor(w)) * dpr;
+    canvas.height = Math.max(300, Math.floor(h)) * dpr;
   }
 
   window.addEventListener('resize', resizeCanvas);
@@ -799,12 +806,10 @@ function initCanvas() {
       viewState.dragStartY = e.clientY;
     }
 
-    // World coordinates under cursor
     const world = canvasToWorld(screenX, screenY);
     viewState.mouseWorldX = world.x;
     viewState.mouseWorldY = world.y;
 
-    // Update bottom cursor coordinate pill
     const distFromBase = Math.hypot(world.x, world.y);
     const signX = world.x >= 0 ? '+' : '';
     const signY = world.y >= 0 ? '+' : '';
@@ -817,7 +822,6 @@ function initCanvas() {
     if (!viewState.isDragging) return;
     viewState.isDragging = false;
 
-    // Check if this was a clean CLICK (not a drag)
     const rect = canvas.getBoundingClientRect();
     if (
       e.clientX >= rect.left && e.clientX <= rect.right &&
@@ -825,12 +829,32 @@ function initCanvas() {
     ) {
       const dt = Date.now() - viewState.downTime;
       const dragDist = Math.hypot(e.clientX - viewState.dragStartX, e.clientY - viewState.dragStartY);
-      if (dt < 400 && dragDist < 5) {
-        // Place Target Waypoint
+
+      if (dt < 400 && dragDist < 6) {
         const screenX = e.clientX - rect.left;
         const screenY = e.clientY - rect.top;
-        const world = canvasToWorld(screenX, screenY);
 
+        // 1. Check if user clicked directly on any robot to SELECT it!
+        let clickedRobotId = null;
+        for (let id = 1; id <= 13; id++) {
+          const r = realTelemetry[id];
+          if (r && r.online && r.metricX !== undefined) {
+            const rScreen = worldToCanvas(r.metricX, r.metricY);
+            const clickDist = Math.hypot(screenX - rScreen.x, screenY - rScreen.y);
+            if (clickDist <= 22) {
+              clickedRobotId = id;
+              break;
+            }
+          }
+        }
+
+        if (clickedRobotId) {
+          selectRobot(clickedRobotId);
+          return;
+        }
+
+        // 2. Otherwise, set the Target Waypoint for the currently selected robot
+        const world = canvasToWorld(screenX, screenY);
         targetWaypoint.x = Math.round(world.x * 100) / 100;
         targetWaypoint.y = Math.round(world.y * 100) / 100;
         targetWaypoint.active = true;
@@ -839,7 +863,7 @@ function initCanvas() {
         document.getElementById('input-target-y').value = targetWaypoint.y.toFixed(2);
         updateTargetMetrics();
 
-        logMission(`Target placed at (X: ${targetWaypoint.x.toFixed(2)}m, Y: ${targetWaypoint.y.toFixed(2)}m). Ready to dispatch!`, 'info');
+        logMission(`Target placed at (X: ${targetWaypoint.x.toFixed(2)}m, Y: ${targetWaypoint.y.toFixed(2)}m).`, 'info');
       }
     }
   });
@@ -855,7 +879,6 @@ function initCanvas() {
   }, { passive: false });
 }
 
-// Convert World (Meters) to Canvas (Pixels)
 function worldToCanvas(wx, wy) {
   const dpr = window.devicePixelRatio || 1;
   const cx = (canvas.width / dpr) / 2 + viewState.panX;
@@ -863,11 +886,10 @@ function worldToCanvas(wx, wy) {
 
   return {
     x: cx + wx * viewState.scale,
-    y: cy - wy * viewState.scale // Invert Y because canvas Y points down, North (+Y) points up
+    y: cy - wy * viewState.scale
   };
 }
 
-// Convert Canvas (Pixels) to World (Meters)
 function canvasToWorld(cx_px, cy_px) {
   const dpr = window.devicePixelRatio || 1;
   const cx = (canvas.width / dpr) / 2 + viewState.panX;
@@ -888,10 +910,9 @@ function zoomView(factor) {
 
 function zoomViewAroundPoint(factor, pointX, pointY) {
   const oldScale = viewState.scale;
-  const newScale = Math.max(3.0, Math.min(250.0, oldScale * factor));
+  const newScale = Math.max(2.0, Math.min(300.0, oldScale * factor));
   if (oldScale === newScale) return;
 
-  // Keep the point under cursor fixed in world space
   const world = canvasToWorld(pointX, pointY);
   viewState.scale = newScale;
   const newScreen = worldToCanvas(world.x, world.y);
@@ -911,9 +932,15 @@ function centerOnRobot() {
 
 function fitAll() {
   const points = [{ x: 0, y: 0 }];
-  if (robotTelemetry.pos.x !== 0 || robotTelemetry.pos.y !== 0) {
-    points.push({ x: robotTelemetry.pos.x, y: robotTelemetry.pos.y });
+
+  // Include ALL online robots
+  for (let id = 1; id <= 13; id++) {
+    const r = realTelemetry[id];
+    if (r && r.online && r.metricX !== undefined) {
+      points.push({ x: r.metricX, y: r.metricY });
+    }
   }
+
   if (targetWaypoint.active) {
     points.push({ x: targetWaypoint.x, y: targetWaypoint.y });
   }
@@ -926,7 +953,6 @@ function fitAll() {
     maxY = Math.max(maxY, p.y);
   });
 
-  // Add 4-meter margin
   minX -= 4; maxX += 4;
   minY -= 4; maxY += 4;
 
@@ -937,7 +963,10 @@ function fitAll() {
   const spanX = Math.max(8, maxX - minX);
   const spanY = Math.max(8, maxY - minY);
 
-  viewState.scale = Math.min(cw / spanX, ch / spanY);
+  const calcScale = Math.min(cw / spanX, ch / spanY);
+  if (!isNaN(calcScale) && isFinite(calcScale) && calcScale > 1.0) {
+    viewState.scale = Math.max(2.0, Math.min(250.0, calcScale));
+  }
   const midWorldX = (minX + maxX) / 2;
   const midWorldY = (minY + maxY) / 2;
 
@@ -946,28 +975,33 @@ function fitAll() {
 }
 
 // ==============================================================================
-// 7. RENDER LOOP
+// 7. RENDER LOOP (DRAWS BASE, ALL ONLINE ROBOTS, TARGET)
 // ==============================================================================
 function renderLoop() {
-  if (canvas && ctx) {
-    drawCartesianScene();
-  }
   requestAnimationFrame(renderLoop);
+  if (canvas && ctx) {
+    try {
+      drawCartesianScene();
+    } catch (err) {
+      console.error('[RENDER ERROR]', err);
+    }
+  }
 }
 
 function drawCartesianScene() {
+  if (!canvas || !ctx) return;
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.width / dpr;
   const height = canvas.height / dpr;
+  if (width < 10 || height < 10) return;
 
   ctx.save();
   ctx.scale(dpr, dpr);
 
-  // Background
   ctx.fillStyle = '#090d16';
   ctx.fillRect(0, 0, width, height);
 
-  // Dynamic Adaptive Cartesian Grid
+  // Dynamic Cartesian Grid
   drawGrid(width, height);
 
   // Coordinate Axes (+X East, +Y North)
@@ -976,13 +1010,16 @@ function drawCartesianScene() {
   // Base Station Pin at (0, 0)
   drawBaseStation();
 
-  // Robot Breadcrumb Trail
-  drawRobotTrail();
+  // Draw 2D LiDAR Obstacle Points for all online robots on the field
+  drawAllRobotLidarPoints();
 
-  // Selected Robot (Position, Heading Cone, Chassis)
-  drawRobot();
+  // Draw Trails for All Robots
+  drawAllRobotTrails();
 
-  // Target Waypoint Pin & Trajectory Vector Line
+  // Draw ALL Online Robots on the Field
+  drawAllRobots();
+
+  // Target Waypoint Pin & Vector Line (for Active Robot)
   if (targetWaypoint.active) {
     drawTargetWaypoint();
   }
@@ -990,13 +1027,24 @@ function drawCartesianScene() {
   // Crosshair Cursor Indicator
   drawCrosshairCursor();
 
+  // Warning Banner if Base Station is far off
+  const distFromBase = Math.hypot(robotTelemetry.pos.x, robotTelemetry.pos.y);
+  if (distFromBase > 5000 && robotTelemetry.pos.lat !== null) {
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.9)';
+    ctx.fillRect(width / 2 - 220, 16, 440, 26);
+    ctx.font = 'bold 11px "Outfit", sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('⚠️ Base Station differs by > 5km! Click "Fetch :8080" or "Set Robot as Base"', width / 2, 29);
+  }
+
   ctx.restore();
 }
 
 function drawGrid(width, height) {
   const scale = viewState.scale;
 
-  // Determine grid intervals based on zoom level
   let minorStep = 1.0;
   let majorStep = 5.0;
 
@@ -1020,23 +1068,21 @@ function drawGrid(width, height) {
   const startY = Math.floor(bottomRight.y / minorStep) * minorStep;
   const endY = Math.ceil(topLeft.y / minorStep) * minorStep;
 
-  // 1. Minor Grid Lines
+  // 1. Minor Lines
   ctx.lineWidth = 1;
   ctx.strokeStyle = '#172033';
   ctx.beginPath();
   for (let x = startX; x <= endX; x += minorStep) {
     const scr = worldToCanvas(x, 0);
-    ctx.moveTo(scr.x, 0);
-    ctx.lineTo(scr.x, height);
+    ctx.moveTo(scr.x, 0); ctx.lineTo(scr.x, height);
   }
   for (let y = startY; y <= endY; y += minorStep) {
     const scr = worldToCanvas(0, y);
-    ctx.moveTo(0, scr.y);
-    ctx.lineTo(width, scr.y);
+    ctx.moveTo(0, scr.y); ctx.lineTo(width, scr.y);
   }
   ctx.stroke();
 
-  // 2. Major Grid Lines with Metric Labels
+  // 2. Major Lines with Numbers
   ctx.lineWidth = 1.2;
   ctx.strokeStyle = '#22304d';
   ctx.fillStyle = '#64748b';
@@ -1045,14 +1091,12 @@ function drawGrid(width, height) {
   ctx.textBaseline = 'top';
 
   for (let x = Math.floor(topLeft.x / majorStep) * majorStep; x <= endX; x += majorStep) {
-    if (Math.abs(x) < 0.001) continue; // Skip 0 axis (drawn separately)
+    if (Math.abs(x) < 0.001) continue;
     const scr = worldToCanvas(x, 0);
     ctx.beginPath();
-    ctx.moveTo(scr.x, 0);
-    ctx.lineTo(scr.x, height);
+    ctx.moveTo(scr.x, 0); ctx.lineTo(scr.x, height);
     ctx.stroke();
 
-    // Metric coordinate label
     const labelY = Math.max(16, Math.min(height - 24, worldToCanvas(0, 0).y + 6));
     ctx.fillText(`${x > 0 ? '+' : ''}${x.toFixed(0)}m`, scr.x, labelY);
   }
@@ -1060,11 +1104,10 @@ function drawGrid(width, height) {
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   for (let y = Math.floor(bottomRight.y / majorStep) * majorStep; y <= endY; y += majorStep) {
-    if (Math.abs(y) < 0.001) continue; // Skip 0 axis
+    if (Math.abs(y) < 0.001) continue;
     const scr = worldToCanvas(0, y);
     ctx.beginPath();
-    ctx.moveTo(0, scr.y);
-    ctx.lineTo(width, scr.y);
+    ctx.moveTo(0, scr.y); ctx.lineTo(width, scr.y);
     ctx.stroke();
 
     const labelX = Math.max(34, Math.min(width - 16, worldToCanvas(0, 0).x - 6));
@@ -1075,30 +1118,23 @@ function drawGrid(width, height) {
 function drawAxes(width, height) {
   const origin = worldToCanvas(0, 0);
 
-  // +X Axis (East) - Cyan
   ctx.lineWidth = 2.0;
   ctx.strokeStyle = 'rgba(2, 132, 199, 0.7)';
   ctx.beginPath();
-  ctx.moveTo(0, origin.y);
-  ctx.lineTo(width, origin.y);
+  ctx.moveTo(0, origin.y); ctx.lineTo(width, origin.y);
   ctx.stroke();
 
-  // +Y Axis (North) - Green
   ctx.strokeStyle = 'rgba(16, 185, 129, 0.7)';
   ctx.beginPath();
-  ctx.moveTo(origin.x, 0);
-  ctx.lineTo(origin.x, height);
+  ctx.moveTo(origin.x, 0); ctx.lineTo(origin.x, height);
   ctx.stroke();
 
-  // Axis Labels & Arrowheads
   ctx.font = 'bold 11px "JetBrains Mono", monospace';
 
-  // East Label (+X)
   ctx.fillStyle = '#38bdf8';
   ctx.textAlign = 'right';
   ctx.fillText('EAST (+X) →', width - 12, origin.y - 8);
 
-  // North Label (+Y)
   ctx.fillStyle = '#34d399';
   ctx.textAlign = 'left';
   ctx.fillText('↑ NORTH (+Y)', origin.x + 8, 18);
@@ -1108,8 +1144,7 @@ function drawBaseStation() {
   const origin = worldToCanvas(0, 0);
   const now = Date.now() / 1000;
 
-  // Radar Pulse Rings around Base (0, 0)
-  const pulseRadius = (now % 2.5) * 16 * (viewState.scale / 22);
+  const pulseRadius = (now % 2.5) * 16 * (viewState.scale / 25);
   const pulseAlpha = Math.max(0, 1.0 - (now % 2.5) / 2.5);
 
   ctx.beginPath();
@@ -1118,7 +1153,6 @@ function drawBaseStation() {
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // Base Station Marker (Golden/Emerald Beacon)
   ctx.beginPath();
   ctx.arc(origin.x, origin.y, 9, 0, Math.PI * 2);
   ctx.fillStyle = '#10b981';
@@ -1127,13 +1161,6 @@ function drawBaseStation() {
   ctx.lineWidth = 2.5;
   ctx.stroke();
 
-  // Landmark Icon Badge
-  ctx.font = 'bold 10px "JetBrains Mono", monospace';
-  ctx.fillStyle = '#ffffff';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-
-  // Base Label Tag
   const tagY = origin.y + 14;
   ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
   ctx.fillRect(origin.x - 52, tagY - 2, 104, 18);
@@ -1141,108 +1168,196 @@ function drawBaseStation() {
   ctx.lineWidth = 1;
   ctx.strokeRect(origin.x - 52, tagY - 2, 104, 18);
 
+  ctx.font = 'bold 10px "JetBrains Mono", monospace';
   ctx.fillStyle = '#34d399';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
   ctx.fillText('🏰 BASE (0, 0)', origin.x, tagY + 2);
 }
 
-function drawRobotTrail() {
-  if (robotTelemetry.trail.length < 2) return;
+function drawAllRobotLidarPoints() {
+  if (!window.showLidarOnMap) return;
 
-  ctx.beginPath();
-  const start = worldToCanvas(robotTelemetry.trail[0].x, robotTelemetry.trail[0].y);
-  ctx.moveTo(start.x, start.y);
+  const now = Date.now();
+  const pointSize = Math.max(2.0, Math.min(4.5, 0.09 * viewState.scale));
 
-  for (let i = 1; i < robotTelemetry.trail.length; i++) {
-    const pt = worldToCanvas(robotTelemetry.trail[i].x, robotTelemetry.trail[i].y);
-    ctx.lineTo(pt.x, pt.y);
+  for (let id = 1; id <= 13; id++) {
+    const r = realTelemetry[id];
+    if (!r || !r.online || r.metricX === undefined || !r.lidar || !r.lidar.points || r.lidar.points.length === 0) {
+      continue;
+    }
+
+    // Only draw fresh scans (within last 3.5s)
+    if (now - (r.lidar.last_scan_time || 0) > 3500) continue;
+
+    const isSelected = (id === activeRobotId);
+    const rx = r.metricX;
+    const ry = r.metricY;
+
+    const headingDeg = r.imu?.heading || 0.0;
+    const yawRad = (headingDeg * Math.PI) / 180.0;
+    const cosYaw = Math.cos(yawRad);
+    const sinYaw = Math.sin(yawRad);
+
+    const pts = r.lidar.points;
+    const len = pts.length;
+
+    let ptColor = '#38bdf8'; // Selected robot: bright cyan
+    if (!isSelected) {
+      const palette = ['#34d399', '#a78bfa', '#f472b6', '#fbbf24', '#4ade80'];
+      ptColor = palette[(id - 1) % palette.length];
+    }
+    ctx.fillStyle = ptColor;
+
+    for (let i = 0; i < len; i++) {
+      const p = pts[i];
+      const lx = p[0];
+      const ly = p[1];
+
+      // Body frame (lx forward, ly left) to global ENU (+X East, +Y North)
+      const gx = rx + (lx * cosYaw - ly * sinYaw);
+      const gy = ry + (lx * sinYaw + ly * cosYaw);
+
+      const scr = worldToCanvas(gx, gy);
+
+      if (scr.x < -10 || scr.x > canvas.width || scr.y < -10 || scr.y > canvas.height) {
+        continue;
+      }
+
+      ctx.fillRect(scr.x - pointSize / 2, scr.y - pointSize / 2, pointSize, pointSize);
+    }
   }
-
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
-  ctx.lineWidth = 2.0;
-  ctx.setLineDash([4, 4]);
-  ctx.stroke();
-  ctx.setLineDash([]);
 }
 
-function drawRobot() {
-  const rScreen = worldToCanvas(robotTelemetry.pos.x, robotTelemetry.pos.y);
-  const yawRad = robotTelemetry.headingRad; // Heading in ENU radians (0 = East, +CCW)
+function drawAllRobotTrails() {
+  for (let id = 1; id <= 13; id++) {
+    const trail = robotTrails[id];
+    if (!trail || trail.length < 2) continue;
 
-  // 1. Directional Heading Cone / Field of View
-  const coneDist = 2.5 * viewState.scale; // 2.5 meters ahead
-  const halfAngle = 0.35; // ~20 deg spread
-  const leftAngle = yawRad - halfAngle;
-  const rightAngle = yawRad + halfAngle;
+    const isSelected = (id === activeRobotId);
+    ctx.beginPath();
+    const start = worldToCanvas(trail[0].x, trail[0].y);
+    ctx.moveTo(start.x, start.y);
 
-  ctx.beginPath();
-  ctx.moveTo(rScreen.x, rScreen.y);
-  ctx.lineTo(rScreen.x + Math.cos(leftAngle) * coneDist, rScreen.y - Math.sin(leftAngle) * coneDist);
-  ctx.arc(rScreen.x, rScreen.y, coneDist, -rightAngle, -leftAngle);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(2, 132, 199, 0.15)';
-  ctx.fill();
+    for (let i = 1; i < trail.length; i++) {
+      const pt = worldToCanvas(trail[i].x, trail[i].y);
+      ctx.lineTo(pt.x, pt.y);
+    }
 
-  // 2. Heading Pointer Vector
-  ctx.beginPath();
-  ctx.moveTo(rScreen.x, rScreen.y);
-  ctx.lineTo(rScreen.x + Math.cos(yawRad) * (coneDist * 0.9), rScreen.y - Math.sin(yawRad) * (coneDist * 0.9));
-  ctx.strokeStyle = '#38bdf8';
-  ctx.lineWidth = 2.5;
-  ctx.stroke();
+    ctx.strokeStyle = isSelected ? 'rgba(56, 189, 248, 0.45)' : 'rgba(148, 163, 184, 0.2)';
+    ctx.lineWidth = isSelected ? 2.0 : 1.2;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
 
-  // 3. Robot Chassis (Skid-steer dual tracks)
-  ctx.save();
-  ctx.translate(rScreen.x, rScreen.y);
-  ctx.rotate(-yawRad); // Invert rotation for canvas space
+function drawAllRobots() {
+  for (let id = 1; id <= 13; id++) {
+    const r = realTelemetry[id];
+    if (!r || !r.online || r.metricX === undefined) continue;
 
-  const chassisW = Math.max(14, 0.38 * viewState.scale); // ~38cm track width
-  const chassisL = chassisW * 1.25;
+    const isSelected = (id === activeRobotId);
+    const rScreen = worldToCanvas(r.metricX, r.metricY);
 
-  // Dual Treads
-  ctx.fillStyle = '#334155';
-  ctx.fillRect(-chassisL / 2, -chassisW / 2 - 4, chassisL, 4); // Left tread
-  ctx.fillRect(-chassisL / 2, chassisW / 2, chassisL, 4);      // Right tread
+    const headingDeg = r.imu?.heading || 0.0;
+    const yawRad = (headingDeg * Math.PI) / 180.0;
 
-  // Chassis Body
-  ctx.fillStyle = '#0284c7';
-  ctx.beginPath();
-  ctx.roundRect(-chassisL / 2, -chassisW / 2, chassisL, chassisW, 4);
-  ctx.fill();
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2.0;
-  ctx.stroke();
+    const mode = r.gps?.mode || 'NO FIX';
+    let statusColor = '#10b981'; // Green for RTK FIX
+    if (mode === 'FLOAT' || mode === '3D FIX') statusColor = '#f59e0b';
+    else if (mode === 'NO FIX') statusColor = '#ef4444';
 
-  // Forward Direction Notch
-  ctx.fillStyle = '#fbbf24';
-  ctx.beginPath();
-  ctx.moveTo(chassisL / 2 - 2, -chassisW / 4);
-  ctx.lineTo(chassisL / 2 + 4, 0);
-  ctx.lineTo(chassisL / 2 - 2, chassisW / 4);
-  ctx.closePath();
-  ctx.fill();
+    // 1. Heading Cone (Rendered for selected robot)
+    if (isSelected) {
+      const coneDist = 2.5 * viewState.scale;
+      const halfAngle = 0.35;
+      const leftAngle = yawRad - halfAngle;
+      const rightAngle = yawRad + halfAngle;
 
-  ctx.restore();
+      ctx.beginPath();
+      ctx.moveTo(rScreen.x, rScreen.y);
+      ctx.lineTo(rScreen.x + Math.cos(leftAngle) * coneDist, rScreen.y - Math.sin(leftAngle) * coneDist);
+      ctx.arc(rScreen.x, rScreen.y, coneDist, -rightAngle, -leftAngle);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(2, 132, 199, 0.16)';
+      ctx.fill();
 
-  // 4. Robot Label Pill
-  const name = activeRobotId ? `🤖 R${activeRobotId < 10 ? '0' + activeRobotId : activeRobotId}` : '🤖 Robot';
-  ctx.font = 'bold 11px "JetBrains Mono", monospace';
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-  ctx.fillRect(rScreen.x - 38, rScreen.y - 32, 76, 18);
-  ctx.strokeStyle = '#38bdf8';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(rScreen.x - 38, rScreen.y - 32, 76, 18);
+      // Heading Vector Line
+      ctx.beginPath();
+      ctx.moveTo(rScreen.x, rScreen.y);
+      ctx.lineTo(rScreen.x + Math.cos(yawRad) * (coneDist * 0.9), rScreen.y - Math.sin(yawRad) * (coneDist * 0.9));
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+    } else {
+      // Shorter heading arrow for unselected robots
+      const arrowLen = 1.2 * viewState.scale;
+      ctx.beginPath();
+      ctx.moveTo(rScreen.x, rScreen.y);
+      ctx.lineTo(rScreen.x + Math.cos(yawRad) * arrowLen, rScreen.y - Math.sin(yawRad) * arrowLen);
+      ctx.strokeStyle = statusColor;
+      ctx.lineWidth = 1.8;
+      ctx.stroke();
+    }
 
-  ctx.fillStyle = '#f8fafc';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  ctx.fillText(name, rScreen.x, rScreen.y - 29);
+    // 2. Robot Chassis Body
+    ctx.save();
+    ctx.translate(rScreen.x, rScreen.y);
+    ctx.rotate(-yawRad);
+
+    const chassisW = Math.max(12, 0.38 * viewState.scale);
+    const chassisL = chassisW * 1.25;
+
+    // Dual Tracks
+    ctx.fillStyle = isSelected ? '#1e293b' : '#334155';
+    ctx.fillRect(-chassisL / 2, -chassisW / 2 - 3, chassisL, 3);
+    ctx.fillRect(-chassisL / 2, chassisW / 2, chassisL, 3);
+
+    // Chassis
+    ctx.fillStyle = isSelected ? '#0284c7' : '#1e293b';
+    ctx.beginPath();
+    ctx.roundRect(-chassisL / 2, -chassisW / 2, chassisL, chassisW, 3);
+    ctx.fill();
+
+    ctx.strokeStyle = isSelected ? '#ffffff' : statusColor;
+    ctx.lineWidth = isSelected ? 2.2 : 1.5;
+    ctx.stroke();
+
+    // Direction Notch
+    ctx.fillStyle = isSelected ? '#fbbf24' : statusColor;
+    ctx.beginPath();
+    ctx.moveTo(chassisL / 2 - 2, -chassisW / 4);
+    ctx.lineTo(chassisL / 2 + 3, 0);
+    ctx.lineTo(chassisL / 2 - 2, chassisW / 4);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+
+    // 3. Robot Name Label Tag
+    const rNum = id < 10 ? '0' + id : id;
+    const labelText = isSelected ? `🤖 R${rNum} [SEL]` : `R${rNum}`;
+
+    ctx.font = 'bold 10px "JetBrains Mono", monospace';
+    ctx.fillStyle = isSelected ? 'rgba(2, 132, 199, 0.95)' : 'rgba(15, 23, 42, 0.9)';
+    ctx.fillRect(rScreen.x - 30, rScreen.y - 28, 60, 16);
+    ctx.strokeStyle = isSelected ? '#ffffff' : statusColor;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(rScreen.x - 30, rScreen.y - 28, 60, 16);
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(labelText, rScreen.x, rScreen.y - 20);
+  }
 }
 
 function drawTargetWaypoint() {
   const rScreen = worldToCanvas(robotTelemetry.pos.x, robotTelemetry.pos.y);
   const tScreen = worldToCanvas(targetWaypoint.x, targetWaypoint.y);
 
-  // 1. Dynamic Trajectory Line (Dashed Vector from Robot to Target)
+  // 1. Dynamic Trajectory Line from Selected Robot to Target
   ctx.beginPath();
   ctx.moveTo(rScreen.x, rScreen.y);
   ctx.lineTo(tScreen.x, tScreen.y);
@@ -1252,7 +1367,7 @@ function drawTargetWaypoint() {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // 2. Trajectory Info Pill at Midpoint (Distance & Bearing)
+  // 2. Info Pill at Midpoint
   const midX = (rScreen.x + tScreen.x) / 2;
   const midY = (rScreen.y + tScreen.y) / 2;
   const dist = Math.hypot(targetWaypoint.x - robotTelemetry.pos.x, targetWaypoint.y - robotTelemetry.pos.y);
@@ -1269,7 +1384,7 @@ function drawTargetWaypoint() {
   ctx.textBaseline = 'middle';
   ctx.fillText(`📏 ${dist.toFixed(2)} m`, midX, midY - 1);
 
-  // 3. Target Waypoint Pin with Concentric Target Rings
+  // 3. Target Waypoint Pin
   const now = Date.now() / 1000;
   const pulse = Math.sin(now * 4) * 3;
 
@@ -1287,7 +1402,7 @@ function drawTargetWaypoint() {
   ctx.lineWidth = 2.5;
   ctx.stroke();
 
-  // Target Crosshair
+  // Crosshair
   ctx.beginPath();
   ctx.moveTo(tScreen.x - 12, tScreen.y);
   ctx.lineTo(tScreen.x + 12, tScreen.y);
@@ -1297,7 +1412,7 @@ function drawTargetWaypoint() {
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // Target Coordinate Callout Tag
+  // Target Callout Tag
   const signX = targetWaypoint.x >= 0 ? '+' : '';
   const signY = targetWaypoint.y >= 0 ? '+' : '';
   const label = `🎯 (${signX}${targetWaypoint.x.toFixed(2)}m, ${signY}${targetWaypoint.y.toFixed(2)}m)`;

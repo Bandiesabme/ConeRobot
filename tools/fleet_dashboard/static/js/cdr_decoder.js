@@ -124,8 +124,8 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
         r.lidar.last_scan_time = now;
 
         // Decode CDR LaserScan ranges
-        // Only compute 2D cartesian [x, y, dist] points when the modal & 2D LiDAR panel are open for this robot
-        const shouldDecodePoints = (Number(selectedRobotId) === Number(robotId) && lidarRadarOpen);
+        // Compute 2D cartesian [x, y, dist] points when lidarRadarOpen or when showLidarOnMap is enabled
+        const shouldDecodePoints = (typeof showLidarOnMap !== 'undefined' && showLidarOnMap) || (Number(selectedRobotId) === Number(robotId) && lidarRadarOpen);
         const isLE = buffer.byteLength > 14 ? (view.getUint8(14) === 1) : true;
         let sPtr = ptr + 8; // Skip stamp (sec:4 + nsec:4)
         if (sPtr + 4 <= buffer.byteLength) {
@@ -212,8 +212,46 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
         }
       }
 
-      // 2. sensor_msgs/msg/NavSatFix (/fix)
-      else if (normTopic === configuredTopics.gps_fix || normTopic === '/fix' || normTopic.endsWith('/fix')) {
+      // 2a. sensor_msgs/msg/NavSatFix for Base Station (/gps/base_fix)
+      else if (normTopic === '/gps/base_fix' || normTopic.endsWith('/base_fix') || normTopic.includes('base')) {
+        r.base_gps = r.base_gps || {};
+        const isLE = buffer.byteLength > 14 ? (view.getUint8(14) === 1) : true;
+        let bLat = null, bLon = null, bAlt = null;
+
+        let fPtr = ptr + 8;
+        if (fPtr + 4 <= buffer.byteLength) {
+          const frameLen = view.getUint32(fPtr, isLE);
+          if (frameLen < 256 && fPtr + 4 + frameLen <= buffer.byteLength) {
+            fPtr += 4 + frameLen;
+            fPtr += 1; // statusInt
+            fPtr = cdrAlign(fPtr, 2);
+            fPtr += 2; // service
+            fPtr = cdrAlign(fPtr, 8);
+
+            if (fPtr + 24 <= buffer.byteLength) {
+              const cLat = view.getFloat64(fPtr, isLE);
+              const cLon = view.getFloat64(fPtr + 8, isLE);
+              const cAlt = view.getFloat64(fPtr + 16, isLE);
+              if (!isNaN(cLat) && !isNaN(cLon) && isFinite(cLat) && isFinite(cLon) &&
+                  Math.abs(cLat) <= 90.0 && Math.abs(cLon) <= 180.0 &&
+                  (Math.abs(cLat) > 0.0001 || Math.abs(cLon) > 0.0001)) {
+                bLat = cLat;
+                bLon = cLon;
+                if (!isNaN(cAlt) && isFinite(cAlt) && Math.abs(cAlt) < 100000.0) bAlt = cAlt;
+              }
+            }
+          }
+        }
+        if (bLat !== null && bLon !== null) {
+          r.base_gps.lat = Number(bLat.toFixed(7));
+          r.base_gps.lon = Number(bLon.toFixed(7));
+          if (bAlt !== null) r.base_gps.alt = Number(bAlt.toFixed(1));
+          r.base_gps.updated = Date.now();
+        }
+      }
+
+      // 2b. sensor_msgs/msg/NavSatFix (/fix) - Strictly for Rover GPS position
+      else if ((normTopic === configuredTopics.gps_fix || normTopic === '/fix' || normTopic.endsWith('/fix')) && !normTopic.includes('base')) {
         r.gps.present = true;
         const isLE = buffer.byteLength > 14 ? (view.getUint8(14) === 1) : true;
         let lat = null, lon = null, alt = null;
