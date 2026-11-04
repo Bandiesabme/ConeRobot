@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ConeRobot - 2D Cartesian Waypoint Planner</title>
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  
+  <!-- Dashboard Base CSS -->
+  <link rel="stylesheet" href="css/dashboard.css">
+
+  <style>
+    /* Waypoint Planner Dedicated Layout */
+    .waypoint-body {
+      display: grid;
+      grid-template-columns: 1fr 390px;
+      gap: 16px;
+      padding: 16px 24px;
+      height: calc(100vh - 72px);
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+
+    @media (max-width: 1024px) {
+      .waypoint-body {
+        grid-template-columns: 1fr;
+        height: auto;
+        overflow-y: auto;
+      }
+    }
+
+    /* Canvas Viewport Container */
+    .canvas-container {
+      position: relative;
+      background: #0f172a;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      box-shadow: var(--shadow-card);
+      display: flex;
+      flex-direction: column;
+      min-height: 540px;
+    }
+
+    #waypoint-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: crosshair;
+    }
+
+    /* Floating Canvas Overlays */
+    .canvas-overlay-top-left {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+      pointer-events: auto;
+    }
+
+    .canvas-overlay-bottom-left {
+      position: absolute;
+      bottom: 14px;
+      left: 14px;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .canvas-overlay-bottom-right {
+      position: absolute;
+      bottom: 14px;
+      right: 14px;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .canvas-pill {
+      background: rgba(15, 23, 42, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      backdrop-filter: blur(8px);
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.78rem;
+      font-family: var(--font-mono);
+      color: #94a3b8;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .canvas-pill strong {
+      color: #38bdf8;
+    }
+
+    .canvas-btn {
+      background: rgba(15, 23, 42, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      backdrop-filter: blur(8px);
+      color: #f1f5f9;
+      padding: 6px 12px;
+      border-radius: var(--radius-md);
+      font-family: var(--font-main);
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .canvas-btn:hover {
+      background: rgba(30, 41, 59, 0.95);
+      border-color: #38bdf8;
+      color: #38bdf8;
+    }
+
+    /* Right Sidebar Control Panel */
+    .control-sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .control-sidebar::-webkit-scrollbar {
+      width: 5px;
+    }
+    .control-sidebar::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+    }
+
+    .planner-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+      box-shadow: var(--shadow-card);
+    }
+
+    .planner-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .planner-card-title {
+      font-size: 0.88rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-primary);
+    }
+
+    /* Robot Selection Dropdown */
+    .robot-selector-box select {
+      width: 100%;
+      background: var(--bg-dark);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 9px 12px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-main);
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .robot-selector-box select:focus {
+      border-color: var(--border-focus);
+    }
+
+    /* Coordinate Input Row */
+    .coord-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .coord-input-group label {
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .coord-input-wrap {
+      display: flex;
+      align-items: center;
+      background: var(--bg-dark);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+    }
+
+    .coord-input-wrap input {
+      width: 100%;
+      background: transparent;
+      border: none;
+      padding: 8px 10px;
+      font-family: var(--font-mono);
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      outline: none;
+    }
+
+    .coord-unit {
+      padding: 0 8px;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    .coord-nudge-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: none;
+      border-left: 1px solid var(--border-color);
+      color: var(--text-secondary);
+      padding: 6px 8px;
+      cursor: pointer;
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      transition: background 0.15s;
+    }
+
+    .coord-nudge-btn:hover {
+      background: rgba(2, 132, 199, 0.15);
+      color: var(--accent-cyan);
+    }
+
+    /* Target Vector Stats Banner */
+    .target-metrics-bar {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      background: rgba(2, 132, 199, 0.08);
+      border: 1px solid rgba(2, 132, 199, 0.25);
+      border-radius: var(--radius-sm);
+      padding: 8px 10px;
+      margin-bottom: 12px;
+    }
+
+    .metric-cell {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .metric-cell-label {
+      font-size: 0.68rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+    }
+
+    .metric-cell-val {
+      font-family: var(--font-mono);
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: #0284c7;
+    }
+
+    /* Action Buttons */
+    .btn-dispatch {
+      width: 100%;
+      background: #0284c7;
+      color: #ffffff;
+      border: none;
+      padding: 12px;
+      border-radius: var(--radius-md);
+      font-family: var(--font-main);
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 14px rgba(2, 132, 199, 0.35);
+      transition: all 0.2s ease;
+      margin-bottom: 8px;
+    }
+
+    .btn-dispatch:hover {
+      background: #0369a1;
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(2, 132, 199, 0.45);
+    }
+
+    .btn-dispatch:active {
+      transform: translateY(0);
+    }
+
+    .btn-dispatch:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+
+    .action-button-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .btn-secondary-action {
+      background: var(--bg-dark);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 9px;
+      border-radius: var(--radius-md);
+      font-family: var(--font-main);
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .btn-secondary-action:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-focus);
+    }
+
+    .btn-estop {
+      width: 100%;
+      background: #ef4444;
+      color: #ffffff;
+      border: none;
+      padding: 10px;
+      border-radius: var(--radius-md);
+      font-family: var(--font-main);
+      font-size: 0.88rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+      transition: all 0.2s ease;
+    }
+
+    .btn-estop:hover {
+      background: #dc2626;
+      box-shadow: 0 6px 16px rgba(239, 68, 68, 0.45);
+    }
+
+    /* Live Telemetry Mini Table */
+    .telemetry-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+      font-size: 0.8rem;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.05);
+    }
+
+    .telemetry-row:last-child {
+      border-bottom: none;
+    }
+
+    .telemetry-label {
+      color: var(--text-secondary);
+    }
+
+    .telemetry-val {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .state-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+    .state-badge.idle { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+    .state-badge.executing { background: rgba(2, 132, 199, 0.2); color: #0284c7; }
+    .state-badge.error { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+
+    /* Mission Terminal */
+    .mission-terminal {
+      background: #090d16;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      height: 120px;
+      overflow-y: auto;
+      padding: 8px 10px;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      line-height: 1.4;
+      color: #94a3b8;
+    }
+
+    .mission-terminal::-webkit-scrollbar {
+      width: 4px;
+    }
+    .mission-terminal::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+    }
+
+    .term-line {
+      margin-bottom: 3px;
+      word-break: break-all;
+    }
+    .term-line.info { color: #38bdf8; }
+    .term-line.success { color: #34d399; }
+    .term-line.warn { color: #fbbf24; }
+    .term-line.error { color: #f87171; }
+    .term-time { color: #64748b; margin-right: 6px; }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- Top Navigation Bar -->
+    <header class="top-navbar">
+      <div class="brand-section">
+        <div class="radar-pulse"></div>
+        <div class="brand-text">
+          <h1>CONEROBOT <span>WAYPOINT PLANNER</span></h1>
+          <p class="subtitle">2D Cartesian Metric Grid • RTK Base Station (0, 0) Origin</p>
+        </div>
+      </div>
+
+      <!-- Base Station Coordinates Pill -->
+      <div class="fleet-stats-bar">
+        <div class="stat-pill" title="RTK Base Station 0,0 Metric Origin">
+          <span class="stat-dot green"></span>
+          <span class="stat-label">🏰 Base (0, 0):</span>
+          <span class="stat-val" id="header-base-coords">Decoded via RTCM 1005</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-dot cyan"></span>
+          <span class="stat-label">Active Target:</span>
+          <span class="stat-val" id="header-active-target">None</span>
+        </div>
+      </div>
+
+      <!-- Navigation Actions -->
+      <div class="header-actions">
+        <a href="index.html" class="action-btn" title="Back to Fleet Dashboard">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+          Fleet Dashboard
+        </a>
+        <button id="btn-scan-network" class="action-btn" title="Rescan network for active robots">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+          Scan
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="waypoint-body">
+      
+      <!-- Interactive Cartesian Canvas Area -->
+      <section class="canvas-container" id="canvas-wrapper">
+        
+        <!-- Top Left Canvas Tools -->
+        <div class="canvas-overlay-top-left">
+          <button id="btn-zoom-in" class="canvas-btn" title="Zoom In (+)">➕</button>
+          <button id="btn-zoom-out" class="canvas-btn" title="Zoom Out (-)">➖</button>
+          <button id="btn-center-base" class="canvas-btn" title="Center View on Base Station (0, 0)">🏰 Center Base</button>
+          <button id="btn-center-robot" class="canvas-btn" title="Center View on Selected Robot">🤖 Center Robot</button>
+          <button id="btn-fit-view" class="canvas-btn" title="Fit Robot and Target into view">📐 Fit All</button>
+        </div>
+
+        <!-- Bottom Left Live Cursor Coordinates -->
+        <div class="canvas-overlay-bottom-left">
+          <div class="canvas-pill" id="cursor-pos-badge">
+            <span>🖱️ Cursor:</span>
+            <strong id="cursor-coord-text">X: +0.00 m (E) | Y: +0.00 m (N)</strong>
+            <span id="cursor-dist-text" style="color: #64748b;">(Dist: 0.00 m)</span>
+          </div>
+        </div>
+
+        <!-- Bottom Right Navigation Guide Hint -->
+        <div class="canvas-overlay-bottom-right">
+          <div class="canvas-pill" style="font-size: 0.72rem;">
+            <span>💡 <strong>Click</strong> to place target • <strong>Drag</strong> to pan • <strong>Scroll</strong> to zoom</span>
+          </div>
+        </div>
+
+        <!-- HTML5 Metric Canvas -->
+        <canvas id="waypoint-canvas"></canvas>
+      </section>
+
+      <!-- Right Control & Telemetry Sidebar -->
+      <aside class="control-sidebar">
+
+        <!-- 1. Robot Selector Card -->
+        <div class="planner-card">
+          <div class="planner-card-header">
+            <span class="planner-card-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+                <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+              </svg>
+              Selected Target Robot
+            </span>
+            <span id="robot-conn-pill" class="state-badge error">Offline</span>
+          </div>
+
+          <div class="robot-selector-box">
+            <select id="select-active-robot">
+              <option value="">Searching for online robots...</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 2. Target Waypoint Card -->
+        <div class="planner-card">
+          <div class="planner-card-header">
+            <span class="planner-card-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <polygon points="12 8 8 12 12 16 12 8"/>
+                <line x1="12" y1="16" x2="16" y2="12"/>
+              </svg>
+              Waypoint Coordinates (Base 0, 0)
+            </span>
+            <button id="btn-clear-target" class="canvas-btn" style="padding: 2px 8px; font-size: 0.72rem;">✕ Clear</button>
+          </div>
+
+          <!-- Coordinate Inputs -->
+          <div class="coord-grid">
+            <!-- East (X) -->
+            <div class="coord-input-group">
+              <label>East (+X) [meters]</label>
+              <div class="coord-input-wrap">
+                <input type="number" id="input-target-x" step="0.10" value="0.00">
+                <span class="coord-unit">m</span>
+                <button class="coord-nudge-btn" onclick="nudgeCoord('x', -0.5)">-0.5</button>
+                <button class="coord-nudge-btn" onclick="nudgeCoord('x', 0.5)">+0.5</button>
+              </div>
+            </div>
+
+            <!-- North (Y) -->
+            <div class="coord-input-group">
+              <label>North (+Y) [meters]</label>
+              <div class="coord-input-wrap">
+                <input type="number" id="input-target-y" step="0.10" value="0.00">
+                <span class="coord-unit">m</span>
+                <button class="coord-nudge-btn" onclick="nudgeCoord('y', -0.5)">-0.5</button>
+                <button class="coord-nudge-btn" onclick="nudgeCoord('y', 0.5)">+0.5</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Target Metrics Banner -->
+          <div class="target-metrics-bar">
+            <div class="metric-cell">
+              <span class="metric-cell-label">Distance from Robot</span>
+              <span class="metric-cell-val" id="metric-dist">-- m</span>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-cell-label">Relative Bearing</span>
+              <span class="metric-cell-val" id="metric-bearing">--°</span>
+            </div>
+          </div>
+
+          <!-- Dispatch & Control Buttons -->
+          <button id="btn-dispatch-waypoint" class="btn-dispatch">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+            Send Robot to Waypoint
+          </button>
+
+          <div class="action-button-row">
+            <button id="btn-return-home" class="btn-secondary-action" title="Send robot to Base Station (0, 0)">
+              <span>🏠</span> Return Base (0, 0)
+            </button>
+            <button id="btn-set-manual" class="btn-secondary-action" title="Apply manually typed coordinates">
+              <span>📍</span> Apply Coords
+            </button>
+          </div>
+
+          <button id="btn-estop" class="btn-estop">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="15" y1="9" x2="9" y2="15"/>
+              <line x1="9" y1="9" x2="15" y2="15"/>
+            </svg>
+            EMERGENCY STOP (Halt Robot)
+          </button>
+        </div>
+
+        <!-- 3. Robot Live Telemetry Card -->
+        <div class="planner-card">
+          <div class="planner-card-header">
+            <span class="planner-card-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+              </svg>
+              Live Robot Telemetry
+            </span>
+            <span id="telemetry-state-badge" class="state-badge idle">IDLE</span>
+          </div>
+
+          <div class="telemetry-row">
+            <span class="telemetry-label">Position from Base:</span>
+            <span class="telemetry-val" id="tel-base-pos">X: 0.00m, Y: 0.00m</span>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">Sensor Navigation Mode:</span>
+            <span class="telemetry-val" id="tel-sensor-mode">GPS (RTK FIX)</span>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">GPS RTK Fix Status:</span>
+            <span class="telemetry-val" id="tel-rtk-status" style="color: #10b981;">FIX (Mode 4)</span>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">Diff Correction Age:</span>
+            <span class="telemetry-val" id="tel-diff-age">--</span>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">Current Heading:</span>
+            <span class="telemetry-val" id="tel-heading">--° ENU</span>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">Battery Voltage:</span>
+            <span class="telemetry-val" id="tel-battery">-- V</span>
+          </div>
+        </div>
+
+        <!-- 4. RTK Base Station Reference Card -->
+        <div class="planner-card">
+          <div class="planner-card-header">
+            <span class="planner-card-title">
+              🏰 Base Station (0, 0) Origin
+            </span>
+            <button id="btn-edit-base" class="canvas-btn" style="padding: 2px 8px; font-size: 0.72rem;">Set Manual</button>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">Latitude:</span>
+            <span class="telemetry-val" id="base-ref-lat">47.49790000°</span>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">Longitude:</span>
+            <span class="telemetry-val" id="base-ref-lon">19.04020000°</span>
+          </div>
+          <div class="telemetry-row">
+            <span class="telemetry-label">Source:</span>
+            <span class="telemetry-val" id="base-ref-source" style="color: #38bdf8;">RTCM 1005 / Caster</span>
+          </div>
+        </div>
+
+        <!-- 5. Mission Activity Log Card -->
+        <div class="planner-card">
+          <div class="planner-card-header">
+            <span class="planner-card-title">
+              📟 Mission Activity Terminal
+            </span>
+            <button onclick="clearMissionLog()" class="canvas-btn" style="padding: 2px 8px; font-size: 0.72rem;">Clear</button>
+          </div>
+          <div class="mission-terminal" id="mission-log-box">
+            <div class="term-line info"><span class="term-time">[SYS]</span> Cartesian Waypoint Planner initialized.</div>
+          </div>
+        </div>
+
+      </aside>
+    </main>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/cdr_decoder.js"></script>
+  <script src="js/waypoint_planner.js"></script>
+</body>
+</html>

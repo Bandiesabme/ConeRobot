@@ -304,6 +304,13 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
 
         super().do_GET()
 
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
     def do_POST(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/config":
@@ -320,6 +327,39 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
                 return
             except Exception as e:
                 self.send_response(400)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                return
+
+        # API: Waypoint Dispatch Relay
+        if parsed.path == "/api/waypoint":
+            try:
+                length = int(self.headers.get('content-length', 0))
+                body = self.rfile.read(length).decode("utf-8")
+                req = json.loads(body)
+                r_id = req.get("robot_id", "Unknown")
+                x = req.get("x", 0.0)
+                y = req.get("y", 0.0)
+                z = req.get("z", 0.0)
+                cmd_type = req.get("type", "WAYPOINT")
+                print(f"[MISSION CONTROL] {cmd_type} command for Robot {r_id}: (X={x:.2f}m, Y={y:.2f}m, Z={z:.1f})")
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "Success",
+                    "command": cmd_type,
+                    "robot_id": r_id,
+                    "target": {"x": x, "y": y, "z": z},
+                    "timestamp": time.time()
+                }).encode("utf-8"))
+                return
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
                 return
