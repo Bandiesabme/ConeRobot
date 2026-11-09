@@ -217,12 +217,9 @@ class PrimitiveMotionController(Node):
             Vector3, '/cmd_waypoint', self._cmd_waypoint_callback, 10, callback_group=self.cb_group
         )
 
-        # Sensor Subscriptions
+        # Sensor Subscriptions (6-DOF Gyro /imu/heading only — no magnetometer compass used)
         self.heading_sub = self.create_subscription(
             Float32, '/imu/heading', self._heading_callback, 10, callback_group=self.cb_group
-        )
-        self.compass_sub = self.create_subscription(
-            Float32, '/imu/compass_heading', self._compass_callback, 10, callback_group=self.cb_group
         )
         self.imu_sub = self.create_subscription(
             Imu, '/imu/data', self._imu_data_callback, 10, callback_group=self.cb_group
@@ -275,14 +272,9 @@ class PrimitiveMotionController(Node):
         # ----------------------------------------------------------------------
         self.state = ControllerState.IDLE
 
-        # IMU State (CCW+ radians, continuous unrolled yaw) & Global ENU Heading Fusion
+        # IMU State (6-DOF Gyro CCW+ radians, continuous unrolled yaw) & Global ENU Heading Fusion
         self.current_heading_rad: Optional[float] = None
-        self.current_compass_rad: Optional[float] = None
         self.compass_initialized: bool = False
-        self._compass_warmup_count: int = 0
-        self._compass_sample_count: int = 0
-        self._compass_sin_sum: float = 0.0
-        self._compass_cos_sum: float = 0.0
         self.enu_yaw_offset_rad: float = 0.0
         self.enu_yaw_locked_by_rtk: bool = False
         self._rtk_course_anchor_gps: Optional[Tuple[float, float]] = None
@@ -364,13 +356,14 @@ class PrimitiveMotionController(Node):
         self.get_logger().info(" Unified State-Driven Motion Controller Ready")
         self.get_logger().info(f" Control Rate   : {self.control_rate_hz:.0f} Hz (Zero Time-Fallback)")
         self.get_logger().info(f" Distance Source: {self.distance_source.upper()}")
+        self.get_logger().info(" Heading Mode   : 6-DOF Gyro + Manual North + Driving GPS Fine-Cal")
         self.get_logger().info("==================================================")
 
     # --------------------------------------------------------------------------
     # Sensor Callbacks
     # --------------------------------------------------------------------------
     def _heading_callback(self, msg: Float32) -> None:
-        """Converts [0, 360) deg CCW heading into [-pi, pi] rad and unrolls continuous yaw."""
+        """Converts [0, 360) deg CCW 6-DOF gyro heading into [-pi, pi] rad and unrolls continuous yaw."""
         rad = math.radians(normalize_angle_deg(msg.data))
         norm_rad = normalize_angle_rad(rad)
 
@@ -379,44 +372,12 @@ class PrimitiveMotionController(Node):
             self.unrolled_yaw_rad += diff
         else:
             self.unrolled_yaw_rad = norm_rad
+            # Default boot orientation to North (+90° ENU) until user clicks "Set Rover = NORTH (90°)"
+            if not self.compass_initialized:
+                self.enu_yaw_offset_rad = shortest_angular_diff_rad(math.pi / 2.0, norm_rad)
 
         self.current_heading_rad = norm_rad
         self.last_heading_time = time.time()
-
-    def _compass_callback(self, msg: Float32) -> None:
-        """9-DOF Magnetometer-referenced heading averaged over 25 samples at startup, then locked."""
-        if self.compass_initialized or self.enu_yaw_locked_by_rtk:
-            return
-        comp_rad = normalize_angle_rad(math.radians(normalize_angle_deg(msg.data)))
-        self.current_compass_rad = comp_rad
-        if self.current_heading_rad is None:
-            return
-
-        # If robot starts moving before all 25 samples finish, lock whatever average we have so far
-        if self.state != ControllerState.IDLE or abs(self.last_cmd_v) > 0.01 or abs(self.last_cmd_w) > 0.01:
-            if self._compass_sample_count > 0:
-                self.compass_initialized = True
-            return
-
-        # Skip the first 5 BNO08x filter warmup samples right at node boot
-        self._compass_warmup_count += 1
-        if self._compass_warmup_count <= 5:
-            self.enu_yaw_offset_rad = shortest_angular_diff_rad(comp_rad, self.current_heading_rad)
-            return
-
-        # Circularly average 25 stationary samples (~1.5s) to eliminate sensor noise
-        sample_offset = shortest_angular_diff_rad(comp_rad, self.current_heading_rad)
-        self._compass_sin_sum += math.sin(sample_offset)
-        self._compass_cos_sum += math.cos(sample_offset)
-        self._compass_sample_count += 1
-        self.enu_yaw_offset_rad = math.atan2(self._compass_sin_sum, self._compass_cos_sum)
-
-        if self._compass_sample_count >= 25:
-            self.compass_initialized = True
-            self.get_logger().info(
-                f"[COMPASS INIT] Startup heading locked (averaged over {self._compass_sample_count} samples): "
-                f"{math.degrees(self._get_global_enu_yaw_rad()):+.1f}° ENU (6-DOF gyro active from now on)."
-            )
 
     def _base_fix_callback(self, msg: NavSatFix) -> None:
         """Locks the RTK Base Station (0, 0) coordinate decoded from RTCM 1005/1006."""
@@ -549,36 +510,47 @@ class PrimitiveMotionController(Node):
                     self._odom_pos_at_last_rtk_fix = self.current_odom_pos
                     self._odom_accum_since_last_rtk_fix = 0.0
 
-                    # Live RTK Course-Over-Ground (COG) heading calibration while driving straight
-                    if (
-                        self.active_motion_type in ["STRAIGHT", "GOTO"]
-                        and self._goto_phase in ["NONE", "DRIVE"]
-                        and self._rtk_course_anchor_gps is not None
-                        and abs(self.last_cmd_v) > 0.02
-                        and self.current_heading_rad is not None
-                    ):
-                        step_e, step_n = gps_enu_delta_m(
-                            self._rtk_course_anchor_gps[0], self._rtk_course_anchor_gps[1],
-                            curr_lat, curr_lon,
-                        )
-                        step_dist = math.hypot(step_e, step_n)
-                        yaw_drift = abs(self._get_measured_yaw_rad() - self._rtk_course_anchor_yaw)
-                        if step_dist >= 0.20 and yaw_drift <= math.radians(4.0):
+                # Driving Fine-Calibration of 6-DOF Gyro via GPS Course-Over-Ground (COG)
+                # Runs ONLY while actively driving straight and within ±40° of the calibrated heading
+                if (
+                    self.active_motion_type in ["STRAIGHT", "GOTO"]
+                    and self._goto_phase in ["NONE", "DRIVE"]
+                    and self._rtk_course_anchor_gps is not None
+                    and abs(self.last_cmd_v) > 0.05
+                    and self.current_heading_rad is not None
+                ):
+                    step_e, step_n = gps_enu_delta_m(
+                        self._rtk_course_anchor_gps[0], self._rtk_course_anchor_gps[1],
+                        curr_lat, curr_lon,
+                    )
+                    step_dist = math.hypot(step_e, step_n)
+                    yaw_drift = abs(self._get_measured_yaw_rad() - self._rtk_course_anchor_yaw)
+
+                    if yaw_drift > math.radians(5.0) or step_dist > 5.0:
+                        self._rtk_course_anchor_gps = (curr_lat, curr_lon)
+                        self._rtk_course_anchor_yaw = self._get_measured_yaw_rad()
+                    else:
+                        min_step_m = 0.25 if self.gps_is_rtk_fix else 0.60
+                        if step_dist >= min_step_m:
                             course_enu = math.atan2(step_n, step_e)
                             if self.last_cmd_v < 0.0:
                                 course_enu = normalize_angle_rad(course_enu + math.pi)
                             meas_offset = shortest_angular_diff_rad(course_enu, self.current_heading_rad)
-                            if not self.enu_yaw_locked_by_rtk:
-                                self.enu_yaw_offset_rad = meas_offset
+                            diff_off = shortest_angular_diff_rad(meas_offset, self.enu_yaw_offset_rad)
+
+                            # Only fine-tune within ±40° of current calibrated heading so GPS noise cannot flip it
+                            if abs(diff_off) <= math.radians(40.0):
+                                alpha = 0.35 if (self.gps_is_rtk_fix and not self.enu_yaw_locked_by_rtk) else 0.20
+                                self.enu_yaw_offset_rad = normalize_angle_rad(self.enu_yaw_offset_rad + alpha * diff_off)
                                 self.enu_yaw_locked_by_rtk = True
                                 self.get_logger().info(
-                                    f"[RTK HEADING LOCKED] Calibrated true ENU heading over "
-                                    f"{step_dist*100:.0f}cm (Heading: {math.degrees(self._get_global_enu_yaw_rad()):+.1f}° ENU)"
+                                    f"[GPS FINE-CAL] Refined ENU heading over {step_dist*100:.0f}cm -> "
+                                    f"{math.degrees(self._get_global_enu_yaw_rad()):+.1f}° ENU "
+                                    f"(adj: {math.degrees(alpha * diff_off):+.1f}°)"
                                 )
-                            elif step_dist >= 1.0:
-                                # Only apply a tiny 5% long-term gyro drift trim over >= 1.0m straight segments
-                                diff_off = shortest_angular_diff_rad(meas_offset, self.enu_yaw_offset_rad)
-                                self.enu_yaw_offset_rad = normalize_angle_rad(self.enu_yaw_offset_rad + 0.05 * diff_off)
+                            if step_dist >= 1.0:
+                                self._rtk_course_anchor_gps = (curr_lat, curr_lon)
+                                self._rtk_course_anchor_yaw = self._get_measured_yaw_rad()
 
                 # For GOTO waypoint navigation in DRIVE phase: continuously home onto exact target coordinate
                 if (
@@ -617,9 +589,9 @@ class PrimitiveMotionController(Node):
                         bearing_enu = math.atan2(rem_n, rem_e)
                         bearing_err = shortest_angular_diff_rad(bearing_enu, self._get_global_enu_yaw_rad())
                         if abs(bearing_err) > math.radians(35.0) and rem_dist_wp > 0.35:
-                            # Large initial compass discrepancy revealed by RTK: pivot in place to true bearing
+                            # Large initial heading discrepancy: pivot in place to true bearing
                             self.get_logger().info(
-                                f"[GOTO RE-ALIGN] Adjusting heading by {math.degrees(bearing_err):+.1f}° to true RTK bearing."
+                                f"[GOTO RE-ALIGN] Adjusting heading by {math.degrees(bearing_err):+.1f}° to true GPS bearing."
                             )
                             self._goto_phase = "ALIGN"
                             self.start_unrolled_yaw = self.unrolled_yaw_rad
@@ -674,7 +646,7 @@ class PrimitiveMotionController(Node):
         return self.gps_status >= NavSatStatus.STATUS_FIX
 
     # --------------------------------------------------------------------------
-    # Topic Command Callbacks (/cmd_step and /cmd_primitive)
+    # Topic Command Callbacks (/cmd_step, /cmd_primitive, /cmd_waypoint)
     # --------------------------------------------------------------------------
     def _cmd_step_callback(self, msg: Vector3) -> None:
         """
@@ -701,7 +673,27 @@ class PrimitiveMotionController(Node):
         Receives /cmd_waypoint:
           - If msg.z == 0.0: Base-relative ENU meters (msg.x = East_m, msg.y = North_m from Base 0,0)
           - If msg.z == 1.0: Global WGS84 degrees (msg.x = Latitude, msg.y = Longitude)
+          - If msg.z == 2.0: Manual Heading Calibration (msg.x = target ENU degrees, e.g. 90.0 = North)
         """
+        if abs(float(msg.z) - 2.0) < 0.1:
+            target_enu_deg = float(msg.x)
+            target_enu_rad = normalize_angle_rad(math.radians(target_enu_deg))
+            if self.current_heading_rad is not None:
+                self.enu_yaw_offset_rad = shortest_angular_diff_rad(target_enu_rad, self.current_heading_rad)
+                self.compass_initialized = True
+                self.enu_yaw_locked_by_rtk = False
+                self._rtk_course_anchor_gps = self.current_gps_coords
+                self._rtk_course_anchor_yaw = self._get_measured_yaw_rad()
+                self.get_logger().info(
+                    f"[HEADING CALIBRATED] Manual heading set to "
+                    f"{math.degrees(self._get_global_enu_yaw_rad()) % 360.0:.1f}° ENU. "
+                    "Driving GPS fine-calibration armed."
+                )
+                self._publish_diagnostics()
+            else:
+                self.get_logger().warn("[HEADING CALIBRATE] /imu/heading not yet received!")
+            return
+
         if self._current_goal_handle is not None:
             self._preempted_by_topic = True
         if abs(float(msg.z) - 1.0) < 0.1:
@@ -1442,7 +1434,7 @@ class PrimitiveMotionController(Node):
         self.cmd_vel_pub.publish(twist)
 
     def _publish_diagnostics(self) -> None:
-        """Publishes lightweight Pi 5 SoC diagnostics."""
+        """Publishes lightweight Pi 5 SoC diagnostics and calibrated ENU gyro offset."""
         try:
             temp_c = None
             if os.path.exists('/sys/class/thermal/thermal_zone0/temp'):
@@ -1478,6 +1470,10 @@ class PrimitiveMotionController(Node):
                 "state": self.state,
                 "motion_type": self.active_motion_type,
                 "sensor_mode": sensor_label,
+                "enu_yaw_offset_deg": round(math.degrees(self.enu_yaw_offset_rad), 2),
+                "enu_heading_deg": round(math.degrees(self._get_global_enu_yaw_rad()) % 360.0, 2),
+                "enu_yaw_locked_by_rtk": bool(self.enu_yaw_locked_by_rtk),
+                "compass_initialized": bool(self.compass_initialized),
             }
             msg = String()
             msg.data = json.dumps(diag)
