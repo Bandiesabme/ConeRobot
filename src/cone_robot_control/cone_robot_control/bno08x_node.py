@@ -100,11 +100,6 @@ try:
             )
             self._send_packet(2, set_feature_report)
             self._enabled_features.add(feature_id)
-            pass
-            # Do not seed dummy readings to prevent false 0.0 deg orientation
-            pass
-            pass
-            pass
             time.sleep(0.04)
             for _ in range(5):
                 try:
@@ -316,8 +311,9 @@ class BNO08xNode(Node):
                     self.i2c_bus = busio.I2C(board.SCL, board.SDA, frequency=100000)
 
                 self.sensor = ReliableBNO08X_I2C(self.i2c_bus, address=self.i2c_address)
-                # Allow BNO08x SH-2 internal processor to settle after initialization
-                time.sleep(0.3)
+                # Allow BNO08x SH-2 internal processor to settle after soft-reset and drain boot packets
+                time.sleep(0.45)
+                self._drain_packets(max_packets=15, delay_s=0.01)
 
                 # Determine primary and fallback rotation features
                 if self.use_game_rotation:
@@ -349,9 +345,6 @@ class BNO08xNode(Node):
                 self._enable_feature_safe(BNO_REPORT_GYROSCOPE, "Gyroscope", max_attempts=3)
                 time.sleep(0.05)
                 self._enable_feature_safe(BNO_REPORT_ACCELEROMETER, "Accelerometer", max_attempts=3)
-                if self.use_game_rotation:
-                    time.sleep(0.05)
-                    self._enable_feature_safe(BNO_REPORT_ROTATION_VECTOR, "9-DOF Compass (Standstill Heading)", max_attempts=2)
 
                 self.get_logger().info('✅ BNO08x hardware initialized successfully.')
                 return
@@ -534,23 +527,6 @@ class BNO08xNode(Node):
             heading_msg.data = float(yaw_deg)
             self.heading_pub.publish(heading_msg)
 
-            # Publish 9-DOF magnetometer-referenced compass heading for 0-movement startup alignment
-            try:
-                comp_raw = self.sensor.quaternion
-                if comp_raw is not None:
-                    cqx, cqy, cqz, cqw = comp_raw[0], comp_raw[1], comp_raw[2], comp_raw[3]
-                    if (cqx * cqx + cqy * cqy + cqz * cqz + cqw * cqw) > 0.0001:
-                        if self.mount_flipped:
-                            cq_corr = quaternion_multiply(self.q_flip, [cqx, cqy, cqz, cqw])
-                            comp_deg = quaternion_to_yaw_deg(cq_corr[0], cq_corr[1], cq_corr[2], cq_corr[3])
-                        else:
-                            comp_deg = quaternion_to_yaw_deg(cqx, cqy, cqz, cqw)
-                        comp_msg = Float32()
-                        comp_msg.data = float(comp_deg)
-                        self.compass_pub.publish(comp_msg)
-            except Exception:
-                pass
-
             # Broadcast Dynamic TF (odom -> base_link) for 3D Visualizer if available
             if self.tf_broadcaster:
                 t = TransformStamped()
@@ -570,7 +546,20 @@ class BNO08xNode(Node):
 
         except (RuntimeError, OSError, ValueError, KeyError) as e:
             self.consecutive_errors += 1
-            if self.consecutive_errors % 50 == 1:
+            err_str = str(e)
+            # Self-healing: if the BNO08x finished soft-reset after the initial enable_feature
+            # packet or reset mid-run, automatically re-send SET_FEATURE_COMMAND (0xFD)
+            if "report found, is it enabled" in err_str and self.sensor is not None:
+                if self.consecutive_errors in (5, 25, 50) or (self.consecutive_errors % 50 == 25):
+                    try:
+                        self._drain_packets(max_packets=8, delay_s=0.005)
+                        feat = BNO_REPORT_GAME_ROTATION_VECTOR if self.use_game_rotation else BNO_REPORT_ROTATION_VECTOR
+                        self.sensor.enable_feature(feat)
+                        self.sensor.enable_feature(BNO_REPORT_GYROSCOPE)
+                        self.sensor.enable_feature(BNO_REPORT_ACCELEROMETER)
+                    except Exception:
+                        pass
+            if self.consecutive_errors % 50 == 1 and self.consecutive_errors > 1:
                 self.get_logger().warn(
                     f'Transient BNO08x I2C read error (suppressed, count={self.consecutive_errors}): {e}'
                 )
