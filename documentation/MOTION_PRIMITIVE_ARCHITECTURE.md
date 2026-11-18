@@ -44,7 +44,7 @@ The tracked robot platform operates under specific physical and computational co
 | Component | Hardware Specification | Role in Motion Execution |
 | :--- | :--- | :--- |
 | **Compute** | Raspberry Pi 5 (1 GB RAM) | Headless ROS 2 Jazzy; must maintain a strictly lightweight memory footprint (<500 MB base). Heavy C++ frameworks (like full `ros2_control`) are avoided in favor of lean, deterministic nodes. |
-| **Motor Driver** | Cytron MDD10 Rev 2.0 | Dual-channel DC driver running in PWM + Direction mode (GPIO 12/24 and 13/25). |
+| **Motor Driver** | Cytron MDD10 Rev 2.0 | Dual-channel DC driver running in PWM + Direction mode (GPIO 12/5 and 13/6 on Pins 29–34). |
 | **Encoders** | **None** | No wheel or motor shaft encoders are present. Motor voltage/PWM does not guarantee deterministic physical speed. |
 | **IMU** | MikroE BNO08x (I2C) | 50 Hz high-bandwidth angular velocity ($\omega_z$) and 6-DOF fused Game Rotation Vector (immune to DC motor magnetic fields). |
 | **2D LiDAR** | YDLIDAR T-mini Plus | 6 Hz planar laser scans on `/scan`. |
@@ -154,7 +154,7 @@ $$\text{DutyCycle}_{actual} = \text{DutyCycle}_{nominal} \times \left(\frac{V_{n
 |  | [4] Skid-Steer Mixer & MDD10 Motor Driver                                       |  |
 |  |     - Maps (v_cmd, omega_cmd) to left/right duty cycle using L_eff              |  |
 |  |     - Applies INA219 battery voltage normalization                              |  |
-|  |     - Drives GPIO 12/24 and 13/25 via gpiozero                                  |  |
+|  |     - Drives GPIO 12/5 and 13/6 via gpiozero                                    |  |
 |  |     - Local watchdog timer (stops motors if internal loop halts)                |  |
 |  +─────────────────────────────────────────────────────────────────────────────────+  |
 |                                                                                       |

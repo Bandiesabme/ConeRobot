@@ -153,9 +153,16 @@ function toggleLidarFlip() {
 
 // Global Satellite background imagery toggle (Normal 2D Grid vs Satellite View)
 window.showSatelliteOnMap = false;
+window.satProvider = localStorage.getItem('conerobot_sat_provider') || 'google_sat';
 const satelliteTileCache = new Map();
-const MAX_TILE_CACHE_SIZE = 800;
-let maxSupportedSatZoom = 21;
+const MAX_TILE_CACHE_SIZE = 900;
+const SAT_PROVIDER_MAX_ZOOM = {
+  google_sat: 21,
+  google_hyb: 21,
+  bing_aerial: 20,
+  esri_sat: 19,
+  osm_street: 19
+};
 
 // Active Target Waypoint for the Selected Robot
 let targetWaypoint = {
@@ -317,6 +324,21 @@ function bindUIEvents() {
   document.getElementById('btn-zoom-out').addEventListener('click', () => zoomView(0.80));
 
   const btnToggleSatellite = document.getElementById('btn-toggle-satellite');
+  const selSatProvider = document.getElementById('select-sat-provider');
+  if (selSatProvider) {
+    selSatProvider.value = window.satProvider;
+    selSatProvider.addEventListener('change', (e) => {
+      window.satProvider = e.target.value || 'google_sat';
+      localStorage.setItem('conerobot_sat_provider', window.satProvider);
+      if (!window.showSatelliteOnMap && btnToggleSatellite) {
+        window.showSatelliteOnMap = true;
+        localStorage.setItem('conerobot_nav_satellite', 'true');
+        btnToggleSatellite.textContent = '🛰️ View: Satellite';
+        btnToggleSatellite.className = 'canvas-btn active';
+      }
+      logMission(`Map imagery source set to: ${selSatProvider.options[selSatProvider.selectedIndex].text}`, 'info');
+    });
+  }
   if (btnToggleSatellite) {
     if (localStorage.getItem('conerobot_nav_satellite') === 'true') {
       window.showSatelliteOnMap = true;
@@ -742,11 +764,42 @@ function tileXYToLatLon(tx, ty, z) {
   return { lat, lon };
 }
 
+function tileXYToQuadKey(tx, ty, z) {
+  let quadKey = '';
+  for (let i = z; i > 0; i--) {
+    let digit = 0;
+    const mask = 1 << (i - 1);
+    if ((tx & mask) !== 0) digit += 1;
+    if ((ty & mask) !== 0) digit += 2;
+    quadKey += digit.toString();
+  }
+  return quadKey;
+}
+
+function buildProviderTileUrl(provider, z, tx, ty) {
+  const sub = (tx + ty) & 3;
+  if (provider === 'google_hyb') {
+    return `https://mt${sub}.google.com/vt/lyrs=y&hl=en&x=${tx}&y=${ty}&z=${z}&scale=2`;
+  }
+  if (provider === 'bing_aerial') {
+    const qk = tileXYToQuadKey(tx, ty, z);
+    return `https://ecn.t${sub}.tiles.virtualearth.net/tiles/a${qk}.jpeg?g=14275&n=z`;
+  }
+  if (provider === 'esri_sat') {
+    return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`;
+  }
+  if (provider === 'osm_street') {
+    return `https://tile.openstreetmap.org/${z}/${tx}/${ty}.png`;
+  }
+  return `https://mt${sub}.google.com/vt/lyrs=s&hl=en&x=${tx}&y=${ty}&z=${z}&scale=2`;
+}
+
 function getSatelliteTile(z, tx, ty) {
   const n = Math.pow(2, z);
   if (tx < 0 || tx >= n || ty < 0 || ty >= n) return null;
 
-  const key = `${z}/${tx}/${ty}`;
+  const provider = window.satProvider || 'google_sat';
+  const key = `${provider}:${z}/${tx}/${ty}`;
   if (satelliteTileCache.has(key)) {
     const existing = satelliteTileCache.get(key);
     // Refresh LRU order so active viewport tiles are never evicted
@@ -768,7 +821,7 @@ function getSatelliteTile(z, tx, ty) {
     entry.loaded = true;
   };
   img.onerror = () => {
-    if (!entry.triedFallback && z <= 19) {
+    if (!entry.triedFallback && z <= 19 && provider !== 'esri_sat') {
       entry.triedFallback = true;
       img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`;
     } else {
@@ -776,8 +829,7 @@ function getSatelliteTile(z, tx, ty) {
     }
   };
 
-  const sub = (tx + ty) & 3;
-  img.src = `https://mt${sub}.google.com/vt/lyrs=s&hl=en&x=${tx}&y=${ty}&z=${z}`;
+  img.src = buildProviderTileUrl(provider, z, tx, ty);
   return entry;
 }
 
@@ -1374,10 +1426,11 @@ function drawTileZoomLayer(z, nwGeo, seGeo, refLat, refLon, origin, scale, onlyC
   }
 
   let allLoaded = true;
+  const provider = window.satProvider || 'google_sat';
   for (let tx = minTx; tx <= maxTx; tx++) {
     for (let ty = minTy; ty <= maxTy; ty++) {
       const tile = onlyCached
-        ? satelliteTileCache.get(`${z}/${tx}/${ty}`)
+        ? satelliteTileCache.get(`${provider}:${z}/${tx}/${ty}`)
         : getSatelliteTile(z, tx, ty);
       if (tile && tile.loaded) {
         const x = colScreenX[tx];
@@ -1402,9 +1455,12 @@ function drawSatelliteTiles(width, height) {
   const cosRefLat = Math.max(0.05, Math.cos((refLat * Math.PI) / 180.0));
   const earthCircumAtLat = 40075016.686 * cosRefLat;
 
+  const provider = window.satProvider || 'google_sat';
+  const maxNativeZ = SAT_PROVIDER_MAX_ZOOM[provider] || 21;
+
   const idealTiles = (earthCircumAtLat * scale * Math.max(1.25, dpr)) / 256.0;
   let z = Math.ceil(Math.log2(Math.max(1, idealTiles)));
-  z = Math.max(14, Math.min(21, z));
+  z = Math.max(14, Math.min(maxNativeZ, z));
 
   const topLeftWorld = canvasToWorld(0, 0);
   const bottomRightWorld = canvasToWorld(width, height);
@@ -1427,7 +1483,10 @@ function drawSatelliteTiles(width, height) {
     ctx.imageSmoothingQuality = 'high';
   }
 
-  // Always warm and draw whole-tile backdrops (z=19, z=20) before z=21 so full tiles interpolate smoothly without sub-tile seams
+  // Always warm and draw whole-tile backdrops (z=18, z=19, z=20) before z=21 so full tiles interpolate smoothly without sub-tile seams
+  if (z >= 19) {
+    drawTileZoomLayer(18, nwGeo, seGeo, refLat, refLon, origin, scale, false);
+  }
   if (z >= 20) {
     drawTileZoomLayer(19, nwGeo, seGeo, refLat, refLon, origin, scale, false);
   }

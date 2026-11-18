@@ -5,11 +5,11 @@
 # 1. Raspberry Pi 5 Motor Driver Settings (Cytron MDD10 Rev 2.0)
 mdd10_motor_controller:
   ros__parameters:
-    # --- GPIO Pin Mapping (Raspberry Pi 5) ---
-    pwm1_pin: 12               # Left Motor Speed PWM (GPIO 12)
-    dir1_pin: 24               # Left Motor Direction (GPIO 24)
-    pwm2_pin: 13               # Right Motor Speed PWM (GPIO 13)
-    dir2_pin: 25               # Right Motor Direction (GPIO 25)
+    # --- GPIO Pin Mapping (Raspberry Pi 5 — Grouped on Pins 29-34) ---
+    pwm1_pin: 12               # Left Motor Speed PWM (GPIO 12 / Pin 32)
+    dir1_pin: 5                # Left Motor Direction (GPIO 5 / Pin 29)
+    pwm2_pin: 13               # Right Motor Speed PWM (GPIO 13 / Pin 33)
+    dir2_pin: 6                # Right Motor Direction (GPIO 6 / Pin 31)
 
     # --- Physical Dimensions, Deadband & Trim Calibration ---
     wheel_track: 0.380         # Effective track width L_eff for skid-steer slip (meters)

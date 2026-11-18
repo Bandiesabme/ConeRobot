@@ -160,42 +160,54 @@ sudo reboot
 
 ## 3. Hardware Wiring Checklist
 
-All components interface with the Raspberry Pi 5 without pin conflicts:
+All components interface with the Raspberry Pi 5 without pin conflicts, leaving the entire **`SPI0` bus (`Pins 19–26` / `GPIO 7–11`)** plus `GPIO 24 / 25` (`Pins 18 / 22`) 100% free for future SPI peripherals:
 
 ```text
 Raspberry Pi 5 Pinout Allocation:
-  - I2C (IMU):    Pins 1 (3.3V), 3 (SDA/GPIO 2), 5 (SCL/GPIO 3), 7 (INT/GPIO 4), 9 (GND)
-  - UART (GPS):   Pins 8 (TXD0/GPIO 14), 10 (RXD0/GPIO 15) -> /dev/ttyAMA0
-  - Motors (PWM): Pins 32 (PWM1/GPIO 12), 33 (PWM2/GPIO 13), 18 (DIR1/GPIO 24), 22 (DIR2/GPIO 25)
-  - LiDAR (USB):  USB 3.0 / USB 2.0 Port -> /dev/ydlidar
+  - I2C (IMU + INA219): Pins 1 (3.3V), 3 (SDA/GPIO 2), 5 (SCL/GPIO 3), 9 (GND) [INT/RST left NC]
+  - UART (GPS HAT):     Pins 8 (TXD0/GPIO 14), 10 (RXD0/GPIO 15) -> /dev/ttyAMA0 [Pin 7 GPS PPS, Pin 12 Reset]
+  - SPI0 (Future Bus):  Pins 19 (MOSI/GPIO 10), 21 (MISO/GPIO 9), 23 (SCLK/GPIO 11), 24 (CE0/GPIO 8), 26 (CE1/GPIO 7) [100% FREE]
+  - Motors (2x3 Group): Pins 29 (DIR1/GPIO 5), 31 (DIR2/GPIO 6), 32 (PWM1/GPIO 12), 33 (PWM2/GPIO 13), 30/34 (GND)
+  - LiDAR (USB):        USB 3.0 / USB 2.0 Port -> /dev/ydlidar
 ```
 
-### A. Cytron MDD10 Rev 2.0 (Dual Motor Controller)
+### A. Cytron MDD10 Rev 2.0 (Dual Motor Controller — Grouped on Pins 29–34)
+
+All 5 wires for the Cytron MDD10 (`DIR1`, `DIR2`, `PWM1`, `PWM2`, and `GND`) sit in **one contiguous 2×3 block (`Pins 29–34`)** on the Raspberry Pi 5 header:
+
+| Inner Row (Odd Pins) | Pin # | Pin # | Outer Row (Even Pins) |
+| :--- | :---: | :---: | :--- |
+| **`DIR1` → `GPIO 5`** | **29** | **30** | **`GND` (Common Ground)** |
+| **`DIR2` → `GPIO 6`** | **31** | **32** | **`PWM1` → `GPIO 12`** |
+| **`PWM2` → `GPIO 13`** | **33** | **34** | **`GND` *(Spare)*** |
 
 | Cytron MDD10 Pin | Raspberry Pi 5 Pin | GPIO Number | Function |
 | :--- | :--- | :--- | :--- |
+| **DIR1** | Pin 29 | GPIO 5 | Left Motor Direction |
+| **DIR2** | Pin 31 | GPIO 6 | Right Motor Direction |
 | **PWM1** | Pin 32 | GPIO 12 | Left Motor Speed (PWM) |
-| **DIR1** | Pin 18 | GPIO 24 | Left Motor Direction |
 | **PWM2** | Pin 33 | GPIO 13 | Right Motor Speed (PWM) |
-| **DIR2** | Pin 22 | GPIO 25 | Right Motor Direction |
-| **GND** | Pin 6 (or any GND) | GND | **Common Ground** |
+| **GND** | Pin 30 (or Pin 34) | GND | **Common Ground** |
 | **M1A / M1B** | Left DC Motor | - | Left Motor Terminals |
 | **M2A / M2B** | Right DC Motor | - | Right Motor Terminals |
 | **POWER (+/-)** | External Battery (7V–30V) | - | Motor Power Supply Input |
 
 > [!CAUTION]
-> **Common Ground**: Always connect the Raspberry Pi 5 GND pin to the Cytron MDD10 GND pin. Never connect battery voltage directly to Raspberry Pi GPIO pins!
+> **Common Ground**: Always connect the Raspberry Pi 5 GND pin (`Pin 30` or `Pin 34`) to the Cytron MDD10 GND pin. Never connect battery voltage directly to Raspberry Pi GPIO pins!
 
-### B. MikroE BNO080 / BNO085 Click IMU (I2C Mode)
+### B. MikroE BNO080 / BNO085 Click IMU (I2C Mode - 4 Wires Only)
 
 | MikroE Click Pin | Position on Click | Raspberry Pi 5 Pin | Function | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **3V3** | Left (Pin 7) | **Pin 1** | **3.3V Power** | Clean 3.3V power rail |
-| **GND** | Left (Pin 8) or Right (Pin 16) | **Pin 9** | **Ground** | Common Ground |
-| **SDA** | Right (Pin 14) | **Pin 3** | **GPIO 2 (SDA)** | I2C Data line |
-| **SCL** | Right (Pin 13) | **Pin 5** | **GPIO 3 (SCL)** | I2C Clock line |
-| **INT** | Right (Pin 10) | **Pin 7** | **GPIO 4 (INT)** | Data-ready interrupt |
-| **RST** | Left (Pin 2) | *(Leave Unconnected)* | *Reset* | Auto power-on reset used |
+| **3V3** | Left (Pin 7) | **Pin 1** | **3.3V Power** | Clean 3.3V logic supply |
+| **GND** | Left (Pin 8) or Right (Pin 16) | **Pin 9** | **Ground** | Common system ground |
+| **SDA** | Right (Pin 14) | **Pin 3** | **GPIO 2 (SDA)** | I2C Data line (shared with INA219) |
+| **SCL** | Right (Pin 13) | **Pin 5** | **GPIO 3 (SCL)** | I2C Clock line (shared with INA219) |
+
+> [!NOTE]
+> **Why `INT` and `RST` are NOT Connected (4 Wires Total)**:
+> - **Reset (`RST`)**: **Not needed**. The BNO08x has an internal hardware Power-On Reset (POR) circuit and onboard pull-up resistors that hold reset HIGH on power-up. If the ROS 2 node ever needs to reset the sensor during initialization, the driver sends a software reset command packet directly over I2C (SHTP protocol). A dedicated hardware reset wire is completely unnecessary.
+> - **Interrupt (`INT`)**: **Not needed**. The driver (`bno08x_node.py`) queries the sensor on a deterministic 50 Hz timer loop over standard I2C polling without hardware interrupts. Leaving `INT` disconnected also prevents electrical contention with the Waveshare GPS HAT's 1PPS signal on Pin 7 (GPIO 4).
 
 > [!TIP]
 > **Verify I2C Connection:** Run `sudo i2cdetect -y 1`. You should see address `4a` in the grid.

@@ -43,26 +43,27 @@ The system uses a **Remote-Brain + Onboard State-Driven Motion Primitive Archite
 
 ## 3. Hardware Wiring Quick Reference
 
-### Cytron MDD10 Rev 2.0 (Dual Motor Driver)
+### Cytron MDD10 Rev 2.0 (Dual Motor Driver — Grouped on Pins 29–34)
 | Cytron MDD10 Pin | Raspberry Pi 5 Pin | GPIO Number | Function |
 | :--- | :--- | :--- | :--- |
+| **DIR1** | Pin 29 | GPIO 5 | Left Motor Direction |
+| **DIR2** | Pin 31 | GPIO 6 | Right Motor Direction |
 | **PWM1** | Pin 32 | GPIO 12 | Left Motor Speed (PWM) |
-| **DIR1** | Pin 18 | GPIO 24 | Left Motor Direction |
 | **PWM2** | Pin 33 | GPIO 13 | Right Motor Speed (PWM) |
-| **DIR2** | Pin 22 | GPIO 25 | Right Motor Direction |
-| **GND** | Pin 6 (or any GND) | GND | Common Ground |
+| **GND** | Pin 30 (or Pin 34) | GND | Common Ground |
 | **M1A / M1B** | Left Motor Terminals | - | Left DC Motor Output |
 | **M2A / M2B** | Right Motor Terminals | - | Right DC Motor Output |
 | **POWER (+/-)** | External Battery (7V–30V DC)| - | Motor Power Input |
 
-### MikroE BNO08x IMU (I2C)
-| MikroE Click Pin | Raspberry Pi 5 Pin | Function |
-| :--- | :--- | :--- |
-| **3V3** | Pin 1 | 3.3V Power |
-| **GND** | Pin 9 | Ground |
-| **SDA** | Pin 3 | GPIO 2 (I2C SDA) |
-| **SCL** | Pin 5 | GPIO 3 (I2C SCL) |
-| **INT** | Pin 7 | GPIO 4 (Data-Ready Interrupt) |
+### MikroE BNO08x IMU (I2C - 4 Wires Only)
+| MikroE Click Pin | Raspberry Pi 5 Pin | Function | Notes |
+| :--- | :--- | :--- | :--- |
+| **3V3** | Pin 1 | 3.3V Power | Clean 3.3V power rail |
+| **GND** | Pin 9 | Ground | Common Ground |
+| **SDA** | Pin 3 | GPIO 2 (I2C SDA) | Shared with INA219 |
+| **SCL** | Pin 5 | GPIO 3 (I2C SCL) | Shared with INA219 |
+
+*(Note: `INT` and `RST` pins are left completely unconnected. The sensor uses automatic hardware Power-On Reset and 50 Hz I2C polling).*
 
 > [!CAUTION]
 > **Common Ground**: Always connect the Raspberry Pi 5 GND pin to the Cytron MDD10 GND pin. Do NOT connect battery positive voltage to the RPi 5 GPIO pins!

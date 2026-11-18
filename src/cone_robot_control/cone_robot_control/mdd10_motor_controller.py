@@ -7,9 +7,10 @@ Subscribes to:
   - /cmd_vel (geometry_msgs/msg/Twist): Target linear and angular velocity.
   - /battery_state (sensor_msgs/msg/BatteryState): Optional INA219 voltage for PWM compensation.
 
-Hardware Configuration (Cytron MDD10 Rev 2.0 in PWM + DIR mode):
-  - Left Motor (Channel A):  PWM1, DIR1
-  - Right Motor (Channel B): PWM2, DIR2
+Hardware Configuration (Cytron MDD10 Rev 2.0 in PWM + DIR mode — Grouped on Pins 29-34):
+  - Left Motor (Channel A):  PWM1 (GPIO 12 / Pin 32), DIR1 (GPIO 5 / Pin 29)
+  - Right Motor (Channel B): PWM2 (GPIO 13 / Pin 33), DIR2 (GPIO 6 / Pin 31)
+  - Common Ground:           GND  (Pin 30 or Pin 34)
 """
 
 import math
@@ -38,9 +39,9 @@ class MDD10MotorController(Node):
 
         # --- Parameters ---
         self.declare_parameter('pwm1_pin', 12)             # Left Motor Speed PWM (GPIO 12 / Pin 32)
-        self.declare_parameter('dir1_pin', 24)             # Left Motor Direction (GPIO 24 / Pin 18)
+        self.declare_parameter('dir1_pin', 5)              # Left Motor Direction (GPIO 5 / Pin 29)
         self.declare_parameter('pwm2_pin', 13)             # Right Motor Speed PWM (GPIO 13 / Pin 33)
-        self.declare_parameter('dir2_pin', 25)             # Right Motor Direction (GPIO 25 / Pin 22)
+        self.declare_parameter('dir2_pin', 6)              # Right Motor Direction (GPIO 6 / Pin 31)
 
         self.declare_parameter('wheel_track', 0.380)       # Effective track width L_eff (meters)
         self.declare_parameter('max_linear_speed', 1.00)   # Physical speed at 100% PWM (m/s)

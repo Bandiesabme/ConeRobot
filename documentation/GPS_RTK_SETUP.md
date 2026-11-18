@@ -14,7 +14,7 @@ The Waveshare LC29H(DA) HAT mounts directly onto the Raspberry Pi 5 40-pin GPIO 
 
 | Function | RPi 5 Physical Pin | GPIO Number | Cytron MDD10 & IMU Conflict? |
 | :--- | :--- | :--- | :--- |
-| **UART TX** (HAT RX) | Pin 8 | GPIO 14 (TXD0) | ✅ **No Conflict** (Motors: GPIO 12, 13, 24, 25; IMU: GPIO 2, 3, 4) |
+| **UART TX** (HAT RX) | Pin 8 | GPIO 14 (TXD0) | ✅ **No Conflict** (Motors: GPIO 12, 13, 24, 25; IMU: GPIO 2, 3) |
 | **UART RX** (HAT TX) | Pin 10 | GPIO 15 (RXD0) | ✅ **No Conflict** |
 | **PPS** (Pulse Per Second) | Pin 7 | GPIO 4 | ✅ **No Conflict** |
 | **Reset** | Pin 12 | GPIO 18 | ✅ **No Conflict** |
