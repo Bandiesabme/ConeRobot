@@ -128,7 +128,7 @@ function connectToRobotWebSocket(robotId, ip, port) {
             const isOdom = topic === configuredTopics.odom || topic === '/odom' || topic.endsWith('/odom') || schema.includes('Odometry');
             const isGpsFix = topic === configuredTopics.gps_fix || topic === '/fix' || topic.endsWith('/fix');
             const isGpsStatus = topic === configuredTopics.gps_status || topic === '/gps/status' || topic.endsWith('/gps/status');
-            const isHeading = topic === configuredTopics.heading || topic === '/imu/heading' || topic.endsWith('/heading');
+            const isHeading = (topic === configuredTopics.heading || topic === '/imu/heading' || topic.endsWith('/heading')) && !topic.endsWith('/compass_heading');
             const isImuData = topic === configuredTopics.imu_data || topic === '/imu/data' || topic.endsWith('/imu/data');
             const isStep = topic === configuredTopics.step_status || topic === '/step_status' || topic.endsWith('/step_status');
             const isDiag = topic === '/robot/diagnostics' || topic.endsWith('/robot/diagnostics');

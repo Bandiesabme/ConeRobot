@@ -456,9 +456,9 @@
       <!-- Base Station Coordinates Pill -->
       <div class="fleet-stats-bar">
         <div class="stat-pill" title="RTK Base Station 0,0 Metric Origin">
-          <span class="stat-dot green"></span>
+          <span class="stat-dot red" id="header-base-dot"></span>
           <span class="stat-label">🏰 Base (0, 0):</span>
-          <span class="stat-val" id="header-base-coords">Decoded via RTCM 1005</span>
+          <span class="stat-val" id="header-base-coords">Offline / Not Set</span>
         </div>
         <div class="stat-pill">
           <span class="stat-dot cyan"></span>
@@ -503,6 +503,14 @@
         <div class="canvas-overlay-top-left">
           <button id="btn-zoom-in" class="canvas-btn" title="Zoom In (+)">➕</button>
           <button id="btn-zoom-out" class="canvas-btn" title="Zoom Out (-)">➖</button>
+          <button id="btn-toggle-satellite" class="canvas-btn" title="Toggle between Normal 2D Grid View and Satellite Imagery">🗺️ View: Normal</button>
+          <select id="select-sat-provider" class="canvas-btn" title="Select Satellite / Aerial Map Provider" style="padding: 5px 8px; cursor: pointer;">
+            <option value="google_sat">🛰️ Google Sat (HD)</option>
+            <option value="google_hyb">🗺️ Google Hybrid</option>
+            <option value="bing_aerial">✈️ Bing Aerial (Ortho)</option>
+            <option value="esri_sat">🌍 Esri Maxar</option>
+            <option value="osm_street">🏙️ OSM Footprints</option>
+          </select>
           <button id="btn-toggle-lidar" class="canvas-btn active" title="Toggle 2D LiDAR Obstacle Points on Map">📡 LiDAR: ON</button>
           <button id="btn-center-base" class="canvas-btn" title="Center View on Base Station (0, 0)">🏰 Center Base</button>
           <button id="btn-center-robot" class="canvas-btn" title="Center View on Selected Robot">🤖 Center Robot</button>
@@ -640,20 +648,20 @@
               </svg>
               Live Robot Telemetry
             </span>
-            <span id="telemetry-state-badge" class="state-badge idle">IDLE</span>
+            <span id="telemetry-state-badge" class="state-badge error">OFFLINE</span>
           </div>
 
           <div class="telemetry-row">
             <span class="telemetry-label">Position from Base:</span>
-            <span class="telemetry-val" id="tel-base-pos">X: 0.00m, Y: 0.00m</span>
+            <span class="telemetry-val" id="tel-base-pos">-- m, -- m</span>
           </div>
           <div class="telemetry-row">
             <span class="telemetry-label">Sensor Navigation Mode:</span>
-            <span class="telemetry-val" id="tel-sensor-mode">GPS (RTK FIX)</span>
+            <span class="telemetry-val" id="tel-sensor-mode">Offline</span>
           </div>
           <div class="telemetry-row">
             <span class="telemetry-label">GPS RTK Fix Status:</span>
-            <span class="telemetry-val" id="tel-rtk-status" style="color: #10b981;">FIX (Mode 4)</span>
+            <span class="telemetry-val" id="tel-rtk-status" style="color: #ef4444;">OFFLINE</span>
           </div>
           <div class="telemetry-row">
             <span class="telemetry-label">Diff Correction Age:</span>
@@ -667,6 +675,36 @@
             <span class="telemetry-label">Battery Voltage:</span>
             <span class="telemetry-val" id="tel-battery">-- V</span>
           </div>
+
+          <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border-subtle);">
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 8px;">
+              <button type="button" id="btn-calibrate-north" class="btn-dispatch" style="margin-bottom: 0; padding: 8px 10px; font-size: 0.82rem; background: #10b981; box-shadow: 0 3px 10px rgba(16, 185, 129, 0.3);" title="Point the rover approximately North (+Y) and click to calibrate the 6-DOF Gyro on both Rover & Map" onclick="calibrateRoverHeading(90)">
+                🧭 Set Rover = NORTH (90°)
+              </button>
+              <button type="button" class="canvas-btn" style="padding: 6px 8px; font-size: 0.72rem;" title="Set Rover = EAST (0°)" onclick="calibrateRoverHeading(0)">E</button>
+              <button type="button" class="canvas-btn" style="padding: 6px 8px; font-size: 0.72rem;" title="Set Rover = WEST (180°)" onclick="calibrateRoverHeading(180)">W</button>
+              <button type="button" class="canvas-btn" style="padding: 6px 8px; font-size: 0.72rem;" title="Set Rover = SOUTH (270°)" onclick="calibrateRoverHeading(270)">S</button>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 6px;">
+              <span class="telemetry-label" title="Fine-tune Rover Heading (° ENU) on the map">🧭 Heading Trim (°):</span>
+              <div style="display: flex; align-items: center; gap: 4px;">
+                <button type="button" class="canvas-btn" style="padding: 2px 6px; font-size: 0.7rem;" onclick="adjustHeadingOffset(-15)">-15°</button>
+                <button type="button" class="canvas-btn" style="padding: 2px 6px; font-size: 0.7rem;" onclick="setHeadingOffset(0)">0°</button>
+                <button type="button" class="canvas-btn" style="padding: 2px 6px; font-size: 0.7rem;" onclick="adjustHeadingOffset(15)">+15°</button>
+                <input type="number" id="input-heading-offset" value="0" step="1" style="width: 54px; padding: 2px 4px; font-size: 0.75rem; font-family: var(--font-mono); text-align: right; border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--bg-main); color: var(--text-main);">
+              </div>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+              <span class="telemetry-label" title="Rotate or flip 2D LiDAR point cloud relative to Rover nose">📡 LiDAR Mount (°):</span>
+              <div style="display: flex; align-items: center; gap: 4px;">
+                <button type="button" class="canvas-btn" style="padding: 2px 6px; font-size: 0.7rem;" onclick="adjustLidarOffset(-90)">-90°</button>
+                <button type="button" class="canvas-btn" style="padding: 2px 6px; font-size: 0.7rem;" onclick="setLidarOffset(0)">0°</button>
+                <button type="button" class="canvas-btn" style="padding: 2px 6px; font-size: 0.7rem;" onclick="adjustLidarOffset(90)">+90°</button>
+                <button type="button" id="btn-lidar-flip" class="canvas-btn" style="padding: 2px 6px; font-size: 0.7rem;" title="Mirror Left/Right (CW vs CCW scan)" onclick="toggleLidarFlip()">Flip</button>
+                <input type="number" id="input-lidar-offset" value="0" step="1" style="width: 54px; padding: 2px 4px; font-size: 0.75rem; font-family: var(--font-mono); text-align: right; border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--bg-main); color: var(--text-main);">
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 4. RTK Base Station Reference Card -->
@@ -675,7 +713,7 @@
             <span class="planner-card-title">
               🏰 Base Station (0, 0) Origin
             </span>
-            <span id="base-lock-badge" class="state-badge idle" style="font-size: 0.7rem;">Active</span>
+            <span id="base-lock-badge" class="state-badge error" style="font-size: 0.7rem;">Offline</span>
           </div>
 
           <div class="coord-grid" style="margin-bottom: 8px;">
@@ -730,8 +768,8 @@
   </div>
 
   <!-- Scripts with cache busters -->
-  <script src="js/state.js?v=v242"></script>
-  <script src="js/cdr_decoder.js?v=v242"></script>
-  <script src="js/waypoint_planner.js?v=v242"></script>
+  <script src="js/state.js?v=v252"></script>
+  <script src="js/cdr_decoder.js?v=v252"></script>
+  <script src="js/waypoint_planner.js?v=v252"></script>
 </body>
 </html>

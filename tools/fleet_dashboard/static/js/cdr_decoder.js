@@ -14,6 +14,103 @@ function cdrAlign(ptr, alignment) {
   return dataStart + aligned;
 }
 
+// Fine-calibrates the 6-DOF Gyro (/imu/heading) to Global ENU (0°=East, 90°=North)
+// using GPS Course-Over-Ground (COG) STRICTLY while actively driving straight (no magnetometer used).
+function updateGpsCogGyroCalibration(r, lat, lon) {
+  if (!r || !r.imu || r.imu.raw_heading === null || isNaN(r.imu.raw_heading)) return;
+  if (lat === null || lon === null || isNaN(lat) || isNaN(lon)) return;
+
+  // NEVER calibrate while parked, turning, or driving an arc — prevents stationary GPS drift from rotating heading!
+  const stepTxt = (r.motion && typeof r.motion.step_progress === 'string') ? r.motion.step_progress : '';
+  const isDrivingStraight = Boolean(
+    r.motion &&
+    r.motion.state === 'Moving' &&
+    (stepTxt.includes('Driving Straight') || stepTxt.startsWith('STRAIGHT:') || stepTxt.startsWith('GOTO:'))
+  );
+  if (!isDrivingStraight) {
+    r.imu.cog_anchor_lat = null;
+    r.imu.cog_anchor_lon = null;
+    r.imu.cog_anchor_raw_hdg = null;
+    return;
+  }
+
+  if (
+    r.imu.cog_anchor_lat === null ||
+    r.imu.cog_anchor_lon === null ||
+    r.imu.cog_anchor_raw_hdg === null
+  ) {
+    r.imu.cog_anchor_lat = lat;
+    r.imu.cog_anchor_lon = lon;
+    r.imu.cog_anchor_raw_hdg = r.imu.raw_heading;
+    return;
+  }
+
+  // If the 6-DOF gyro rotated by > 5.0° since anchor, reset straight-line anchor
+  const yawDiff = Math.abs(((r.imu.raw_heading - r.imu.cog_anchor_raw_hdg + 540.0) % 360.0) - 180.0);
+  if (yawDiff > 5.0) {
+    r.imu.cog_anchor_lat = lat;
+    r.imu.cog_anchor_lon = lon;
+    r.imu.cog_anchor_raw_hdg = r.imu.raw_heading;
+    return;
+  }
+
+  // Flat-Earth East / North displacement (meters) from straight-line anchor
+  const R = 6371000.0;
+  const dLatRad = ((lat - r.imu.cog_anchor_lat) * Math.PI) / 180.0;
+  const dLonRad = ((lon - r.imu.cog_anchor_lon) * Math.PI) / 180.0;
+  const latAvgRad = (((lat + r.imu.cog_anchor_lat) * 0.5) * Math.PI) / 180.0;
+  const stepEastM = dLonRad * Math.cos(latAvgRad) * R;
+  const stepNorthM = dLatRad * R;
+  const stepDistM = Math.hypot(stepEastM, stepNorthM);
+
+  // Reject single-step GPS jumps > 5.0m
+  if (stepDistM > 5.0) {
+    r.imu.cog_anchor_lat = lat;
+    r.imu.cog_anchor_lon = lon;
+    r.imu.cog_anchor_raw_hdg = r.imu.raw_heading;
+    return;
+  }
+
+  // Require >= 0.25m straight travel in RTK FIX, or >= 0.60m in 3D FIX / FLOAT / DGPS
+  const isRtkFix = (r.gps && r.gps.mode === 'RTK FIX');
+  const minStepM = isRtkFix ? 0.25 : 0.60;
+
+  if (stepDistM >= minStepM) {
+    let courseEnuDeg = (Math.atan2(stepNorthM, stepEastM) * 180.0) / Math.PI;
+    const isReverse = (r.lidar && r.lidar.odom_vx !== null && r.lidar.odom_vx < -0.02) ||
+                      stepTxt.toLowerCase().includes('reverse');
+    if (isReverse) {
+      courseEnuDeg = (courseEnuDeg + 180.0) % 360.0;
+    }
+    courseEnuDeg = ((courseEnuDeg % 360.0) + 360.0) % 360.0;
+
+    const halfYawDiff = (((r.imu.raw_heading - r.imu.cog_anchor_raw_hdg + 540.0) % 360.0) - 180.0) * 0.5;
+    const avgRawGyro = (((r.imu.cog_anchor_raw_hdg + halfYawDiff) % 360.0) + 360.0) % 360.0;
+    const measOffsetDeg = ((courseEnuDeg - avgRawGyro + 540.0) % 360.0) - 180.0;
+    const errDeg = ((measOffsetDeg - r.imu.enu_offset_deg + 540.0) % 360.0) - 180.0;
+
+    // Fine-calibrate only within ±40° of the manually calibrated North reference so GPS noise cannot flip it
+    if (Math.abs(errDeg) <= 40.0) {
+      const alpha = (isRtkFix && !r.imu.cog_locked) ? 0.35 : 0.20;
+      r.imu.enu_offset_deg = ((r.imu.enu_offset_deg + alpha * errDeg + 540.0) % 360.0) - 180.0;
+      r.imu.cog_locked = true;
+      try {
+        localStorage.setItem(`conerobot_gyro_enu_offset_${r.id}`, String(r.imu.enu_offset_deg));
+      } catch (e) {}
+
+      const fused = (((r.imu.raw_heading + r.imu.enu_offset_deg) % 360.0) + 360.0) % 360.0;
+      r.imu.heading = Number(fused.toFixed(1));
+      logDebug(`🧭 [Robot ${r.id}] Driving GPS fine-cal over ${(stepDistM * 100).toFixed(0)}cm -> ${r.imu.heading.toFixed(1)}° ENU`, 'success');
+    }
+
+    if (stepDistM >= 1.0) {
+      r.imu.cog_anchor_lat = lat;
+      r.imu.cog_anchor_lon = lon;
+      r.imu.cog_anchor_raw_hdg = r.imu.raw_heading;
+    }
+  }
+}
+
 function handleSysInfoData(r, sys) {
   if (!r || !sys) return;
   let cpu = null;
@@ -327,17 +424,33 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
           r.gps.lon = Number(lon.toFixed(7));
           if (alt !== null && !isNaN(alt) && isFinite(alt)) r.gps.alt = Number(alt.toFixed(1));
           if (r.gps.mode === 'NO FIX') r.gps.mode = '3D FIX';
+          updateGpsCogGyroCalibration(r, r.gps.lat, r.gps.lon);
           logDebug(`📍 [Robot ${robotId}] GPS Fix: ${r.gps.lat}, ${r.gps.lon} (Alt: ${r.gps.alt !== null ? r.gps.alt + 'm' : '--'})`, 'topic');
         }
       }
 
-      // 3. std_msgs/msg/Float32 (/imu/heading)
-      else if (normTopic === configuredTopics.heading || normTopic === '/imu/heading' || normTopic.endsWith('/heading')) {
+      // 3. std_msgs/msg/Float32 (/imu/heading) - 6-DOF Gyro Heading + Manual North / GPS COG Offset (no magnetometer)
+      else if ((normTopic === configuredTopics.heading || normTopic === '/imu/heading' || normTopic.endsWith('/heading')) && !normTopic.endsWith('/compass_heading')) {
         if (ptr + 4 <= buffer.byteLength) {
           let val = view.getFloat32(ptr, true);
           if (!isNaN(val) && isFinite(val)) {
             val = ((val % 360) + 360) % 360;
-            r.imu.heading = Number(val.toFixed(1));
+            if (r.imu.raw_heading === null) {
+              try {
+                const savedOff = localStorage.getItem(`conerobot_gyro_enu_offset_${robotId}`);
+                if (savedOff !== null && !isNaN(parseFloat(savedOff))) {
+                  r.imu.enu_offset_deg = parseFloat(savedOff);
+                } else {
+                  r.imu.enu_offset_deg = ((90.0 - val + 540.0) % 360.0) - 180.0;
+                }
+              } catch (e) {
+                r.imu.enu_offset_deg = ((90.0 - val + 540.0) % 360.0) - 180.0;
+              }
+            }
+            r.imu.raw_heading = Number(val.toFixed(1));
+            const offset = r.imu.enu_offset_deg || 0.0;
+            const fused = (((val + offset) % 360) + 360) % 360;
+            r.imu.heading = Number(fused.toFixed(1));
             r.imu.last_heading_topic_time = Date.now();
           }
         }
@@ -422,6 +535,7 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
                 const pAlt = parseFloat(pMatch[3]);
                 if (!isNaN(pAlt) && isFinite(pAlt)) r.gps.alt = Number(pAlt.toFixed(1));
               }
+              updateGpsCogGyroCalibration(r, r.gps.lat, r.gps.lon);
             }
           }
 
@@ -461,6 +575,13 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
           try {
             const diag = JSON.parse(str);
             if (diag.cpu_temp) r.health.cpu_temp = diag.cpu_temp;
+            if ((diag.compass_initialized || diag.enu_yaw_locked_by_rtk) && diag.enu_yaw_offset_deg !== undefined && !isNaN(Number(diag.enu_yaw_offset_deg))) {
+              r.imu.enu_offset_deg = Number(diag.enu_yaw_offset_deg);
+              if (diag.enu_yaw_locked_by_rtk) r.imu.cog_locked = true;
+              if (r.imu.raw_heading !== null) {
+                r.imu.heading = Number(((((r.imu.raw_heading + r.imu.enu_offset_deg) % 360) + 360) % 360).toFixed(1));
+              }
+            }
           } catch (e) {
             if (str.includes('°C') || str.includes('C')) r.health.cpu_temp = str;
           }
@@ -664,6 +785,7 @@ function handleParsedRobotMessage(robotId, topic, data) {
       } else if (statusInt >= 0 && r.gps.mode === 'NO FIX') {
         r.gps.mode = '3D FIX';
       }
+      updateGpsCogGyroCalibration(r, r.gps.lat, r.gps.lon);
     }
   }
 
@@ -730,11 +852,14 @@ function handleParsedRobotMessage(robotId, topic, data) {
     }
   }
 
-  // 4. IMU Heading (/imu/heading)
-  if (topic === configuredTopics.heading || topic === '/imu/heading' || (topic && topic.endsWith('/heading'))) {
+  // 4. IMU Heading (/imu/heading) - 6-DOF Gyro + GPS COG Offset
+  if ((topic === configuredTopics.heading || topic === '/imu/heading' || (topic && topic.endsWith('/heading'))) && !(topic && topic.endsWith('/compass_heading'))) {
     const val = typeof data === 'number' ? data : (data.data !== undefined ? Number(data.data) : null);
     if (val !== null && !isNaN(val) && isFinite(val)) {
-      r.imu.heading = Number((((val % 360) + 360) % 360).toFixed(1));
+      const normVal = ((val % 360) + 360) % 360;
+      r.imu.raw_heading = Number(normVal.toFixed(1));
+      const offset = r.imu.enu_offset_deg || 0.0;
+      r.imu.heading = Number(((((normVal + offset) % 360) + 360) % 360).toFixed(1));
       r.imu.last_heading_topic_time = Date.now();
     }
   }

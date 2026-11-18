@@ -74,15 +74,91 @@ A physical tactile button wired to GPIO 17 provides real-time button push status
 
 ---
 
-## 2. System Prerequisites
+## 2. Fresh SD Card Setup & Private Repo Deploy Key Guide
 
-Before launching the base station software, ensure your Raspberry Pi Zero has been prepared following the dedicated **[Raspberry Pi Zero Setup Guide](RPI_ZERO_SETUP.md)**:
-- [x] Base packages installed (`git`, `python3`, `python3-serial`, `python3-smbus`, `i2c-tools`).
-- [x] Hardware PL011 UART enabled (`/dev/ttyAMA0` configured via `dtoverlay=disable-bt`).
-- [x] Hardware I2C enabled (`sudo raspi-config nonint do_i2c 0`).
-- [x] Serial login console disabled and user added to `dialout` and `i2c` groups.
-- [x] Wi-Fi configured and power saving disabled (`wifi.powersave = 2`).
-- [x] Repository cloned to `~/github/ConeRobot`.
+If you just flashed a fresh image with **Raspberry Pi Imager** (Raspberry Pi OS Lite), follow these steps to configure packages, set up GitHub deploy keys for the private repository, and prepare the hardware UART:
+
+### Step 2.1: SSH In & Install Base Packages
+Connect over SSH (`ssh conerobot@conerobotBaseStation.local` or via IP) and install the required serial and python packages:
+
+```bash
+sudo apt update && sudo apt install -y git python3 python3-serial python3-smbus i2c-tools
+```
+
+### Step 2.2: Generate GitHub Deploy Key (Private Repo Access)
+Because the repository is private, use a dedicated **Read-Only Deploy Key** on the Pi Zero (never use personal passwords or personal tokens that expire):
+
+1. **Generate the key on the Pi Zero**:
+   ```bash
+   ssh-keygen -t ed25519 -C "conerobot-base-station" -f ~/.ssh/id_ed25519 -N ""
+   ```
+
+2. **Display and copy your public key**:
+   ```bash
+   cat ~/.ssh/id_ed25519.pub
+   ```
+   *(Select and copy the output string starting with `ssh-ed25519 AAAA...`)*
+
+3. **Add the Deploy Key in GitHub**:
+   - Open your repo on GitHub: **Settings** $\rightarrow$ **Deploy keys** (in the left sidebar under *Security*).
+   - Click **Add deploy key**.
+   - **Title**: `Base Station Pi Zero`
+   - **Key**: Paste the `ssh-ed25519 ...` string.
+   - **Allow write access**: **Leave UNCHECKED** (Read-only is safest for robots and field stations).
+   - Click **Add key**.
+
+### Step 2.3: Clone the Private Repository
+Now clone the repo over SSH into `~/github/ConeRobot`:
+
+```bash
+mkdir -p ~/github && cd ~/github
+git clone git@github.com:Bandiesabme/ConeRobot.git
+```
+*(When prompted: `Are you sure you want to continue connecting (yes/no/[fingerprint])?`, type `yes` and press Enter).*
+
+### Step 2.4: Hardware PL011 UART Configuration (`/dev/ttyAMA0`)
+Configure the Pi Zero to assign the high-speed PL011 hardware UART to GPIO 14/15 and disable conflicting serial console/Bluetooth services:
+
+```bash
+# 1. Enable PL011 UART & disable Bluetooth in boot config
+sudo bash -c "cat << 'EOF' >> /boot/firmware/config.txt
+
+[all]
+enable_uart=1
+dtoverlay=disable-bt
+dtparam=i2c_arm=on
+EOF"
+
+# 2. Free /dev/ttyAMA0 from Linux serial console & disable Bluetooth services
+sudo systemctl disable hciuart.service 2>/dev/null || true
+sudo systemctl disable bluetooth.service 2>/dev/null || true
+sudo systemctl stop serial-getty@ttyAMA0.service 2>/dev/null || true
+sudo systemctl disable serial-getty@ttyAMA0.service 2>/dev/null || true
+sudo systemctl mask serial-getty@ttyAMA0.service 2>/dev/null || true
+
+CMDLINE_FILE="/boot/firmware/cmdline.txt"
+[ ! -f "$CMDLINE_FILE" ] && CMDLINE_FILE="/boot/cmdline.txt"
+sudo sed -i 's/console=serial0,[0-9]\+ //g; s/console=ttyAMA0,[0-9]\+ //g' "$CMDLINE_FILE"
+
+# 3. Add user to dialout & i2c groups
+sudo usermod -aG dialout,i2c $USER
+
+# 4. Disable Wi-Fi power saving (prevents high latency spikes and socket timeouts)
+sudo mkdir -p /etc/NetworkManager/conf.d/
+sudo tee /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf << 'EOF'
+[connection]
+wifi.powersave = 2
+EOF
+
+# 5. Reboot to apply all hardware changes
+sudo reboot
+```
+
+After the Pi Zero reboots and you reconnect, verify that `/dev/ttyAMA0` is available:
+```bash
+ls -l /dev/ttyAMA0
+# Output should show: crw-rw---- 1 root dialout ... /dev/ttyAMA0
+```
 
 ---
 
@@ -135,6 +211,16 @@ http://<BASE_PI_ZERO_IP>:8080
 - 📍 **Saved Location Profiles (Presets)**: Save multiple physical benchmark spots (e.g. "Home Yard", "University Roof", "Spot A"). Switch between them with 1 click from the dropdown without recalibrating!
 - 📡 **Active Connected Rovers**: Live table of all robots receiving RTCM3 corrections and byte throughput.
 - 📋 **Rover Config Snippet**: Instant copyable YAML parameters formatted for `robot_config.yaml`.
+
+### 4.1 Fleet Dashboard One-Click Integration (`📡 Base Station` Button)
+
+You do **not** need to type or remember the Base Station's IP address when monitoring your fleet:
+* The Laptop Fleet Dashboard (`tools/fleet_dashboard/app.py`) automatically discovers the Pi Zero on port `8080` (and `2101`) across your local network, dedicated router, or Windows Mobile Hotspot.
+* Both the **Fleet Dashboard** (`index.html`) and the **Waypoint Planner** (`waypoint.html`) include a live **`📡 Base Station`** button in the top navigation bar.
+* The button features a live connection dot:
+  * 🟢 **Green**: Base Station is active and online on the network. Clicking it opens the web dashboard in a new tab.
+  * 🔴 **Red**: Base Station is powered off or searching.
+* The Waypoint Planner also has a **`📡 Fetch :8080`** button that queries `/api/status` to instantly lock the Cartesian `(0, 0)` origin to the Base Station's survey coordinates with 0 manual typing.
 
 ---
 

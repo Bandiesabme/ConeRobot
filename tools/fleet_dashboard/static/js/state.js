@@ -57,7 +57,19 @@ function createEmptyRobotTelemetry(id) {
       total_signals: 0,
       snr_sats: []
     },
-    imu: { heading: null, pitch: null, roll: null, yaw: null, last_heading_topic_time: 0 },
+    imu: {
+      heading: null,
+      raw_heading: null,
+      enu_offset_deg: 0.0,
+      cog_locked: false,
+      cog_anchor_lat: null,
+      cog_anchor_lon: null,
+      cog_anchor_raw_hdg: null,
+      pitch: null,
+      roll: null,
+      yaw: null,
+      last_heading_topic_time: 0
+    },
     motion: { state: 'Offline', step_progress: '--' },
     health: { cpu_temp: '--', cpu_load: '--', battery_v: '--' }
   };
@@ -102,7 +114,19 @@ function resetRobotSensors(id) {
   resetRobotGps(id);
   resetRobotLidar(id);
   if (realTelemetry[id]) {
-    realTelemetry[id].imu = { heading: null, pitch: null, roll: null, yaw: null, last_heading_topic_time: 0 };
+    realTelemetry[id].imu = {
+      heading: null,
+      raw_heading: null,
+      enu_offset_deg: 0.0,
+      cog_locked: false,
+      cog_anchor_lat: null,
+      cog_anchor_lon: null,
+      cog_anchor_raw_hdg: null,
+      pitch: null,
+      roll: null,
+      yaw: null,
+      last_heading_topic_time: 0
+    };
     realTelemetry[id].motion = { state: 'Offline', step_progress: '--' };
   }
 }

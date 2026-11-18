@@ -32,6 +32,7 @@ let baseStationGPS = {
   lon: null,
   alt: 0.0,
   locked: false,
+  online: false,
   source: 'Not Set'
 };
 
@@ -40,8 +41,8 @@ const robotTelemetry = {
   online: false,
   ip: '',
   port: 8765,
-  state: 'IDLE',
-  sensorMode: 'GPS',
+  state: 'OFFLINE',
+  sensorMode: 'Offline',
   battery: null,
   headingDeg: 0.0,
   headingRad: 0.0,
@@ -59,6 +60,102 @@ const robotTelemetry = {
 
 // Global LiDAR point cloud display toggle
 window.showLidarOnMap = true;
+
+// User-adjustable Heading & LiDAR Mounting Calibration Offsets (persisted in LocalStorage)
+let userHeadingOffsetDeg = parseFloat(localStorage.getItem('conerobot_heading_offset_deg') || '0') || 0.0;
+let userLidarOffsetDeg = parseFloat(localStorage.getItem('conerobot_lidar_offset_deg') || '0') || 0.0;
+let userLidarFlipCw = localStorage.getItem('conerobot_lidar_flip_cw') === 'true';
+
+function getEffectiveRobotHeadingDeg(r) {
+  const raw = (r && r.imu && r.imu.heading !== null && !isNaN(r.imu.heading)) ? Number(r.imu.heading) : 0.0;
+  return (((raw + userHeadingOffsetDeg) % 360.0) + 360.0) % 360.0;
+}
+
+function calibrateRoverHeading(targetEnuDeg = 90.0) {
+  const target = ((Number(targetEnuDeg) % 360.0) + 360.0) % 360.0;
+  const dirNames = { 90: 'NORTH (+Y)', 0: 'EAST (+X)', 180: 'WEST (-X)', 270: 'SOUTH (-Y)' };
+  const dirLabel = dirNames[Math.round(target)] || `${target.toFixed(0)}° ENU`;
+
+  if (!activeRobotId || !realTelemetry[activeRobotId]) {
+    logMission(`⚠️ Select an online robot first to calibrate heading to ${dirLabel}.`, 'warn');
+    return;
+  }
+
+  const sel = realTelemetry[activeRobotId];
+  const rawGyro = (sel.imu && sel.imu.raw_heading !== null && !isNaN(sel.imu.raw_heading))
+    ? Number(sel.imu.raw_heading)
+    : ((sel.imu && sel.imu.heading !== null && !isNaN(sel.imu.heading)) ? Number(sel.imu.heading) : 0.0);
+
+  if (sel.imu) {
+    sel.imu.enu_offset_deg = ((target - rawGyro + 540.0) % 360.0) - 180.0;
+    sel.imu.heading = Number(target.toFixed(1));
+    sel.imu.cog_locked = false;
+    sel.imu.cog_anchor_lat = null;
+    sel.imu.cog_anchor_lon = null;
+    sel.imu.cog_anchor_raw_hdg = null;
+    try {
+      localStorage.setItem(`conerobot_gyro_enu_offset_${activeRobotId}`, String(sel.imu.enu_offset_deg));
+    } catch (e) {}
+  }
+
+  // Zero out manual trim since base gyro offset is now calibrated directly to targetEnuDeg
+  setHeadingOffset(0);
+
+  // Send calibration command (z = 2.0) to onboard primitive_motion_controller via /cmd_waypoint
+  const ws = activeWebSockets[activeRobotId];
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      const calBuf = encodeVector3CDR(CLIENT_CHANNELS.CMD_WAYPOINT, target, 0.0, 2.0);
+      ws.send(calBuf);
+      logMission(`🧭 Robot ${activeRobotId} 6-DOF Gyro calibrated to ${dirLabel} (${target.toFixed(1)}° ENU). Driving GPS fine-calibration armed!`, 'success');
+    } catch (err) {
+      logMission(`🧭 Map Gyro calibrated to ${dirLabel} (${target.toFixed(1)}° ENU).`, 'info');
+    }
+  } else {
+    logMission(`🧭 Map Gyro calibrated to ${dirLabel} (${target.toFixed(1)}° ENU).`, 'info');
+  }
+
+  syncTelemetryFromSharedState();
+}
+
+function setHeadingOffset(deg) {
+  userHeadingOffsetDeg = ((Number(deg) || 0) + 540) % 360 - 180;
+  localStorage.setItem('conerobot_heading_offset_deg', String(userHeadingOffsetDeg));
+  const inp = getDom('input-heading-offset');
+  if (inp) inp.value = userHeadingOffsetDeg;
+  syncTelemetryFromSharedState();
+}
+
+function adjustHeadingOffset(deltaDeg) {
+  setHeadingOffset(userHeadingOffsetDeg + (Number(deltaDeg) || 0));
+}
+
+function setLidarOffset(deg) {
+  userLidarOffsetDeg = ((Number(deg) || 0) + 540) % 360 - 180;
+  localStorage.setItem('conerobot_lidar_offset_deg', String(userLidarOffsetDeg));
+  const inp = getDom('input-lidar-offset');
+  if (inp) inp.value = userLidarOffsetDeg;
+}
+
+function adjustLidarOffset(deltaDeg) {
+  setLidarOffset(userLidarOffsetDeg + (Number(deltaDeg) || 0));
+}
+
+function toggleLidarFlip() {
+  userLidarFlipCw = !userLidarFlipCw;
+  localStorage.setItem('conerobot_lidar_flip_cw', userLidarFlipCw ? 'true' : 'false');
+  const btn = getDom('btn-lidar-flip');
+  if (btn) {
+    btn.className = userLidarFlipCw ? 'canvas-btn active' : 'canvas-btn';
+    btn.textContent = userLidarFlipCw ? 'Flip: ON' : 'Flip';
+  }
+}
+
+// Global Satellite background imagery toggle (Normal 2D Grid vs Satellite View)
+window.showSatelliteOnMap = false;
+const satelliteTileCache = new Map();
+const MAX_TILE_CACHE_SIZE = 800;
+let maxSupportedSatZoom = 21;
 
 // Active Target Waypoint for the Selected Robot
 let targetWaypoint = {
@@ -184,11 +281,18 @@ function fetchBaseFromCaster(isSilent = false) {
         const bLon = parseFloat(data.longitude);
         const bAlt = parseFloat(data.altitude || 0);
         const host = data.connected_host || 'Port 8080';
+        baseStationGPS.online = true;
         saveBaseStation(bLat, bLon, bAlt, `Base Caster (${host})`);
-      } else if (!isSilent) {
-        logMission('Could not fetch from Caster on port 8080. Enter coordinates manually or click "Set Robot as Base".', 'warn');
+      } else {
+        baseStationGPS.online = false;
+        updateBaseStationUI();
+        if (!isSilent) {
+          logMission('Could not fetch from Caster on port 8080. Enter coordinates manually or click "Set Robot as Base".', 'warn');
+        }
       }
     }).catch(err => {
+      baseStationGPS.online = false;
+      updateBaseStationUI();
       if (!isSilent) logMission(`Base Caster query error: ${err.message}`, 'warn');
     });
 }
@@ -211,6 +315,22 @@ function bindUIEvents() {
   // Canvas View Controls
   document.getElementById('btn-zoom-in').addEventListener('click', () => zoomView(1.25));
   document.getElementById('btn-zoom-out').addEventListener('click', () => zoomView(0.80));
+
+  const btnToggleSatellite = document.getElementById('btn-toggle-satellite');
+  if (btnToggleSatellite) {
+    if (localStorage.getItem('conerobot_nav_satellite') === 'true') {
+      window.showSatelliteOnMap = true;
+      btnToggleSatellite.textContent = '🛰️ View: Satellite';
+      btnToggleSatellite.className = 'canvas-btn active';
+    }
+    btnToggleSatellite.addEventListener('click', () => {
+      window.showSatelliteOnMap = !window.showSatelliteOnMap;
+      localStorage.setItem('conerobot_nav_satellite', window.showSatelliteOnMap ? 'true' : 'false');
+      btnToggleSatellite.textContent = window.showSatelliteOnMap ? '🛰️ View: Satellite' : '🗺️ View: Normal';
+      btnToggleSatellite.className = window.showSatelliteOnMap ? 'canvas-btn active' : 'canvas-btn';
+      logMission(`Map view switched to: ${window.showSatelliteOnMap ? 'SATELLITE IMAGERY' : 'NORMAL 2D GRID'}`, 'info');
+    });
+  }
 
   const btnToggleLidar = document.getElementById('btn-toggle-lidar');
   if (btnToggleLidar) {
@@ -260,6 +380,25 @@ function bindUIEvents() {
   // Coordinate Inputs
   document.getElementById('input-target-x').addEventListener('change', updateTargetFromInputs);
   document.getElementById('input-target-y').addEventListener('change', updateTargetFromInputs);
+
+  // Heading & LiDAR Mounting Calibration Inputs
+  const hdgOffInput = document.getElementById('input-heading-offset');
+  if (hdgOffInput) {
+    hdgOffInput.value = userHeadingOffsetDeg;
+    hdgOffInput.addEventListener('change', (e) => setHeadingOffset(parseFloat(e.target.value) || 0));
+    hdgOffInput.addEventListener('input', (e) => setHeadingOffset(parseFloat(e.target.value) || 0));
+  }
+  const lidarOffInput = document.getElementById('input-lidar-offset');
+  if (lidarOffInput) {
+    lidarOffInput.value = userLidarOffsetDeg;
+    lidarOffInput.addEventListener('change', (e) => setLidarOffset(parseFloat(e.target.value) || 0));
+    lidarOffInput.addEventListener('input', (e) => setLidarOffset(parseFloat(e.target.value) || 0));
+  }
+  const lidarFlipBtn = document.getElementById('btn-lidar-flip');
+  if (lidarFlipBtn && userLidarFlipCw) {
+    lidarFlipBtn.className = 'canvas-btn active';
+    lidarFlipBtn.textContent = 'Flip: ON';
+  }
 }
 
 // ==============================================================================
@@ -270,6 +409,8 @@ async function fetchFleetList() {
     const res = await fetch('/api/fleet');
     if (!res.ok) return;
     const data = await res.json();
+    baseStationGPS.online = Boolean(data.base_station && data.base_station.online);
+    updateBaseStationUI();
     if (data.base_station && typeof updateBaseStationLink === 'function') {
       updateBaseStationLink(data.base_station);
     }
@@ -318,6 +459,10 @@ async function fetchFleetList() {
     } else if (firstOnlineId && !activeRobotId) {
       select.value = firstOnlineId;
       selectRobot(firstOnlineId);
+    } else if (onlineCount === 0 || (activeRobotId && (!robots[activeRobotId] || !robots[activeRobotId].online))) {
+      if (realTelemetry[activeRobotId]) realTelemetry[activeRobotId].online = false;
+      updateConnBadge(false);
+      syncTelemetryFromSharedState();
     }
   } catch (err) {
     console.warn('Error fetching fleet:', err);
@@ -410,13 +555,14 @@ function connectRobotWebSocket(id, ip, port) {
             '/imu/heading',
             '/step_status',
             '/odom',
-            '/battery_state'
+            '/battery_state',
+            '/robot/diagnostics'
           ];
 
           msg.channels.forEach(ch => {
             const rawTopic = ch.topic || '';
             const topic = rawTopic.startsWith('/') ? rawTopic : '/' + rawTopic;
-            if (targetTopics.includes(topic) || topic.endsWith('/fix') || topic.endsWith('/heading')) {
+            if ((targetTopics.includes(topic) || topic.endsWith('/fix') || topic.endsWith('/heading')) && !topic.endsWith('/compass_heading')) {
               const subId = subCounter++;
               subIdToTopic[subId] = topic;
               channelIdToTopic[ch.id] = topic;
@@ -441,7 +587,10 @@ function connectRobotWebSocket(id, ip, port) {
   ws.onclose = () => {
     delete activeWebSockets[id];
     if (realTelemetry[id]) realTelemetry[id].online = false;
-    if (activeRobotId === id) updateConnBadge(false);
+    if (activeRobotId === id) {
+      updateConnBadge(false);
+      syncTelemetryFromSharedState();
+    }
     scheduleReconnect(id, ip, port);
   };
 }
@@ -517,9 +666,9 @@ function syncTelemetryFromSharedState() {
   }
 
   // Sync selected active robot view
-  if (activeRobotId && realTelemetry[activeRobotId]) {
+  if (activeRobotId && realTelemetry[activeRobotId] && realTelemetry[activeRobotId].online) {
     const sel = realTelemetry[activeRobotId];
-    robotTelemetry.online = sel.online;
+    robotTelemetry.online = true;
     robotTelemetry.ip = sel.ip;
     robotTelemetry.pos.lat = sel.gps?.lat;
     robotTelemetry.pos.lon = sel.gps?.lon;
@@ -527,8 +676,9 @@ function syncTelemetryFromSharedState() {
     robotTelemetry.pos.y = sel.metricY || 0.0;
 
     if (sel.imu && sel.imu.heading !== null && !isNaN(sel.imu.heading)) {
-      robotTelemetry.headingDeg = sel.imu.heading;
-      robotTelemetry.headingRad = (sel.imu.heading * Math.PI) / 180.0;
+      const effHdg = getEffectiveRobotHeadingDeg(sel);
+      robotTelemetry.headingDeg = effHdg;
+      robotTelemetry.headingRad = (effHdg * Math.PI) / 180.0;
     }
 
     robotTelemetry.rtkStatus = sel.gps?.mode || 'NO FIX';
@@ -539,10 +689,18 @@ function syncTelemetryFromSharedState() {
     if (sel.gps?.mode === 'RTK FIX') robotTelemetry.sensorMode = 'GPS (RTK FIX)';
     else if (sel.gps?.mode === 'FLOAT') robotTelemetry.sensorMode = 'GPS (RTK FLOAT)';
     else if (sel.gps?.mode) robotTelemetry.sensorMode = `GPS (${sel.gps.mode})`;
+    else robotTelemetry.sensorMode = 'GPS (NO FIX)';
 
-    updateTelemetryUI();
-    updateTargetMetrics();
+    if (robotTelemetry.state === 'OFFLINE') {
+      robotTelemetry.state = 'IDLE';
+    }
+  } else {
+    robotTelemetry.online = false;
+    robotTelemetry.state = 'OFFLINE';
   }
+
+  updateTelemetryUI();
+  updateTargetMetrics();
 }
 
 function latLonToEnuMeters(lat, lon, refLat, refLon) {
@@ -556,28 +714,117 @@ function latLonToEnuMeters(lat, lon, refLat, refLon) {
   return { x: eastM, y: northM };
 }
 
+function enuMetersToLatLon(eastM, northM, refLat, refLon) {
+  const R = 6371000.0;
+  const dLatDeg = (northM / R) * (180.0 / Math.PI);
+  const lat = refLat + dLatDeg;
+  const latAvgRad = ((lat + refLat) / 2.0) * (Math.PI / 180.0);
+  const cosLat = Math.max(0.01, Math.cos(latAvgRad));
+  const dLonDeg = (eastM / (R * cosLat)) * (180.0 / Math.PI);
+  const lon = refLon + dLonDeg;
+  return { lat, lon };
+}
+
+function latLonToTileXY(lat, lon, z) {
+  const n = Math.pow(2, z);
+  const x = ((lon + 180.0) / 360.0) * n;
+  const clampedLat = Math.max(-85.0511, Math.min(85.0511, lat));
+  const latRad = (clampedLat * Math.PI) / 180.0;
+  const y = ((1.0 - Math.log(Math.tan(latRad) + 1.0 / Math.cos(latRad)) / Math.PI) / 2.0) * n;
+  return { x: Math.floor(x), y: Math.floor(y) };
+}
+
+function tileXYToLatLon(tx, ty, z) {
+  const n = Math.pow(2, z);
+  const lon = (tx / n) * 360.0 - 180.0;
+  const latRad = Math.atan(Math.sinh(Math.PI * (1.0 - (2.0 * ty) / n)));
+  const lat = (latRad * 180.0) / Math.PI;
+  return { lat, lon };
+}
+
+function getSatelliteTile(z, tx, ty) {
+  const n = Math.pow(2, z);
+  if (tx < 0 || tx >= n || ty < 0 || ty >= n) return null;
+
+  const key = `${z}/${tx}/${ty}`;
+  if (satelliteTileCache.has(key)) {
+    const existing = satelliteTileCache.get(key);
+    // Refresh LRU order so active viewport tiles are never evicted
+    satelliteTileCache.delete(key);
+    satelliteTileCache.set(key, existing);
+    return existing;
+  }
+
+  if (satelliteTileCache.size >= MAX_TILE_CACHE_SIZE) {
+    const oldestKey = satelliteTileCache.keys().next().value;
+    if (oldestKey) satelliteTileCache.delete(oldestKey);
+  }
+
+  const img = new Image();
+  const entry = { img, loaded: false, error: false, triedFallback: false };
+  satelliteTileCache.set(key, entry);
+
+  img.onload = () => {
+    entry.loaded = true;
+  };
+  img.onerror = () => {
+    if (!entry.triedFallback && z <= 19) {
+      entry.triedFallback = true;
+      img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${ty}/${tx}`;
+    } else {
+      entry.error = true;
+    }
+  };
+
+  const sub = (tx + ty) & 3;
+  img.src = `https://mt${sub}.google.com/vt/lyrs=s&hl=en&x=${tx}&y=${ty}&z=${z}`;
+  return entry;
+}
+
 // ==============================================================================
 // 4. UI UPDATE HELPERS
 // ==============================================================================
 function updateTelemetryUI() {
+  const rtkEl = getDom('tel-rtk-status');
+  const stateBadge = getDom('telemetry-state-badge');
+
+  if (!robotTelemetry.online) {
+    setDomText('tel-base-pos', '-- m, -- m');
+    setDomText('tel-sensor-mode', 'Offline');
+    if (rtkEl) {
+      if (rtkEl.textContent !== 'OFFLINE') rtkEl.textContent = 'OFFLINE';
+      if (rtkEl.style.color !== '#ef4444') rtkEl.style.color = '#ef4444';
+    }
+    setDomText('tel-diff-age', '--');
+    setDomText('tel-heading', '--° ENU');
+    setDomText('tel-battery', '-- V');
+    if (stateBadge) {
+      if (stateBadge.textContent !== 'OFFLINE') stateBadge.textContent = 'OFFLINE';
+      if (stateBadge.className !== 'state-badge error') stateBadge.className = 'state-badge error';
+    }
+    return;
+  }
+
   const signX = robotTelemetry.pos.x >= 0 ? '+' : '';
   const signY = robotTelemetry.pos.y >= 0 ? '+' : '';
   setDomText('tel-base-pos', `X: ${signX}${robotTelemetry.pos.x.toFixed(2)}m, Y: ${signY}${robotTelemetry.pos.y.toFixed(2)}m`);
   setDomText('tel-sensor-mode', robotTelemetry.sensorMode);
 
-  const rtkEl = getDom('tel-rtk-status');
   if (rtkEl) {
     const rtkText = `${robotTelemetry.rtkStatus} (${robotTelemetry.satCount} Sats)`;
     if (rtkEl.textContent !== rtkText) rtkEl.textContent = rtkText;
-    const targetColor = robotTelemetry.rtkStatus.includes('FIX') ? '#10b981' : (robotTelemetry.rtkStatus.includes('FLOAT') ? '#f59e0b' : '#ef4444');
+    const isRtkFix = robotTelemetry.rtkStatus.includes('FIX') && !robotTelemetry.rtkStatus.includes('NO');
+    const isFloatOr3D = robotTelemetry.rtkStatus.includes('FLOAT') || robotTelemetry.rtkStatus.includes('3D') || robotTelemetry.rtkStatus.includes('DGPS');
+    const targetColor = isRtkFix ? '#10b981' : (isFloatOr3D ? '#f59e0b' : '#ef4444');
     if (rtkEl.style.color !== targetColor) rtkEl.style.color = targetColor;
   }
 
   setDomText('tel-diff-age', robotTelemetry.diffAge);
-  setDomText('tel-heading', `${robotTelemetry.headingDeg.toFixed(1)}° ENU`);
+  const selImu = (activeRobotId && realTelemetry[activeRobotId]) ? realTelemetry[activeRobotId].imu : null;
+  const hdgTag = (selImu && selImu.cog_locked) ? 'ENU (GPS-Cal)' : 'ENU (Gyro)';
+  setDomText('tel-heading', `${robotTelemetry.headingDeg.toFixed(1)}° ${hdgTag}`);
   setDomText('tel-battery', robotTelemetry.battery ? `${robotTelemetry.battery} V` : '-- V');
 
-  const stateBadge = getDom('telemetry-state-badge');
   if (stateBadge) {
     if (stateBadge.textContent !== robotTelemetry.state) stateBadge.textContent = robotTelemetry.state;
     const cls = robotTelemetry.state === 'IDLE' ? 'state-badge idle' : (robotTelemetry.state === 'EXECUTING' ? 'state-badge executing' : 'state-badge error');
@@ -586,24 +833,37 @@ function updateTelemetryUI() {
 }
 
 function updateBaseStationUI() {
+  const headerDot = getDom('header-base-dot');
+  if (headerDot) {
+    const dotCls = baseStationGPS.online ? 'stat-dot green' : 'stat-dot red';
+    if (headerDot.className !== dotCls) headerDot.className = dotCls;
+  }
+
   if (baseStationGPS.lat !== null && baseStationGPS.lon !== null) {
-    setDomText('header-base-coords', `${baseStationGPS.lat.toFixed(6)}°, ${baseStationGPS.lon.toFixed(6)}°`);
+    const coordsText = baseStationGPS.online
+      ? `${baseStationGPS.lat.toFixed(6)}°, ${baseStationGPS.lon.toFixed(6)}°`
+      : `Offline (${baseStationGPS.lat.toFixed(5)}°, ${baseStationGPS.lon.toFixed(5)}°)`;
+    setDomText('header-base-coords', coordsText);
+
     const inLat = getDom('base-input-lat');
     const inLon = getDom('base-input-lon');
     if (inLat && document.activeElement !== inLat) inLat.value = baseStationGPS.lat.toFixed(7);
     if (inLon && document.activeElement !== inLon) inLon.value = baseStationGPS.lon.toFixed(7);
     setDomText('base-ref-source', baseStationGPS.source);
+
     const badge = getDom('base-lock-badge');
     if (badge) {
-      if (badge.className !== 'state-badge idle') badge.className = 'state-badge idle';
-      if (badge.textContent !== 'Locked (0, 0)') badge.textContent = 'Locked (0, 0)';
+      const targetCls = baseStationGPS.online ? 'state-badge idle' : 'state-badge error';
+      const targetTxt = baseStationGPS.online ? 'Online • Locked (0, 0)' : 'Offline (Saved 0, 0)';
+      if (badge.className !== targetCls) badge.className = targetCls;
+      if (badge.textContent !== targetTxt) badge.textContent = targetTxt;
     }
   } else {
-    setDomText('header-base-coords', 'Not Set (Click Fetch :8080)');
+    setDomText('header-base-coords', 'Offline / Not Set');
     const badge = getDom('base-lock-badge');
     if (badge) {
       if (badge.className !== 'state-badge error') badge.className = 'state-badge error';
-      if (badge.textContent !== 'Unset') badge.textContent = 'Unset';
+      if (badge.textContent !== 'Offline / Unset') badge.textContent = 'Offline / Unset';
     }
   }
 }
@@ -1042,6 +1302,11 @@ function drawCartesianScene() {
   ctx.fillStyle = '#090d16';
   ctx.fillRect(0, 0, width, height);
 
+  // Optional Satellite Imagery Layer aligned to Base Station (0, 0)
+  if (window.showSatelliteOnMap) {
+    drawSatelliteTiles(width, height);
+  }
+
   // Dynamic Cartesian Grid
   drawGrid(width, height);
 
@@ -1083,8 +1348,98 @@ function drawCartesianScene() {
   ctx.restore();
 }
 
+function drawTileZoomLayer(z, nwGeo, seGeo, refLat, refLon, origin, scale, onlyCached = false) {
+  const minTile = latLonToTileXY(nwGeo.lat, nwGeo.lon, z);
+  const maxTile = latLonToTileXY(seGeo.lat, seGeo.lon, z);
+
+  const minTx = Math.min(minTile.x, maxTile.x);
+  const maxTx = Math.max(minTile.x, maxTile.x);
+  const minTy = Math.min(minTile.y, maxTile.y);
+  const maxTy = Math.max(minTile.y, maxTile.y);
+
+  if ((maxTx - minTx + 1) * (maxTy - minTy + 1) > 128) return false;
+
+  const colScreenX = {};
+  for (let tx = minTx; tx <= maxTx + 1; tx++) {
+    const geo = tileXYToLatLon(tx, minTy, z);
+    const enu = latLonToEnuMeters(geo.lat, geo.lon, refLat, refLon);
+    colScreenX[tx] = origin.x + enu.x * scale;
+  }
+
+  const rowScreenY = {};
+  for (let ty = minTy; ty <= maxTy + 1; ty++) {
+    const geo = tileXYToLatLon(minTx, ty, z);
+    const enu = latLonToEnuMeters(geo.lat, geo.lon, refLat, refLon);
+    rowScreenY[ty] = origin.y - enu.y * scale;
+  }
+
+  let allLoaded = true;
+  for (let tx = minTx; tx <= maxTx; tx++) {
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      const tile = onlyCached
+        ? satelliteTileCache.get(`${z}/${tx}/${ty}`)
+        : getSatelliteTile(z, tx, ty);
+      if (tile && tile.loaded) {
+        const x = colScreenX[tx];
+        const y = rowScreenY[ty];
+        const w = colScreenX[tx + 1] - x + 0.7;
+        const h = rowScreenY[ty + 1] - y + 0.7;
+        ctx.drawImage(tile.img, x, y, w, h);
+      } else {
+        allLoaded = false;
+      }
+    }
+  }
+  return allLoaded;
+}
+
+function drawSatelliteTiles(width, height) {
+  const refLat = (baseStationGPS.lat !== null && !isNaN(baseStationGPS.lat)) ? baseStationGPS.lat : 47.4979;
+  const refLon = (baseStationGPS.lon !== null && !isNaN(baseStationGPS.lon)) ? baseStationGPS.lon : 19.0402;
+
+  const dpr = window.devicePixelRatio || 1;
+  const scale = viewState.scale;
+  const cosRefLat = Math.max(0.05, Math.cos((refLat * Math.PI) / 180.0));
+  const earthCircumAtLat = 40075016.686 * cosRefLat;
+
+  const idealTiles = (earthCircumAtLat * scale * Math.max(1.25, dpr)) / 256.0;
+  let z = Math.ceil(Math.log2(Math.max(1, idealTiles)));
+  z = Math.max(14, Math.min(21, z));
+
+  const topLeftWorld = canvasToWorld(0, 0);
+  const bottomRightWorld = canvasToWorld(width, height);
+
+  const nwGeo = enuMetersToLatLon(topLeftWorld.x, topLeftWorld.y, refLat, refLon);
+  const seGeo = enuMetersToLatLon(bottomRightWorld.x, bottomRightWorld.y, refLat, refLon);
+
+  let minTile = latLonToTileXY(nwGeo.lat, nwGeo.lon, z);
+  let maxTile = latLonToTileXY(seGeo.lat, seGeo.lon, z);
+  while (z > 14 && (Math.abs(maxTile.x - minTile.x) + 1) * (Math.abs(maxTile.y - minTile.y) + 1) > 96) {
+    z--;
+    minTile = latLonToTileXY(nwGeo.lat, nwGeo.lon, z);
+    maxTile = latLonToTileXY(seGeo.lat, seGeo.lon, z);
+  }
+
+  const origin = worldToCanvas(0, 0);
+
+  ctx.imageSmoothingEnabled = true;
+  if ('imageSmoothingQuality' in ctx) {
+    ctx.imageSmoothingQuality = 'high';
+  }
+
+  // Always warm and draw whole-tile backdrops (z=19, z=20) before z=21 so full tiles interpolate smoothly without sub-tile seams
+  if (z >= 20) {
+    drawTileZoomLayer(19, nwGeo, seGeo, refLat, refLon, origin, scale, false);
+  }
+  if (z >= 21) {
+    drawTileZoomLayer(20, nwGeo, seGeo, refLat, refLon, origin, scale, false);
+  }
+  drawTileZoomLayer(z, nwGeo, seGeo, refLat, refLon, origin, scale, false);
+}
+
 function drawGrid(width, height) {
   const scale = viewState.scale;
+  const isSat = Boolean(window.showSatelliteOnMap);
 
   let minorStep = 1.0;
   let majorStep = 5.0;
@@ -1109,26 +1464,26 @@ function drawGrid(width, height) {
   const startY = Math.floor(bottomRight.y / minorStep) * minorStep;
   const endY = Math.ceil(topLeft.y / minorStep) * minorStep;
 
+  const origin = worldToCanvas(0, 0);
+
   // 1. Minor Lines
   ctx.lineWidth = 1;
-  ctx.strokeStyle = '#172033';
+  ctx.strokeStyle = isSat ? 'rgba(255, 255, 255, 0.10)' : '#172033';
   ctx.beginPath();
   for (let x = startX; x <= endX; x += minorStep) {
-    const scr = worldToCanvas(x, 0);
-    ctx.moveTo(scr.x, 0); ctx.lineTo(scr.x, height);
+    const scrX = origin.x + x * scale;
+    ctx.moveTo(scrX, 0); ctx.lineTo(scrX, height);
   }
   for (let y = startY; y <= endY; y += minorStep) {
-    const scr = worldToCanvas(0, y);
-    ctx.moveTo(0, scr.y); ctx.lineTo(width, scr.y);
+    const scrY = origin.y - y * scale;
+    ctx.moveTo(0, scrY); ctx.lineTo(width, scrY);
   }
   ctx.stroke();
 
   // 2. Major Lines with Numbers (Batched)
   ctx.lineWidth = 1.2;
-  ctx.strokeStyle = '#22304d';
+  ctx.strokeStyle = isSat ? 'rgba(255, 255, 255, 0.28)' : '#22304d';
   ctx.beginPath();
-
-  const origin = worldToCanvas(0, 0);
 
   for (let x = Math.floor(topLeft.x / majorStep) * majorStep; x <= endX; x += majorStep) {
     if (Math.abs(x) < 0.001) continue;
@@ -1144,16 +1499,23 @@ function drawGrid(width, height) {
   ctx.stroke();
 
   // Major Text Labels
-  ctx.fillStyle = '#64748b';
-  ctx.font = '10px "JetBrains Mono", monospace';
+  ctx.fillStyle = isSat ? '#f8fafc' : '#64748b';
+  ctx.font = 'bold 10px "JetBrains Mono", monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
+
+  if (isSat) {
+    ctx.strokeStyle = 'rgba(9, 13, 22, 0.85)';
+    ctx.lineWidth = 2.5;
+  }
 
   const labelY = Math.max(16, Math.min(height - 24, origin.y + 6));
   for (let x = Math.floor(topLeft.x / majorStep) * majorStep; x <= endX; x += majorStep) {
     if (Math.abs(x) < 0.001) continue;
     const scrX = origin.x + x * scale;
-    ctx.fillText(`${x > 0 ? '+' : ''}${x.toFixed(0)}m`, scrX, labelY);
+    const txt = `${x > 0 ? '+' : ''}${x.toFixed(0)}m`;
+    if (isSat) ctx.strokeText(txt, scrX, labelY);
+    ctx.fillText(txt, scrX, labelY);
   }
 
   ctx.textAlign = 'right';
@@ -1162,7 +1524,9 @@ function drawGrid(width, height) {
   for (let y = Math.floor(bottomRight.y / majorStep) * majorStep; y <= endY; y += majorStep) {
     if (Math.abs(y) < 0.001) continue;
     const scrY = origin.y - y * scale;
-    ctx.fillText(`${y > 0 ? '+' : ''}${y.toFixed(0)}m`, labelX, scrY);
+    const txt = `${y > 0 ? '+' : ''}${y.toFixed(0)}m`;
+    if (isSat) ctx.strokeText(txt, labelX, scrY);
+    ctx.fillText(txt, labelX, scrY);
   }
 }
 
@@ -1253,10 +1617,11 @@ function drawAllRobotLidarPoints() {
     const rx = r.metricX;
     const ry = r.metricY;
 
-    const headingDeg = r.imu?.heading || 0.0;
-    const yawRad = (headingDeg * Math.PI) / 180.0;
-    const cosYaw = Math.cos(yawRad);
-    const sinYaw = Math.sin(yawRad);
+    const headingDeg = getEffectiveRobotHeadingDeg(r);
+    const lidarYawRad = ((headingDeg + userLidarOffsetDeg) * Math.PI) / 180.0;
+    const cosYaw = Math.cos(lidarYawRad);
+    const sinYaw = Math.sin(lidarYawRad);
+    const flipSign = userLidarFlipCw ? -1.0 : 1.0;
 
     const pts = r.lidar.points;
     const len = pts.length;
@@ -1273,7 +1638,7 @@ function drawAllRobotLidarPoints() {
     for (let i = 0; i < len; i++) {
       const p = pts[i];
       const lx = p[0];
-      const ly = p[1];
+      const ly = p[1] * flipSign;
 
       // Body frame (lx forward, ly left) to global ENU (+X East, +Y North)
       const gx = rx + (lx * cosYaw - ly * sinYaw);
@@ -1333,7 +1698,7 @@ function drawAllRobots() {
     const isSelected = (id === activeRobotId);
     const rScreen = worldToCanvas(r.metricX, r.metricY);
 
-    const headingDeg = r.imu?.heading || 0.0;
+    const headingDeg = getEffectiveRobotHeadingDeg(r);
     const yawRad = (headingDeg * Math.PI) / 180.0;
 
     const mode = r.gps?.mode || 'NO FIX';

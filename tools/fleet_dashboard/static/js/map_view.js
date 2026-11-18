@@ -11,13 +11,31 @@ function initMap() {
 
   // 1. Standard OpenStreetMap (100% Free, No API Key needed)
   const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
+    maxNativeZoom: 19,
+    maxZoom: 22,
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
   });
 
-  // 2. High-Resolution Satellite Imagery (Esri World Imagery, 100% Free)
-  const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-    maxZoom: 19,
+  // 2. Ultra-High-Resolution European Aerial / Satellite Imagery (Google Satellite 512px HiDPI, Zoom 21-22)
+  const googleSat = L.tileLayer('https://mt{s}.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}&scale=2', {
+    subdomains: ['0', '1', '2', '3'],
+    maxNativeZoom: 21,
+    maxZoom: 22,
+    attribution: 'Imagery &copy; Google'
+  });
+
+  // 2b. Google Hybrid (Satellite + Labels & Building Outlines)
+  const googleHyb = L.tileLayer('https://mt{s}.google.com/vt/lyrs=y&hl=en&x={x}&y={y}&z={z}&scale=2', {
+    subdomains: ['0', '1', '2', '3'],
+    maxNativeZoom: 21,
+    maxZoom: 22,
+    attribution: 'Imagery &copy; Google'
+  });
+
+  // 3. Esri World Imagery (Alternative Satellite)
+  const esriSat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxNativeZoom: 19,
+    maxZoom: 22,
     attribution: 'Tiles &copy; Esri'
   });
 
@@ -25,7 +43,9 @@ function initMap() {
 
   const baseMaps = {
     "Utcatérkép (OSM)": osm,
-    "Műholdkép (Satellite)": satellite
+    "Műholdkép HD (Google Aerial)": googleSat,
+    "Műholdkép + Feliratok (Google Hybrid)": googleHyb,
+    "Műholdkép (Esri)": esriSat
   };
   L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
 

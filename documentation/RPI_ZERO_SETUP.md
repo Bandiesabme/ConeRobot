@@ -81,13 +81,27 @@ EOF
 
 ---
 
-## 4. Clone the ConeRobot Repository
+## 4. Setup Deploy Key & Clone Repository (Private Repo)
+
+Since the repository is private, authenticate using a dedicated read-only SSH Deploy Key:
 
 ```bash
-# Create directory and clone the repository
-mkdir -p ~/github
-cd ~/github
-git clone https://github.com/Bandiesabme/ConeRobot.git ~/github/ConeRobot
+# 1. Generate an ed25519 SSH keypair on the Pi Zero
+ssh-keygen -t ed25519 -C "conerobot-base-station" -f ~/.ssh/id_ed25519 -N ""
+
+# 2. Print your public key
+cat ~/.ssh/id_ed25519.pub
+```
+
+Copy the output (`ssh-ed25519 AAAA...`) and add it to GitHub:
+* Go to your repository on GitHub $\rightarrow$ **Settings** $\rightarrow$ **Deploy keys** (left sidebar under *Security*).
+* Click **Add deploy key** $\rightarrow$ Title: `Base Station Pi Zero` $\rightarrow$ Paste key $\rightarrow$ Leave *"Allow write access"* unchecked $\rightarrow$ **Add key**.
+
+Now clone the repository over SSH:
+```bash
+# Create directory and clone the private repository
+mkdir -p ~/github && cd ~/github
+git clone git@github.com:Bandiesabme/ConeRobot.git
 ```
 
 ---
