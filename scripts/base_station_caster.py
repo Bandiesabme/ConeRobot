@@ -1777,7 +1777,12 @@ class NTRIPBaseCaster:
             sat_list = list(self.sat_snr_map.values())
 
         sat_list.sort(key=lambda s: (s.get("snr") or 0), reverse=True)
-        avg_snr = round(sum(s["snr"] for s in sat_list) / len(sat_list), 1) if sat_list else 0.0
+        # Usable set: Top 16 satellites with highest SNR (the active RTK constellation)
+        # Prevents low-horizon/noisy satellites (<15° elevation or weak signals) from
+        # artificially biasing down the average signal strength.
+        top_sats = sat_list[:16]
+        avg_top_snr = round(sum(s["snr"] for s in top_sats) / len(top_sats), 1) if top_sats else 0.0
+        avg_all_snr = round(sum(s["snr"] for s in sat_list) / len(sat_list), 1) if sat_list else 0.0
         max_snr = max((s["snr"] for s in sat_list), default=0.0)
         strong_count = sum(1 for s in sat_list if s["snr"] >= 38.0)
         good_count = sum(1 for s in sat_list if 28.0 <= s["snr"] < 38.0)
@@ -1807,7 +1812,10 @@ class NTRIPBaseCaster:
             "sat_snr_data": {
                 "sats": sat_list,
                 "count": len(sat_list),
-                "avg_snr": avg_snr,
+                "top_count": len(top_sats),
+                "avg_snr": avg_top_snr,
+                "avg_top_snr": avg_top_snr,
+                "avg_all_snr": avg_all_snr,
                 "max_snr": max_snr,
                 "strong_count": strong_count,
                 "good_count": good_count,
