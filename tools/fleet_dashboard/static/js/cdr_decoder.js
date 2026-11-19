@@ -145,11 +145,35 @@ function parseSnrAndCorrFromStatus(r, str) {
     r.gps.diff_age = ageMatch[1];
   }
 
-  const cn0Match = str.match(/C\/N0:\s*avg\s*([\d.]+)\s*dB-Hz(?:,\s*(\d+)\/(\d+))?/i);
+  const cn0Match = str.match(/C\/N0:\s*(?:top\s*\d+\s+)?avg\s*([\d.]+)\s*dB-Hz(?:\s*\([^)]*\))?(?:,\s*(\d+)\/(\d+))?/i);
   if (cn0Match) {
     r.gps.avg_snr = parseFloat(cn0Match[1]);
     if (cn0Match[2] !== undefined) r.gps.strong_signals = parseInt(cn0Match[2], 10);
     if (cn0Match[3] !== undefined) r.gps.total_signals = parseInt(cn0Match[3], 10);
+  }
+
+  // Parse active-solution tag and Top-16 reference from e.g. "(used26, top16 42.4)" or "(top16)"
+  const cn0Idx = str.search(/C\/N0:/i);
+  const cn0Part = cn0Idx >= 0 ? str.slice(cn0Idx) : str;
+  const usedTagMatch = cn0Part.match(/\(\s*(used|top)\s*(\d+)(?:,\s*top\s*(\d+)\s+([\d.]+))?\s*\)/i);
+  if (usedTagMatch) {
+    r.gps.avg_snr_mode = usedTagMatch[1].toLowerCase();
+    r.gps.avg_snr_count = parseInt(usedTagMatch[2], 10);
+    if (usedTagMatch[4] !== undefined) {
+      r.gps.top16_count = parseInt(usedTagMatch[3], 10);
+      r.gps.top16_snr = parseFloat(usedTagMatch[4]);
+    } else if (r.gps.avg_snr_mode === 'top' && r.gps.avg_snr !== null) {
+      r.gps.top16_count = r.gps.avg_snr_count;
+      r.gps.top16_snr = r.gps.avg_snr;
+    } else {
+      r.gps.top16_snr = null;
+      r.gps.top16_count = 0;
+    }
+  } else {
+    r.gps.avg_snr_mode = null;
+    r.gps.avg_snr_count = null;
+    r.gps.top16_snr = null;
+    r.gps.top16_count = 0;
   }
 
   const snrListMatch = str.match(/SNR:\[([^\]]*)\]/i);
@@ -172,6 +196,12 @@ function parseSnrAndCorrFromStatus(r, str) {
     });
     if (sats.length > 0) {
       r.gps.snr_sats = sats;
+      // Fallback: if Top-16 wasn't explicitly sent by an older rover node, compute it from sorted SNR list
+      if (r.gps.top16_snr === null || isNaN(r.gps.top16_snr)) {
+        const topSlice = sats.slice(0, 16);
+        r.gps.top16_count = topSlice.length;
+        r.gps.top16_snr = topSlice.reduce((acc, s) => acc + s.snr, 0) / topSlice.length;
+      }
     }
   }
 }

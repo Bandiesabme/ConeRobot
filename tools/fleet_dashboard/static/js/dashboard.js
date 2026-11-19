@@ -46,7 +46,7 @@ function initCardsGridDOM() {
           <span class="metric-val" id="r${i}-gps">--</span>
         </div>
         <div class="metric-row">
-          <span class="metric-key">GNSS Signal (C/N0)</span>
+          <span class="metric-key">GNSS Signal (Used)</span>
           <span class="metric-val" id="r${i}-snr">--</span>
         </div>
         <div class="metric-row">
@@ -170,9 +170,15 @@ function renderUIUpdates() {
         if (snrEl) {
           if (r.gps.avg_snr !== null && !isNaN(r.gps.avg_snr)) {
             const avg = r.gps.avg_snr;
-            const satCnt = (r.gps.snr_sats && r.gps.snr_sats.length > 0) ? r.gps.snr_sats.length : (r.gps.total_signals || r.gps.sats || 0);
+            const totalSats = (r.gps.total_signals > 0)
+              ? r.gps.total_signals
+              : ((r.gps.snr_sats && r.gps.snr_sats.length > 0) ? r.gps.snr_sats.length : (r.gps.sats || 0));
+            const usedCnt = (r.gps.avg_snr_count && r.gps.avg_snr_count > 0) ? r.gps.avg_snr_count : totalSats;
             const icon = avg >= 38 ? '🟢' : (avg >= 28 ? '🟡' : '🔴');
-            snrEl.innerText = `${icon} ${avg.toFixed(1)} dB-Hz (${satCnt} Sats)`;
+            const satLabel = (r.gps.avg_snr_mode === 'used')
+              ? `${usedCnt}/${totalSats} Used`
+              : (r.gps.avg_snr_mode === 'top' ? `Top ${usedCnt}/${totalSats}` : `${totalSats} Sats`);
+            snrEl.innerText = `${icon} ${avg.toFixed(1)} dB-Hz (${satLabel})`;
             snrEl.className = avg >= 38 ? 'metric-val gps-rtk' : (avg >= 28 ? 'metric-val gps-float' : 'metric-val gps-none');
             snrEl.style.color = '';
           } else {
@@ -367,20 +373,66 @@ function updateModalContent(r) {
   if (snrCard) {
     snrCard.style.display = r.gps.present ? 'block' : 'none';
     const avg = r.gps.avg_snr;
+    const top16 = r.gps.top16_snr;
     const sats = r.gps.snr_sats || [];
-    const satCount = sats.length > 0 ? sats.length : (r.gps.total_signals || r.gps.sats || 0);
+    const totalVisible = (r.gps.total_signals > 0)
+      ? r.gps.total_signals
+      : (sats.length > 0 ? sats.length : (r.gps.sats || 0));
+    const usedCount = (r.gps.avg_snr_count && r.gps.avg_snr_count > 0) ? r.gps.avg_snr_count : null;
+    const top16Count = (r.gps.top16_count && r.gps.top16_count > 0) ? r.gps.top16_count : Math.min(16, sats.length);
+
     const badgeEl = document.getElementById('modal-snr-badge');
     const sumEl = document.getElementById('modal-snr-summary');
+    const avgLabelEl = document.getElementById('modal-snr-avg-label');
     const avgEl = document.getElementById('modal-snr-avg');
+    const top16LabelEl = document.getElementById('modal-snr-top16-label');
+    const top16El = document.getElementById('modal-snr-top16');
     const cntEl = document.getElementById('modal-snr-count');
+    const cntUnitEl = document.getElementById('modal-snr-count-unit');
     const topEl = document.getElementById('modal-snr-top');
     const constsEl = document.getElementById('modal-snr-consts');
     const barsEl = document.getElementById('modal-snr-bars');
 
     if (avg !== null && !isNaN(avg)) {
+      if (avgLabelEl) {
+        if (r.gps.avg_snr_mode === 'used' && usedCount !== null) {
+          avgLabelEl.innerText = `Used Avg (GGA ${usedCount})`;
+        } else if (r.gps.avg_snr_mode === 'top' && usedCount !== null) {
+          avgLabelEl.innerText = `Usable Avg (Top ${usedCount})`;
+        } else {
+          avgLabelEl.innerText = 'Used Avg (GGA)';
+        }
+      }
       if (avgEl) avgEl.innerText = avg.toFixed(1);
-      if (cntEl) cntEl.innerText = satCount;
-      if (sumEl) sumEl.innerText = `${satCount} Sats • Avg ${avg.toFixed(1)} dB-Hz`;
+
+      const hasTop16 = top16 !== null && !isNaN(top16);
+      if (top16LabelEl) top16LabelEl.innerText = `Top ${top16Count || 16} Avg`;
+      if (top16El) {
+        top16El.innerText = hasTop16 ? top16.toFixed(1) : '--';
+        if (top16El.parentElement) {
+          top16El.parentElement.style.color = !hasTop16 ? '#94a3b8' : (top16 >= 38 ? '#34d399' : (top16 >= 28 ? '#fbbf24' : '#f87171'));
+        }
+      }
+
+      if (cntEl) {
+        if (r.gps.avg_snr_mode === 'used' && usedCount !== null) {
+          cntEl.innerText = `${usedCount} / ${totalVisible}`;
+          if (cntUnitEl) cntUnitEl.innerText = 'used';
+        } else {
+          cntEl.innerText = totalVisible;
+          if (cntUnitEl) cntUnitEl.innerText = 'sats';
+        }
+      }
+
+      if (sumEl) {
+        const top16Part = hasTop16 ? ` • Top ${top16Count || 16}: ${top16.toFixed(1)} dB-Hz` : '';
+        if (r.gps.avg_snr_mode === 'used' && usedCount !== null) {
+          sumEl.innerText = `${usedCount}/${totalVisible} Used • Avg ${avg.toFixed(1)}${top16Part}`;
+        } else {
+          sumEl.innerText = `${totalVisible} Sats • Avg ${avg.toFixed(1)}${top16Part}`;
+        }
+      }
+
       if (badgeEl) {
         if (avg >= 38) {
           badgeEl.innerText = `🟢 EXCELLENT (${avg.toFixed(1)} dB-Hz)`;
@@ -400,8 +452,15 @@ function updateModalContent(r) {
         }
       }
     } else {
+      if (avgLabelEl) avgLabelEl.innerText = 'Used Avg (GGA)';
       if (avgEl) avgEl.innerText = '--';
+      if (top16LabelEl) top16LabelEl.innerText = 'Top 16 Avg';
+      if (top16El) {
+        top16El.innerText = '--';
+        if (top16El.parentElement) top16El.parentElement.style.color = '#94a3b8';
+      }
       if (cntEl) cntEl.innerText = r.gps.sats || 0;
+      if (cntUnitEl) cntUnitEl.innerText = 'sats';
       if (sumEl) sumEl.innerText = `${r.gps.sats || 0} Sats • Waiting C/N0...`;
     }
 

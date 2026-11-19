@@ -119,15 +119,20 @@ class LC29HGPSNode(Node):
         self.current_alt = 0.0
         self.current_fix_quality = 0
         self.current_num_sats = 0
+        self.gga_num_sats = 0  # Raw field 7 from $GNGGA (satellites actively used in solution)
         self.current_hdop = 99.99
         self.current_diff_age: Optional[float] = None  # GGA field 13: age of RTCM corrections (s)
         self.last_fix_time = 0.0
         self._last_diag_log_time = 0.0
         self._last_logged_fix_quality = -1
 
-        # Per-signal C/N0 table from GSV: (talker, signal_id, prn) -> (cn0_dbhz, timestamp)
+        # Per-signal C/N0 table from GSV: (talker, signal_id, prn) -> (cn0_dbhz, elev, timestamp)
         self._cn0_table = {}
         self._cn0_lock = threading.Lock()
+
+        # Active PRNs from $GxGSA: (sys_key, prn) -> timestamp (rescues NMEA-0183 12-sat GGA cap)
+        self._gsa_used_sats = {}
+        self._gsa_lock = threading.Lock()
 
         # Optional diagnostics + raw NMEA recorder
         self._diag: Optional[SignalDiagnostics] = None
@@ -180,10 +185,11 @@ class LC29HGPSNode(Node):
             self.serial_conn.reset_output_buffer()
             self.get_logger().info(f"Successfully opened serial port: {self.serial_port_name}")
 
-            # Explicitly ensure LC29H(DA) is configured in Rover RTK mode and GSV (1 Hz) is enabled
+            # Explicitly ensure LC29H(DA) is configured in Rover RTK mode and GSA/GSV (1 Hz) are enabled
             try:
                 with self.serial_lock:
                     self.serial_conn.write(b"$PQTMCFGRCVRMODE,W,1*2A\r\n")
+                    self.serial_conn.write(nmea_command("PAIR062,2,1"))
                     self.serial_conn.write(nmea_command("PAIR062,3,1"))
                     if self.debug_signal_log:
                         # Enable $GxGST (position error std-dev) at 1 Hz; not saved to flash
@@ -227,6 +233,8 @@ class LC29HGPSNode(Node):
                                 pass
                         if header.endswith('GGA'):
                             self._parse_gga(clean_sentence)
+                        elif header.endswith('GSA'):
+                            self._parse_gsa(clean_sentence)
                         elif header.endswith('GSV'):
                             self._parse_gsv(clean_sentence)
                         elif header.endswith('RMC'):
@@ -276,10 +284,15 @@ class LC29HGPSNode(Node):
             except ValueError:
                 self.current_diff_age = None
 
-            if num_sats_str.isdigit() and int(num_sats_str) > 0:
-                self.current_num_sats = int(num_sats_str)
             if fix_qual_str.isdigit():
                 self.current_fix_quality = int(fix_qual_str)
+            if num_sats_str.isdigit():
+                gga_sats = int(num_sats_str)
+                self.gga_num_sats = gga_sats if self.current_fix_quality > 0 else 0
+                if gga_sats > 0:
+                    self.current_num_sats = gga_sats
+            elif self.current_fix_quality == 0:
+                self.gga_num_sats = 0
             try:
                 self.current_hdop = float(hdop_str)
             except ValueError:
@@ -299,10 +312,30 @@ class LC29HGPSNode(Node):
                 self._publish_navsat_fix()
             else:
                 self.current_fix_quality = 0
+                self.gga_num_sats = 0
                 self._publish_navsat_fix()
 
         except Exception as e:
             self.get_logger().debug(f"Error parsing GGA: {e}")
+
+    def _parse_gsa(self, line: str) -> None:
+        """Parse NMEA $GxGSA sentences to track active PRNs used in the navigation solution."""
+        try:
+            parts = line.split('*')[0].split(',')
+            if len(parts) < 15:
+                return
+            if parts[2].strip() not in ('2', '3'):
+                return
+            # NMEA 4.10+ appends GNSS System ID in field 18 (1=GPS, 2=GLO, 3=GAL, 4=BDS, 5=QZSS)
+            sys_key = parts[18].strip() if len(parts) > 18 and parts[18].strip() else parts[0][1:3].upper()
+            now = time.time()
+            with self._gsa_lock:
+                for field in parts[3:15]:
+                    prn = field.strip()
+                    if prn and prn.isdigit():
+                        self._gsa_used_sats[(sys_key, int(prn))] = now
+        except Exception:
+            pass
 
     def _parse_gsv(self, line: str) -> None:
         """Parse NMEA GSV sentences to track satellites in view and per-signal C/N0."""
@@ -348,25 +381,62 @@ class LC29HGPSNode(Node):
 
         # Group by physical satellite (keeping strongest carrier band SNR and elevation)
         sat_best = {}
-        vals = []
         for (talker, _sig_id, prn), (snr, elev, _t) in items:
-            vals.append(snr)
             sat_id = f"{prefix_map.get(talker, 'S')}{prn:02d}"
             prev = sat_best.get(sat_id)
             if prev is None or snr > prev[0]:
                 sat_best[sat_id] = (snr, elev if elev >= 0 else (prev[1] if prev else -1))
 
-        if len(sat_best) > self.current_num_sats and self.current_num_sats >= 12:
-            self.current_num_sats = len(sat_best)
+        # Determine how many satellites are actively used in the GNSS/RTK solution:
+        # 1. Prefer raw $GNGGA field 7 (satellites in use).
+        # 2. If $GNGGA is capped at 12 (legacy NMEA 0183 limit) and $GxGSA reports >12 active PRNs, use GSA count.
+        # 3. If no fix yet (gga_num_sats == 0), fall back to top 16 visible satellites.
+        with self._gsa_lock:
+            for key in [k for k, t in self._gsa_used_sats.items() if now - t > 5.0]:
+                del self._gsa_used_sats[key]
+            gsa_used_count = len(self._gsa_used_sats)
 
-        avg = sum(vals) / len(vals)
-        strong = sum(1 for v in vals if v >= 35.0)
-        sorted_sats = sorted(sat_best.items(), key=lambda kv: kv[1][0], reverse=True)[:32]
+        raw_used = self.gga_num_sats
+        if raw_used == 12 and gsa_used_count > 12:
+            raw_used = gsa_used_count
+
+        # Update displayed satellite count only when GGA hits the legacy 12-sat NMEA cap
+        if self.gga_num_sats == 12:
+            if gsa_used_count > 12:
+                self.current_num_sats = gsa_used_count
+            elif len(sat_best) > self.current_num_sats:
+                self.current_num_sats = len(sat_best)
+
+        # Sort all tracked satellites by best SNR descending
+        sorted_sats = sorted(sat_best.items(), key=lambda kv: kv[1][0], reverse=True)
+
+        # Primary dynamic average: strongest N satellites matching the receiver's active solution size
+        if raw_used > 0:
+            n_used = min(raw_used, len(sorted_sats))
+            used_sats = sorted_sats[:n_used]
+            used_tag = f"used{n_used}"
+        else:
+            n_used = min(16, len(sorted_sats))
+            used_sats = sorted_sats[:n_used]
+            used_tag = f"top{n_used}"
+
+        used_snrs = [s for _, (s, _) in used_sats]
+        avg_used = sum(used_snrs) / len(used_snrs) if used_snrs else 0.0
+
+        # Reference Top-16 average (peak RTK core) kept for detailed diagnostics
+        top16_sats = sorted_sats[:16]
+        top16_snrs = [s for _, (s, _) in top16_sats]
+        avg_top16 = sum(top16_snrs) / len(top16_snrs) if top16_snrs else 0.0
+
+        strong = sum(1 for _, (s, _) in sat_best.items() if s >= 35.0)
         snr_tokens = ",".join(
             f"{sid}:{round(s):d}@{el}" if el >= 0 else f"{sid}:{round(s):d}"
-            for sid, (s, el) in sorted_sats
+            for sid, (s, el) in sorted_sats[:32]
         )
-        return f"C/N0: avg {avg:.1f} dB-Hz, {strong}/{len(vals)} signals >=35 | SNR:[{snr_tokens}]"
+        return (
+            f"C/N0: avg {avg_used:.1f} dB-Hz, {strong}/{len(sat_best)} sats >=35 "
+            f"({used_tag}, top{len(top16_snrs)} {avg_top16:.1f}) | SNR:[{snr_tokens}]"
+        )
 
     def _log_signal_diagnostics(self) -> None:
         """Detailed per-band / elevation / fix / GST / Pi health log (debug_signal_log:=true)."""
@@ -850,12 +920,13 @@ class LC29HGPSNode(Node):
             north_m = d_lat * 6371000.0
             base_enu_str = f" | BaseENU: ({east_m:+.2f}m E, {north_m:+.2f}m N)"
 
+        cn0_summary = self._get_cn0_summary()
         status_msg = String()
         status_text = (
             f"Fix: {quality_str} | Sats: {self.current_num_sats} | HDOP: {self.current_hdop:.2f} | "
             f"Pos: ({self.current_lat:.7f}, {self.current_lon:.7f}, {self.current_alt:.1f}m){base_enu_str} | "
             f"NTRIP: {'Connected' if self.ntrip_connected else ('Disabled' if not self.ntrip_enable else 'Connecting...')} "
-            f"({self.rtcm_bytes_received / 1024.0:.1f} KB RTCM) | Corr. age: {age_str} | {self._get_cn0_summary()}"
+            f"({self.rtcm_bytes_received / 1024.0:.1f} KB RTCM) | Corr. age: {age_str} | {cn0_summary}"
         )
         status_msg.data = status_text
         self.status_pub.publish(status_msg)

@@ -390,7 +390,7 @@
           <!-- 4-Metric Quick Glance Bar -->
           <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin-bottom: 16px;">
             <div style="background: rgba(0,0,0,0.3); padding: 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.06);">
-              <div class="data-label">Avg Signal Strength</div>
+              <div class="data-label">Avg Signal Strength (Top 16)</div>
               <div class="metric-value" style="font-size: 28px;"><span id="snrAvgVal">--</span><span class="metric-unit" style="font-size: 14px;">dB-Hz</span></div>
               <div id="snrAvgSubtext" style="font-size: 11px; color: var(--success); margin-top: 2px;">Optimal for RTK Base</div>
             </div>
@@ -1092,8 +1092,9 @@
         if (snrData) {
           const avg = snrData.avg_snr;
           const count = snrData.count;
+          const topCount = snrData.top_count || Math.min(16, count);
           if (sumSnrSats) sumSnrSats.textContent = `${count} Sats (SNR)`;
-          if (sumAvgSnr) sumAvgSnr.textContent = `${avg.toFixed(1)} dB-Hz`;
+          if (sumAvgSnr) sumAvgSnr.textContent = `${avg.toFixed(1)} dB-Hz (Top ${topCount})`;
 
           if (snrBadge) {
             if (avg >= 38) {
@@ -1123,9 +1124,10 @@
           if (avgValEl) avgValEl.textContent = count > 0 ? avg.toFixed(1) : '--';
           const avgSubEl = document.getElementById('snrAvgSubtext');
           if (avgSubEl) {
-            if (avg >= 38) { avgSubEl.textContent = '🟢 Optimal for RTK Base Phase Lock'; avgSubEl.style.color = '#34d399'; }
-            else if (avg >= 28) { avgSubEl.textContent = '🟡 Good Satellite Signal Lock'; avgSubEl.style.color = '#fbbf24'; }
-            else { avgSubEl.textContent = 'Low Horizon / Obstructed Sky'; avgSubEl.style.color = '#f87171'; }
+            const allInfo = (snrData.avg_all_snr !== undefined && snrData.avg_all_snr !== null) ? ` • All visible: ${snrData.avg_all_snr.toFixed(1)} dB` : '';
+            if (avg >= 38) { avgSubEl.textContent = `🟢 Optimal RTK Base Lock (Top ${topCount})${allInfo}`; avgSubEl.style.color = '#34d399'; }
+            else if (avg >= 28) { avgSubEl.textContent = `🟡 Good Signal Lock (Top ${topCount})${allInfo}`; avgSubEl.style.color = '#fbbf24'; }
+            else { avgSubEl.textContent = `Low Horizon / Obstructed Sky${allInfo}`; avgSubEl.style.color = '#f87171'; }
           }
 
           const satCountEl = document.getElementById('snrSatCount');

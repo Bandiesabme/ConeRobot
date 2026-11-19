@@ -53,6 +53,10 @@ function createEmptyRobotTelemetry(id) {
       hdop: null,
       diff_age: null,
       avg_snr: null,
+      avg_snr_count: null,
+      avg_snr_mode: null,
+      top16_snr: null,
+      top16_count: 0,
       strong_signals: 0,
       total_signals: 0,
       snr_sats: []
@@ -87,6 +91,10 @@ function resetRobotGps(id) {
     hdop: null,
     diff_age: null,
     avg_snr: null,
+    avg_snr_count: null,
+    avg_snr_mode: null,
+    top16_snr: null,
+    top16_count: 0,
     strong_signals: 0,
     total_signals: 0,
     snr_sats: []
