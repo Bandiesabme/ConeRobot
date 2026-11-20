@@ -106,28 +106,43 @@ rm -f /etc/systemd/system/wifi-dongle-switch@.service \
       /etc/udev/rules.d/99-wifi-dongle.rules
 
 # ------------------------------------------------------------------------------
-# Step 3/6: Install universal udev naming, USB power & anti-ARP-flux rules
+# Step 3/6: Install systemd.link naming, udev USB power & anti-ARP-flux rules
 # ------------------------------------------------------------------------------
-echo "⚙️ [3/6] Installing udev naming & USB power rules..."
-mkdir -p /usr/local/sbin /etc/udev/rules.d /etc/sysctl.d /etc/systemd/system
+echo "⚙️ [3/6] Installing systemd.link naming & USB power rules..."
+mkdir -p /usr/local/sbin /etc/systemd/network /etc/udev/rules.d /etc/sysctl.d /etc/systemd/system
 SYSTEMCTL_BIN="$(command -v systemctl)"
 
-cat <<'EOF' > /etc/udev/rules.d/70-wifi-usb-dongle.rules
-# Pin Raspberry Pi onboard Wi-Fi (brcmfmac) to wlan0 and ANY USB Wi-Fi dongle
-# (TP-Link TL-WN722N v2/v3, Archer series, Realtek/Atheros/Mediatek) to wlusb0.
-# Using wlusb0 avoids kernel wlan0/wlan1 boot-order rename collisions.
-SUBSYSTEM=="net", ACTION=="add", DEVTYPE=="wlan", DRIVERS=="brcmfmac", NAME="wlan0"
-SUBSYSTEM=="net", ACTION=="add", DEVTYPE=="wlan", SUBSYSTEMS=="usb", NAME="wlusb0"
+# Override Ubuntu's /usr/lib/systemd/network/73-usb-net-by-mac.link (which names USB
+# Wi-Fi dongles wlx<mac>). Priority 10 < 73 ensures ANY USB Wi-Fi dongle becomes wlusb0,
+# and onboard Pi 5 Wi-Fi (brcmfmac) stays wlan0 — with zero kernel wlan0/wlan1 collision.
+cat <<'EOF' > /etc/systemd/network/10-wifi-usb-dongle.link
+[Match]
+Type=wlan
+Path=*-usb-*
 
+[Link]
+Name=wlusb0
+EOF
+
+cat <<'EOF' > /etc/systemd/network/11-wifi-onboard.link
+[Match]
+Type=wlan
+Driver=brcmfmac
+
+[Link]
+Name=wlan0
+EOF
+
+cat <<'EOF' > /etc/udev/rules.d/70-wifi-usb-dongle.rules
 # Disable USB autosuspend for TP-Link TL-WN722N v2 (2357:010c) & v3 (2357:0109)
 ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2357", ATTR{idProduct}=="010c", TEST=="power/control", ATTR{power/control}="on"
 ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2357", ATTR{idProduct}=="0109", TEST=="power/control", ATTR{power/control}="on"
 EOF
 
 cat <<EOF > /etc/udev/rules.d/99-wifi-failover.rules
-# Wake wifi-failover watchdog immediately when a USB Wi-Fi adapter is inserted or removed
-SUBSYSTEM=="net", ACTION=="add", DEVTYPE=="wlan", SUBSYSTEMS=="usb", RUN+="${SYSTEMCTL_BIN} kill --kill-who=main -s USR1 wifi-failover.service"
-SUBSYSTEM=="net", ACTION=="remove", KERNEL=="wlusb0", RUN+="${SYSTEMCTL_BIN} kill --kill-who=main -s USR1 wifi-failover.service"
+# Wake wifi-failover watchdog immediately when wlusb0 is added, renamed (move), or removed
+SUBSYSTEM=="net", ACTION=="add|move|remove", KERNEL=="wlusb0", RUN+="${SYSTEMCTL_BIN} kill --kill-who=main -s USR1 wifi-failover.service"
+SUBSYSTEM=="net", ACTION=="add", ENV{ID_NET_NAME}=="wlusb0", RUN+="${SYSTEMCTL_BIN} kill --kill-who=main -s USR1 wifi-failover.service"
 EOF
 
 # Prevent same-subnet ARP flux during brief dual-interface handover
@@ -147,7 +162,8 @@ wifi.powersave = 2
 EOF
 fi
 
-udevadm control --reload-rules >/dev/null 2>&1 || true
+# Reload BOTH udev rules and systemd.link files in systemd-udevd
+udevadm control --reload >/dev/null 2>&1 || true
 
 # ------------------------------------------------------------------------------
 # Step 4/6: Install continuous Wi-Fi failover & power-save watchdog daemon

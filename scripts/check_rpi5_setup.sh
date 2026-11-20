@@ -351,7 +351,9 @@ else
          "sudo bash scripts/setup_wifi.sh && sudo reboot"
 fi
 
-for f in /etc/udev/rules.d/70-wifi-usb-dongle.rules \
+for f in /etc/systemd/network/10-wifi-usb-dongle.link \
+         /etc/systemd/network/11-wifi-onboard.link \
+         /etc/udev/rules.d/70-wifi-usb-dongle.rules \
          /etc/udev/rules.d/99-wifi-failover.rules \
          /etc/sysctl.d/99-wifi-failover.conf \
          /usr/local/sbin/wifi-failover-watchdog.sh \

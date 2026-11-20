@@ -348,44 +348,62 @@ confirm_step "4" "Wi-Fi Auto-Connect & Low Latency" "$WIFI_OK" "$WIFI_MSG"
 # ==============================================================================
 log_section "STEP 5/8: BOOT FIRMWARE CONFIGURATION"
 BOOT_CONFIG="/boot/firmware/config.txt"
+BOOT_CMDLINE="/boot/firmware/cmdline.txt"
 BOOT_OK=0
 
 if [ -f "$BOOT_CONFIG" ]; then
     log_info "Configuring USB power (1.6A), fast I2C (400kHz), and Hardware UART in $BOOT_CONFIG..."
-    if ! grep -q "usb_max_current_enable=1" "$BOOT_CONFIG"; then
-        echo "" | sudo tee -a "$BOOT_CONFIG"
-        echo "# Enable full USB power for LiDAR and sensors" | sudo tee -a "$BOOT_CONFIG"
-        echo "usb_max_current_enable=1" | sudo tee -a "$BOOT_CONFIG"
+    if ! grep -qE '^\s*usb_max_current_enable=1\b' "$BOOT_CONFIG"; then
+        echo "" | sudo tee -a "$BOOT_CONFIG" > /dev/null
+        echo "# Enable full USB power for LiDAR and sensors" | sudo tee -a "$BOOT_CONFIG" > /dev/null
+        echo "usb_max_current_enable=1" | sudo tee -a "$BOOT_CONFIG" > /dev/null
     fi
 
-    if ! grep -q "dtparam=i2c_arm" "$BOOT_CONFIG"; then
-        echo "# Enable fast 400kHz I2C bus for BNO08x IMU" | sudo tee -a "$BOOT_CONFIG"
-        echo "dtparam=i2c_arm=on,i2c_arm_baudrate=400000" | sudo tee -a "$BOOT_CONFIG"
+    if ! grep -qE '^\s*dtparam=i2c_arm=on.*i2c_arm_baudrate=400000' "$BOOT_CONFIG"; then
+        if grep -qE '^\s*dtparam=i2c_arm=on\s*$' "$BOOT_CONFIG"; then
+            sudo sed -i -E 's/^\s*dtparam=i2c_arm=on\s*$/dtparam=i2c_arm=on,i2c_arm_baudrate=400000/' "$BOOT_CONFIG"
+        else
+            echo "# Enable fast 400kHz I2C bus for BNO08x IMU" | sudo tee -a "$BOOT_CONFIG" > /dev/null
+            echo "dtparam=i2c_arm=on,i2c_arm_baudrate=400000" | sudo tee -a "$BOOT_CONFIG" > /dev/null
+        fi
     fi
 
-    if ! grep -q "dtparam=uart0=on" "$BOOT_CONFIG"; then
-        echo "# Enable Hardware UART for LC29H GPS HAT" | sudo tee -a "$BOOT_CONFIG"
-        echo "enable_uart=1" | sudo tee -a "$BOOT_CONFIG"
-        echo "dtparam=uart0=on" | sudo tee -a "$BOOT_CONFIG"
+    if ! grep -qE '^\s*enable_uart=1\b' "$BOOT_CONFIG"; then
+        echo "# Enable Hardware UART for LC29H GPS HAT" | sudo tee -a "$BOOT_CONFIG" > /dev/null
+        echo "enable_uart=1" | sudo tee -a "$BOOT_CONFIG" > /dev/null
+    fi
+    if ! grep -qE '^\s*dtparam=uart0=on\b' "$BOOT_CONFIG"; then
+        echo "dtparam=uart0=on" | sudo tee -a "$BOOT_CONFIG" > /dev/null
+    fi
+
+    # Remove kernel serial console on serial0/ttyAMA0 so boot logs never corrupt the LC29H GPS UART
+    if [ -f "$BOOT_CMDLINE" ] && grep -qE 'console=(serial0|ttyAMA0)' "$BOOT_CMDLINE"; then
+        log_info "Removing serial0/ttyAMA0 kernel console from $BOOT_CMDLINE..."
+        [ -f "${BOOT_CMDLINE}.orig.bak" ] || sudo cp -p "$BOOT_CMDLINE" "${BOOT_CMDLINE}.orig.bak"
+        sudo sed -i -E 's/\bconsole=(serial0|ttyAMA0)[^ ]* ?//g; s/  +/ /g; s/^ //; s/ $//' "$BOOT_CMDLINE"
     fi
 
     # Verification assertions
     BOOT_ERRORS=()
-    if ! grep -q "usb_max_current_enable=1" "$BOOT_CONFIG"; then
+    if ! grep -qE '^\s*usb_max_current_enable=1\b' "$BOOT_CONFIG"; then
         BOOT_OK=1
         BOOT_ERRORS+=("usb_max_current_enable missing")
     fi
-    if ! grep -q "dtparam=i2c_arm" "$BOOT_CONFIG"; then
+    if ! grep -qE '^\s*dtparam=i2c_arm=on.*i2c_arm_baudrate=400000' "$BOOT_CONFIG"; then
         BOOT_OK=1
-        BOOT_ERRORS+=("dtparam=i2c_arm missing")
+        BOOT_ERRORS+=("400kHz dtparam=i2c_arm missing")
     fi
-    if ! grep -q "dtparam=uart0=on" "$BOOT_CONFIG"; then
+    if ! grep -qE '^\s*dtparam=uart0=on\b' "$BOOT_CONFIG" || ! grep -qE '^\s*enable_uart=1\b' "$BOOT_CONFIG"; then
         BOOT_OK=1
-        BOOT_ERRORS+=("dtparam=uart0=on missing")
+        BOOT_ERRORS+=("enable_uart/dtparam=uart0=on missing")
+    fi
+    if [ -f "$BOOT_CMDLINE" ] && grep -qE 'console=(serial0|ttyAMA0)' "$BOOT_CMDLINE"; then
+        BOOT_OK=1
+        BOOT_ERRORS+=("console=serial0/ttyAMA0 still present in $BOOT_CMDLINE")
     fi
 
     if [ "$BOOT_OK" -eq 0 ]; then
-        BOOT_MSG="Verified usb_max_current_enable=1, 400kHz I2C, and UART parameters in $BOOT_CONFIG."
+        BOOT_MSG="Verified usb_max_current_enable=1, 400kHz I2C, UART0, and clean $BOOT_CMDLINE."
     else
         BOOT_MSG="Boot config issues: ${BOOT_ERRORS[*]}"
     fi

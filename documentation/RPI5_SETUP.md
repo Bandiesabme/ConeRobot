@@ -309,7 +309,7 @@ sudo bash scripts/setup_wifi.sh --replace "YOUR_SSID" "YOUR_PASSWORD"
 
 ### Option B: Manual Netplan Configuration
 
-If configuring manually (after installing `/etc/udev/rules.d/70-wifi-usb-dongle.rules` so the USB dongle is named `wlusb0`), update `/etc/netplan/50-cloud-init.yaml`:
+If configuring manually (after installing `/etc/systemd/network/10-wifi-usb-dongle.link` so the USB dongle is named `wlusb0`), update `/etc/netplan/50-cloud-init.yaml`:
 
 ```bash
 sudo tee /etc/netplan/50-cloud-init.yaml << 'EOF'
