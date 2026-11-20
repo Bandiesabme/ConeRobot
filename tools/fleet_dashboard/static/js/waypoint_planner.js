@@ -579,7 +579,8 @@ function connectRobotWebSocket(id, ip, port) {
             '/step_status',
             '/odom',
             '/battery_state',
-            '/robot/diagnostics'
+            '/robot/diagnostics',
+            '/robot/system_info'
           ];
 
           msg.channels.forEach(ch => {
@@ -849,6 +850,11 @@ function updateTelemetryUI() {
       if (rtkEl.style.color !== '#ef4444') rtkEl.style.color = '#ef4444';
     }
     setDomText('tel-diff-age', '--');
+    const wifiOffEl = getDom('tel-wifi-signal');
+    if (wifiOffEl) {
+      if (wifiOffEl.textContent !== '--') wifiOffEl.textContent = '--';
+      if (wifiOffEl.style.color !== '') wifiOffEl.style.color = '';
+    }
     setDomText('tel-heading', '--° ENU');
     setDomText('tel-battery', '-- V');
     if (stateBadge) {
@@ -873,6 +879,25 @@ function updateTelemetryUI() {
   }
 
   setDomText('tel-diff-age', robotTelemetry.diffAge);
+  const wifiEl = getDom('tel-wifi-signal');
+  if (wifiEl) {
+    const selWifi = (activeRobotId && realTelemetry[activeRobotId]) ? realTelemetry[activeRobotId].wifi : null;
+    let wifiTxt = '--';
+    let wifiCol = '';
+    if (selWifi && selWifi.rssi_dbm !== null && !isNaN(selWifi.rssi_dbm)) {
+      const rssi = Number(selWifi.rssi_dbm);
+      const ifLabel = selWifi.iface || 'wifi';
+      const qStr = (selWifi.quality_pct !== null && selWifi.quality_pct !== undefined) ? ` • ${selWifi.quality_pct}%` : '';
+      const icon = rssi >= -65 ? '🟢' : (rssi >= -75 ? '🟡' : '🔴');
+      wifiTxt = `${icon} ${Math.round(rssi)} dBm (${ifLabel}${qStr})`;
+      wifiCol = rssi >= -65 ? '#10b981' : (rssi >= -75 ? '#f59e0b' : '#ef4444');
+    } else if (selWifi && selWifi.iface) {
+      wifiTxt = `🌐 ${selWifi.iface}`;
+      wifiCol = '#38bdf8';
+    }
+    if (wifiEl.textContent !== wifiTxt) wifiEl.textContent = wifiTxt;
+    if (wifiEl.style.color !== wifiCol) wifiEl.style.color = wifiCol;
+  }
   const selImu = (activeRobotId && realTelemetry[activeRobotId]) ? realTelemetry[activeRobotId].imu : null;
   const hdgTag = (selImu && selImu.cog_locked)
     ? 'ENU (RTK-Cal)'

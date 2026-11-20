@@ -10,13 +10,18 @@ Lightweight Python server that runs on the Laptop.
 """
 
 import os
+import re
 import sys
 import json
 import time
 import socket
+import subprocess
 import threading
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse
+try:
+    from http.server import ThreadingHTTPServer as _BaseHTTPServer, SimpleHTTPRequestHandler
+except ImportError:
+    from http.server import HTTPServer as _BaseHTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -341,6 +346,111 @@ def background_scanner_loop():
         except Exception:
             time.sleep(5)
 
+def ping_host_once(ip, timeout_ms=800):
+    """
+    Runs a single OS ICMP ping from the laptop to a robot IP (0 CPU/RAM on Pi 5).
+    Locale-independent parser (works on English, Hungarian, German Windows & Linux/macOS).
+    Returns RTT in ms (float) or None on timeout/unreachable.
+    """
+    if not ip or not re.match(r'^[a-zA-Z0-9._:-]{1,128}$', ip):
+        return None
+
+    is_win = sys.platform.startswith("win")
+    is_mac = sys.platform == "darwin"
+    if is_win:
+        cmd = ["ping", "-n", "1", "-w", str(int(timeout_ms)), ip]
+    elif is_mac:
+        cmd = ["ping", "-c", "1", "-W", str(int(timeout_ms)), ip]
+    else:
+        timeout_s = max(1, int(round(timeout_ms / 1000.0)))
+        cmd = ["ping", "-c", "1", "-W", str(timeout_s), ip]
+
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "timeout": max(1.5, timeout_ms / 1000.0 + 1.0),
+    }
+    if is_win and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    t0 = time.perf_counter()
+    try:
+        proc = subprocess.run(cmd, **kwargs)
+    except Exception:
+        return None
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+    output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    # Verify an actual echo reply containing TTL= (avoids Windows "Destination host unreachable" exit 0)
+    for line in output.splitlines():
+        if "ttl=" in line.lower():
+            m = re.search(r'([<=])\s*(\d+(?:[.,]\d+)?)\s*ms', line, re.IGNORECASE)
+            if m:
+                op, val_str = m.group(1), m.group(2).replace(",", ".")
+                try:
+                    val = float(val_str)
+                    if op == "<" and val <= 1.0:
+                        return 0.5
+                    return round(val, 1)
+                except ValueError:
+                    pass
+            return round(elapsed_ms, 1)
+
+    return None
+
+
+def ping_host_stats(ip, count=1):
+    """Runs 1..10 ICMP pings from the laptop and computes RTT, min/avg/max, jitter, and loss."""
+    count = max(1, min(10, int(count)))
+    samples = []
+    rtts = []
+    for idx in range(count):
+        rtt = ping_host_once(ip, timeout_ms=800)
+        samples.append(rtt)
+        if rtt is not None:
+            rtts.append(rtt)
+        if idx < count - 1:
+            time.sleep(0.10)
+
+    received = len(rtts)
+    loss_pct = round(((count - received) / count) * 100.0, 1)
+    if not rtts:
+        return {
+            "ok": False,
+            "ip": ip,
+            "sent": count,
+            "received": 0,
+            "loss_pct": loss_pct,
+            "rtt_ms": None,
+            "min_ms": None,
+            "avg_ms": None,
+            "max_ms": None,
+            "jitter_ms": None,
+            "samples": samples,
+        }
+
+    avg_ms = sum(rtts) / len(rtts)
+    if len(rtts) >= 2:
+        diffs = [abs(rtts[i] - rtts[i - 1]) for i in range(1, len(rtts))]
+        jitter_ms = sum(diffs) / len(diffs)
+    else:
+        jitter_ms = 0.0
+
+    return {
+        "ok": True,
+        "ip": ip,
+        "sent": count,
+        "received": received,
+        "loss_pct": loss_pct,
+        "rtt_ms": round(rtts[-1], 1),
+        "min_ms": round(min(rtts), 1),
+        "avg_ms": round(avg_ms, 1),
+        "max_ms": round(max(rtts), 1),
+        "jitter_ms": round(jitter_ms, 1),
+        "samples": samples,
+    }
+
+
 class FleetDashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=STATIC_DIR, **kwargs)
@@ -455,6 +565,26 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             threading.Thread(target=scan_network_job, daemon=True).start()
             self.wfile.write(json.dumps({"status": "Scan started"}).encode("utf-8"))
+            return
+
+        # API: Laptop -> Robot ICMP Ping (0 CPU/RAM on Pi 5)
+        if parsed.path == "/api/ping":
+            query = parse_qs(parsed.query)
+            target_ip = (query.get("ip", [""])[0] or "").strip()
+            try:
+                count = int(query.get("count", ["1"])[0])
+            except ValueError:
+                count = 1
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            if not target_ip or not re.match(r'^[a-zA-Z0-9._:-]{1,128}$', target_ip):
+                self.wfile.write(json.dumps({"ok": False, "error": "Invalid IP"}).encode("utf-8"))
+                return
+            res = ping_host_stats(target_ip, count=count)
+            self.wfile.write(json.dumps(res).encode("utf-8"))
             return
 
         # API: Query Base Station Caster (port 8080)
@@ -593,7 +723,7 @@ def main():
     print("  • 100% Real Live Sensor Data (Zero Fake / Simulated Data).")
     print("  • Press Ctrl+C in terminal to stop.\n")
 
-    httpd = HTTPServer((host, port), FleetDashboardHandler)
+    httpd = _BaseHTTPServer((host, port), FleetDashboardHandler)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

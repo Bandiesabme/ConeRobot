@@ -14,6 +14,11 @@ let hasAutoCentered = false;
 let lidarRadarOpen = false;
 let lidarRadarMaxRangeM = 4.0; // Default zoom radius in meters (1m, 2m, 4m, 8m, 12m)
 
+// Collapsible Modal Telemetry Flaps (Wi-Fi starts collapsed; GNSS SNR starts open)
+let snrPanelOpen = true;
+let wifiPanelOpen = false;
+let wifiAbBaselines = {}; // { [robotId]: { iface, is_usb, avg_rssi, avg_ping, loss_pct, ts } }
+
 let configuredTopics = {
   scan: '/scan',
   odom: '/odom',
@@ -76,7 +81,26 @@ function createEmptyRobotTelemetry(id) {
       last_heading_topic_time: 0
     },
     motion: { state: 'Offline', step_progress: '--' },
-    health: { cpu_temp: '--', cpu_load: '--', battery_v: '--' }
+    health: { cpu_temp: '--', cpu_load: '--', cpu_percent: '--', ram_mb: '--', battery_v: '--' },
+    wifi: {
+      present: false,
+      iface: null,
+      driver: null,
+      is_usb: null,
+      rssi_dbm: null,
+      quality_pct: null,
+      retries: null,
+      rx_drop: null,
+      tx_drop: null,
+      last_update: 0,
+      ping_ms: null,
+      ping_avg_ms: null,
+      ping_jitter_ms: null,
+      ping_loss_pct: null,
+      ping_samples: [],
+      rssi_history: [],
+      burst_result: null
+    }
   };
 }
 
@@ -138,6 +162,11 @@ function resetRobotSensors(id) {
       last_heading_topic_time: 0
     };
     realTelemetry[id].motion = { state: 'Offline', step_progress: '--' };
+    if (realTelemetry[id].wifi) {
+      // Preserve rssi_history & ping_samples across short failover reconnects (wlusb0 <-> wlan0)
+      realTelemetry[id].wifi.present = false;
+      realTelemetry[id].wifi.ping_ms = null;
+    }
   }
 }
 

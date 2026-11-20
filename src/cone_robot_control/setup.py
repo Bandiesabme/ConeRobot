@@ -28,6 +28,7 @@ setup(
             'bno08x_node = cone_robot_control.bno08x_node:main',
             'lc29h_gps_node = cone_robot_control.lc29h_gps_node:main',
             'primitive_motion_controller = cone_robot_control.primitive_motion_controller:main',
+            'system_info_node = cone_robot_control.system_info_node:main',
         ],
     },
 )

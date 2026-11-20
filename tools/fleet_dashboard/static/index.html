@@ -14,7 +14,7 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   
   <!-- Custom Dashboard CSS -->
-  <link rel="stylesheet" href="css/dashboard.css">
+  <link rel="stylesheet" href="css/dashboard.css?v=v254">
 </head>
 <body>
   <div class="app-container">
@@ -208,46 +208,125 @@
             </div>
           </div>
 
-          <!-- GNSS Satellite Signal Strength (SNR / C/N0) Card -->
+          <!-- GNSS Satellite Signal Strength (SNR / C/N0) Openable Flap -->
           <div class="gps-coords-card" id="modal-snr-card" style="margin-top: 14px; background: #0b0f19; color: #f1f5f9; border-color: rgba(56, 189, 248, 0.25);">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;">
-              <div style="display: flex; align-items: center; gap: 8px;">
-                <h4 style="margin: 0; color: #94a3b8; font-size: 0.82rem; letter-spacing: 0.03em;">📶 GNSS SATELLITE SIGNAL NOISE RATIO (SNR / C/N0)</h4>
+            <div class="flap-header" id="modal-snr-header">
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <h4 style="margin: 0; color: #94a3b8; font-size: 0.82rem; letter-spacing: 0.03em;">📶 GNSS SATELLITE SIGNAL STRENGTH (SNR / C/N0)</h4>
                 <span id="modal-snr-badge" class="status-badge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3);">WAITING...</span>
               </div>
-              <span id="modal-snr-summary" style="font-family: var(--font-mono); font-size: 0.75rem; color: #38bdf8; font-weight: 700;">-- Sats • Avg -- dB-Hz</span>
-            </div>
-
-            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
-              <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
-                <div style="font-size: 0.68rem; color: #94a3b8;" id="modal-snr-avg-label">Used Avg (GGA)</div>
-                <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #fff;"><span id="modal-snr-avg">--</span> <span style="font-size: 0.7rem; color: #94a3b8;">dB-Hz</span></div>
-              </div>
-              <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
-                <div style="font-size: 0.68rem; color: #94a3b8;" id="modal-snr-top16-label">Top 16 Avg</div>
-                <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #34d399;"><span id="modal-snr-top16">--</span> <span style="font-size: 0.7rem; color: #94a3b8;">dB-Hz</span></div>
-              </div>
-              <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
-                <div style="font-size: 0.68rem; color: #94a3b8;">Active / Visible Sats</div>
-                <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #fff;"><span id="modal-snr-count">0</span> <span style="font-size: 0.7rem; color: #94a3b8;" id="modal-snr-count-unit">sats</span></div>
-              </div>
-              <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
-                <div style="font-size: 0.68rem; color: #94a3b8;">Top Satellite</div>
-                <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: #38bdf8;"><span id="modal-snr-top">--</span></div>
-              </div>
-              <div style="grid-column: span 2; background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
-                <div style="font-size: 0.68rem; color: #94a3b8;">Constellations</div>
-                <div style="font-size: 0.82rem; font-weight: 700; font-family: var(--font-mono); color: #34d399; margin-top: 4px;" id="modal-snr-consts">--</div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span id="modal-snr-summary" style="font-family: var(--font-mono); font-size: 0.74rem; color: #38bdf8; font-weight: 700;">-- Sats • Avg -- dB-Hz</span>
+                <button type="button" id="btn-toggle-snr-panel" class="flap-toggle-btn">▲ Hide</button>
               </div>
             </div>
 
-            <div style="display: flex; gap: 12px; font-size: 0.68rem; color: #94a3b8; margin-bottom: 8px; flex-wrap: wrap;">
-              <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #10b981;"></span> ≥38 dB-Hz (Strong)</span>
-              <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #f59e0b;"></span> 28–37 dB-Hz (Good)</span>
-              <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #ef4444;"></span> &lt;28 dB-Hz (Weak)</span>
+            <div id="modal-snr-body" class="flap-body">
+              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;" id="modal-snr-avg-label">Used Avg (GGA)</div>
+                  <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #fff;"><span id="modal-snr-avg">--</span> <span style="font-size: 0.7rem; color: #94a3b8;">dB-Hz</span></div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;" id="modal-snr-top16-label">Top 16 Avg</div>
+                  <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #34d399;"><span id="modal-snr-top16">--</span> <span style="font-size: 0.7rem; color: #94a3b8;">dB-Hz</span></div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Active / Visible Sats</div>
+                  <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #fff;"><span id="modal-snr-count">0</span> <span style="font-size: 0.7rem; color: #94a3b8;" id="modal-snr-count-unit">sats</span></div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Top Satellite</div>
+                  <div style="font-size: 1.05rem; font-weight: 700; font-family: var(--font-mono); color: #38bdf8;"><span id="modal-snr-top">--</span></div>
+                </div>
+                <div style="grid-column: span 2; background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Constellations</div>
+                  <div style="font-size: 0.82rem; font-weight: 700; font-family: var(--font-mono); color: #34d399; margin-top: 4px;" id="modal-snr-consts">--</div>
+                </div>
+              </div>
+
+              <div style="display: flex; gap: 12px; font-size: 0.68rem; color: #94a3b8; margin-bottom: 8px; flex-wrap: wrap;">
+                <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #10b981;"></span> ≥38 dB-Hz (Strong)</span>
+                <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #f59e0b;"></span> 28–37 dB-Hz (Good)</span>
+                <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #ef4444;"></span> &lt;28 dB-Hz (Weak)</span>
+              </div>
+
+              <div id="modal-snr-bars" class="fleet-snr-chart"></div>
+            </div>
+          </div>
+
+          <!-- Wi-Fi Signal Strength & Network Link Openable Flap (/robot/system_info) -->
+          <div class="gps-coords-card" id="modal-wifi-card" style="margin-top: 12px; margin-bottom: 14px; background: #0b0f19; color: #f1f5f9; border-color: rgba(16, 185, 129, 0.28);">
+            <div class="flap-header" id="modal-wifi-header">
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <h4 style="margin: 0; color: #94a3b8; font-size: 0.82rem; letter-spacing: 0.03em;">📡 WI-FI SIGNAL STRENGTH &amp; NETWORK LINK</h4>
+                <span id="modal-wifi-badge" class="status-badge" style="background: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3);">WAITING...</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span id="modal-wifi-summary" style="font-family: var(--font-mono); font-size: 0.74rem; color: #34d399; font-weight: 700;">-- dBm • -- ms</span>
+                <button type="button" id="btn-toggle-wifi-panel" class="flap-toggle-btn">▼ Open</button>
+              </div>
             </div>
 
-            <div id="modal-snr-bars" class="fleet-snr-chart"></div>
+            <!-- Collapsible Wi-Fi Telemetry Body (Closed by default; live Ping runs only when open) -->
+            <div id="modal-wifi-body" class="flap-body" style="display: none;">
+              <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Active Adapter</div>
+                  <div style="font-size: 1.02rem; font-weight: 700; font-family: var(--font-mono); color: #38bdf8;" id="modal-wifi-iface">--</div>
+                  <div style="font-size: 0.66rem; color: #94a3b8; margin-top: 2px;" id="modal-wifi-adapter-type">Waiting /robot/system_info...</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Signal (RSSI)</div>
+                  <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #fff;"><span id="modal-wifi-rssi">--</span> <span style="font-size: 0.7rem; color: #94a3b8;">dBm</span></div>
+                  <div style="font-size: 0.66rem; color: #94a3b8; margin-top: 2px;" id="modal-wifi-rssi-avg">Avg: -- dBm</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Link Quality</div>
+                  <div style="font-size: 1.1rem; font-weight: 700; font-family: var(--font-mono); color: #34d399;"><span id="modal-wifi-quality">--</span><span style="font-size: 0.7rem; color: #94a3b8;">%</span></div>
+                  <div class="wifi-qual-track"><div id="modal-wifi-qual-bar" class="wifi-qual-fill"></div></div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Ping RTT (Laptop → Pi)</div>
+                  <div style="font-size: 1.08rem; font-weight: 700; font-family: var(--font-mono); color: #fff;"><span id="modal-wifi-rtt">--</span> <span style="font-size: 0.7rem; color: #94a3b8;">ms</span></div>
+                  <div style="font-size: 0.66rem; color: #94a3b8; margin-top: 2px;" id="modal-wifi-rtt-avg">Avg: -- ms</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Jitter / Packet Loss</div>
+                  <div style="font-size: 0.96rem; font-weight: 700; font-family: var(--font-mono); color: #34d399;" id="modal-wifi-jitter">-- ms</div>
+                  <div style="font-size: 0.66rem; color: #94a3b8; margin-top: 2px;" id="modal-wifi-loss">Loss: --%</div>
+                </div>
+                <div style="background: rgba(255,255,255,0.04); padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+                  <div style="font-size: 0.68rem; color: #94a3b8;">Retries / Drops</div>
+                  <div style="font-size: 0.96rem; font-weight: 700; font-family: var(--font-mono); color: #e2e8f0;" id="modal-wifi-retries">--</div>
+                  <div style="font-size: 0.66rem; color: #94a3b8; margin-top: 2px;" id="modal-wifi-drops">RX/TX drop: -- / --</div>
+                </div>
+              </div>
+
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 0.68rem; color: #94a3b8; margin-bottom: 8px; flex-wrap: wrap;">
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                  <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #10b981;"></span> ≥ -65 dBm (Strong)</span>
+                  <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #f59e0b;"></span> -66 to -75 dBm (Fair)</span>
+                  <span style="display: inline-flex; align-items: center; gap: 4px;"><span style="width: 8px; height: 8px; border-radius: 2px; background: #ef4444;"></span> &lt; -75 dBm (Weak)</span>
+                </div>
+                <span style="font-family: var(--font-mono); color: #64748b;">U=USB • O=Onboard</span>
+              </div>
+
+              <!-- Live RSSI History Chart (last 30 samples, ~60s) -->
+              <div id="modal-wifi-bars" class="fleet-snr-chart" style="min-height: 128px;"></div>
+
+              <!-- Extender A/B Test Actions -->
+              <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 10px;">
+                <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                  <button type="button" id="btn-wifi-burst" class="wifi-action-btn" title="Run 10 rapid ICMP pings from laptop to Pi (0 Pi RAM)">⚡ 10-Ping Burst</button>
+                  <button type="button" id="btn-wifi-pin-a" class="wifi-action-btn" title="Save current average RSSI &amp; Ping as Baseline A to compare with/without extender">📌 Pin Baseline (A)</button>
+                  <button type="button" id="btn-wifi-reset" class="wifi-action-btn" title="Clear Wi-Fi history &amp; A/B baseline">↺ Reset</button>
+                </div>
+                <span id="modal-wifi-burst-status" style="font-family: var(--font-mono); font-size: 0.7rem; color: #94a3b8;">Source: /robot/system_info (0.5 Hz)</span>
+              </div>
+
+              <div id="modal-wifi-ab-compare" class="wifi-ab-banner" style="display: none;"></div>
+            </div>
           </div>
 
           <!-- LiDAR & Laser Odometry Status Card -->
@@ -361,11 +440,11 @@
   <!-- Leaflet JS for Maps -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <!-- Custom Fleet JS with cache buster -->
-  <script src="js/state.js?v=v253"></script>
-  <script src="js/cdr_decoder.js?v=v253"></script>
-  <script src="js/map_view.js?v=v253"></script>
-  <script src="js/lidar_canvas.js?v=v253"></script>
-  <script src="js/websocket.js?v=v253"></script>
-  <script src="js/dashboard.js?v=v253"></script>
+  <script src="js/state.js?v=v255"></script>
+  <script src="js/cdr_decoder.js?v=v255"></script>
+  <script src="js/map_view.js?v=v255"></script>
+  <script src="js/lidar_canvas.js?v=v255"></script>
+  <script src="js/websocket.js?v=v255"></script>
+  <script src="js/dashboard.js?v=v255"></script>
 </body>
 </html>

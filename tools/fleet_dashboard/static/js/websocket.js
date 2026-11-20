@@ -115,7 +115,8 @@ function connectToRobotWebSocket(robotId, ip, port) {
             '/step_status',
             '/battery_state',
             '/foxglove_bridge/sysinfo',
-            '/robot/diagnostics'
+            '/robot/diagnostics',
+            '/robot/system_info'
           ];
 
           const seen = new Set();
@@ -132,6 +133,7 @@ function connectToRobotWebSocket(robotId, ip, port) {
             const isImuData = topic === configuredTopics.imu_data || topic === '/imu/data' || topic.endsWith('/imu/data');
             const isStep = topic === configuredTopics.step_status || topic === '/step_status' || topic.endsWith('/step_status');
             const isDiag = topic === '/robot/diagnostics' || topic.endsWith('/robot/diagnostics');
+            const isSystemInfo = topic === '/robot/system_info' || topic.endsWith('/robot/system_info');
             const isSysinfo = topic === '/foxglove_bridge/sysinfo' || topic.includes('sysinfo');
             const isBattery = topic === configuredTopics.battery ||
                               topic === '/battery_state' ||
@@ -141,7 +143,7 @@ function connectToRobotWebSocket(robotId, ip, port) {
             if (isScan || isOdom) hasLidarTopic = true;
             if (isGpsFix) hasGpsTopic = true;
 
-            const isTarget = isScan || isOdom || isGpsFix || isGpsStatus || isHeading || isImuData || isStep || isDiag || isSysinfo || isBattery || targetTopics.includes(topic) || Object.values(configuredTopics).includes(topic);
+            const isTarget = isScan || isOdom || isGpsFix || isGpsStatus || isHeading || isImuData || isStep || isDiag || isSystemInfo || isSysinfo || isBattery || targetTopics.includes(topic) || Object.values(configuredTopics).includes(topic);
 
             if (isTarget && !seen.has(rawTopic)) {
               seen.add(rawTopic);

@@ -726,3 +726,97 @@ body {
   border: 1px solid transparent;
   background: rgba(0, 0, 0, 0.5);
 }
+
+/* Collapsible Telemetry Flap Headers (GNSS SNR & Wi-Fi Signal) */
+.flap-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.flap-header:hover .flap-toggle-btn {
+  border-color: rgba(56, 189, 248, 0.65);
+  background: rgba(56, 189, 248, 0.2);
+}
+
+.flap-toggle-btn {
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: var(--font-main);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  transition: all 0.15s ease;
+}
+
+.flap-body {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.wifi-qual-track {
+  width: 100%;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  margin-top: 5px;
+  overflow: hidden;
+}
+
+.wifi-qual-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: #10b981;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.wifi-action-btn {
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-family: var(--font-main);
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  transition: all 0.15s ease;
+}
+
+.wifi-action-btn:hover {
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #38bdf8;
+}
+
+.wifi-action-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.wifi-action-btn.pinned {
+  background: rgba(16, 185, 129, 0.18);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #34d399;
+}
+
+.wifi-ab-banner {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: #e2e8f0;
+  line-height: 1.45;
+}

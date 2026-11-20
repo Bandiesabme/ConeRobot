@@ -19,6 +19,7 @@ def launch_setup(context, *args, **kwargs):
     launch_imu_val = LaunchConfiguration('launch_imu').perform(context).lower() == 'true'
     launch_foxglove_val = LaunchConfiguration('launch_foxglove').perform(context).lower() == 'true'
     launch_motion_val = LaunchConfiguration('launch_motion_controller').perform(context).lower() == 'true'
+    launch_sysinfo_val = LaunchConfiguration('launch_system_info').perform(context).lower() == 'true'
     gps_debug_val = LaunchConfiguration('gps_debug').perform(context).lower() == 'true'
     gps_run_label_val = LaunchConfiguration('gps_run_label').perform(context)
 
@@ -155,7 +156,19 @@ def launch_setup(context, *args, **kwargs):
             print("  Or from source: git clone https://github.com/MAPIRlab/rf2o_laser_odometry.git src/rf2o_laser_odometry")
             print("=" * 75 + "\n")
 
-    # 6. Foxglove WebSocket Bridge Node (port 8765)
+    # 6. Pi 5 System Info & Wi-Fi Link Monitor Node (/robot/system_info)
+    if launch_sysinfo_val:
+        nodes_to_launch.append(
+            Node(
+                package='cone_robot_control',
+                executable='system_info_node',
+                name='system_info_node',
+                output='screen',
+                parameters=[{'publish_rate_hz': 0.5}]
+            )
+        )
+
+    # 7. Foxglove WebSocket Bridge Node (port 8765)
     if launch_foxglove_val:
         try:
             get_package_share_directory('foxglove_bridge')
@@ -212,6 +225,11 @@ def generate_launch_description():
             'launch_foxglove',
             default_value='true',
             description='Whether to launch Foxglove WebSocket Bridge (port 8765)'
+        ),
+        DeclareLaunchArgument(
+            'launch_system_info',
+            default_value='true',
+            description='Whether to launch Pi 5 System Info node (CPU, RAM, Temp, Wi-Fi on /robot/system_info)'
         ),
         DeclareLaunchArgument(
             'gps_debug',

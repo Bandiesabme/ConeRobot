@@ -50,6 +50,10 @@ function initCardsGridDOM() {
           <span class="metric-val" id="r${i}-snr">--</span>
         </div>
         <div class="metric-row">
+          <span class="metric-key">Wi-Fi Signal</span>
+          <span class="metric-val" id="r${i}-wifi">--</span>
+        </div>
+        <div class="metric-row">
           <span class="metric-key">IMU Heading</span>
           <span class="metric-val" id="r${i}-heading">--</span>
         </div>
@@ -92,6 +96,7 @@ function renderUIUpdates() {
     const lidarEl = document.getElementById(`r${i}-lidar`);
     const gpsEl = document.getElementById(`r${i}-gps`);
     const snrEl = document.getElementById(`r${i}-snr`);
+    const wifiEl = document.getElementById(`r${i}-wifi`);
     const headEl = document.getElementById(`r${i}-heading`);
     const stepEl = document.getElementById(`r${i}-step`);
     const pingEl = document.getElementById(`r${i}-ping`);
@@ -198,6 +203,27 @@ function renderUIUpdates() {
         }
       }
 
+      // Wi-Fi Signal Metric (from /robot/diagnostics /proc/net/wireless, 0 MB extra RAM)
+      if (wifiEl) {
+        const w = r.wifi;
+        if (w && w.rssi_dbm !== null && !isNaN(w.rssi_dbm)) {
+          const rssi = w.rssi_dbm;
+          const icon = rssi >= -65 ? '🟢' : (rssi >= -75 ? '🟡' : '🔴');
+          const ifLabel = w.iface || 'wifi';
+          wifiEl.innerText = `${icon} ${Math.round(rssi)} dBm (${ifLabel})`;
+          wifiEl.className = rssi >= -65 ? 'metric-val gps-rtk' : (rssi >= -75 ? 'metric-val gps-float' : 'metric-val gps-none');
+          wifiEl.style.color = '';
+        } else if (w && w.iface) {
+          wifiEl.innerText = `🌐 ${w.iface}`;
+          wifiEl.className = 'metric-val';
+          wifiEl.style.color = '#38bdf8';
+        } else {
+          wifiEl.innerText = 'Waiting...';
+          wifiEl.className = 'metric-val';
+          wifiEl.style.color = 'var(--text-muted)';
+        }
+      }
+
       headEl.innerText = (r.imu.heading !== null) ? `${Number(r.imu.heading).toFixed(1)}°` : 'Waiting for IMU...';
       stepEl.innerText = r.motion.step_progress;
       pingEl.innerText = '🟢 Connected';
@@ -207,7 +233,7 @@ function renderUIUpdates() {
         if (r.health.battery_v && r.health.battery_v !== '--') {
           battEl.innerText = r.health.battery_v;
           battEl.style.color = '#10b981';
-        } else if (r.health.cpu_temp !== '--' && r.health.cpu_load) {
+        } else if (r.health.cpu_temp !== '--' && r.health.cpu_load && r.health.cpu_load !== '--') {
           battEl.innerText = `${r.health.cpu_temp} (${r.health.cpu_load})`;
           battEl.style.color = 'var(--text-muted)';
         } else if (r.health.cpu_temp !== '--') {
@@ -234,6 +260,11 @@ function renderUIUpdates() {
         snrEl.innerText = '--';
         snrEl.className = 'metric-val';
       }
+      if (wifiEl) {
+        wifiEl.innerText = '--';
+        wifiEl.className = 'metric-val';
+        wifiEl.style.color = '';
+      }
       headEl.innerText = '--';
       stepEl.innerText = '--';
       pingEl.innerText = '⚪ Offline';
@@ -255,13 +286,260 @@ function renderUIUpdates() {
   }
 }
 
-// --- 3. Detail Modal ---
+// --- 3. Detail Modal & Collapsible Signal Flaps ---
+let wifiPingTimer = null;
+let wifiPingInFlight = false;
+let lastWifiBarsRenderKey = '';
+
+function syncModalFlapVisibility() {
+  const snrBody = document.getElementById('modal-snr-body');
+  const snrBtn = document.getElementById('btn-toggle-snr-panel');
+  if (snrBody) snrBody.style.display = snrPanelOpen ? 'block' : 'none';
+  if (snrBtn) snrBtn.innerText = snrPanelOpen ? '▲ Hide' : '▼ Open';
+
+  const wifiBody = document.getElementById('modal-wifi-body');
+  const wifiBtn = document.getElementById('btn-toggle-wifi-panel');
+  if (wifiBody) wifiBody.style.display = wifiPanelOpen ? 'block' : 'none';
+  if (wifiBtn) wifiBtn.innerText = wifiPanelOpen ? '▲ Hide' : '▼ Open';
+}
+
+function toggleSnrPanel() {
+  snrPanelOpen = !snrPanelOpen;
+  syncModalFlapVisibility();
+  if (selectedRobotId && realTelemetry[selectedRobotId]) {
+    updateModalContent(realTelemetry[selectedRobotId]);
+  }
+}
+
+function toggleWifiPanel() {
+  wifiPanelOpen = !wifiPanelOpen;
+  lastWifiBarsRenderKey = '';
+  syncModalFlapVisibility();
+  if (wifiPanelOpen && selectedRobotId) {
+    startWifiPingLoop();
+  } else {
+    stopWifiPingLoop();
+  }
+  if (selectedRobotId && realTelemetry[selectedRobotId]) {
+    updateModalContent(realTelemetry[selectedRobotId]);
+  }
+}
+
+function recomputeWifiPingMetrics(w) {
+  if (!w || !Array.isArray(w.ping_samples) || w.ping_samples.length === 0) {
+    if (w) {
+      w.ping_ms = null;
+      w.ping_avg_ms = null;
+      w.ping_jitter_ms = null;
+      w.ping_loss_pct = null;
+    }
+    return;
+  }
+  const total = w.ping_samples.length;
+  const okSamples = w.ping_samples.filter(s => s.ok && s.ms !== null && !isNaN(s.ms)).map(s => s.ms);
+  const lost = total - okSamples.length;
+  w.ping_loss_pct = Number(((lost / total) * 100.0).toFixed(1));
+
+  if (okSamples.length > 0) {
+    const sum = okSamples.reduce((a, b) => a + b, 0);
+    w.ping_avg_ms = Number((sum / okSamples.length).toFixed(1));
+    if (okSamples.length >= 2) {
+      let diffSum = 0;
+      for (let i = 1; i < okSamples.length; i++) {
+        diffSum += Math.abs(okSamples[i] - okSamples[i - 1]);
+      }
+      w.ping_jitter_ms = Number((diffSum / (okSamples.length - 1)).toFixed(1));
+    } else {
+      w.ping_jitter_ms = 0.0;
+    }
+  } else {
+    w.ping_avg_ms = null;
+    w.ping_jitter_ms = null;
+  }
+}
+
+async function pollSingleWifiPing(robotId) {
+  if (wifiPingInFlight) return;
+  const r = realTelemetry[robotId];
+  if (!r || !r.online || !r.ip || !r.wifi) return;
+
+  wifiPingInFlight = true;
+  try {
+    const res = await fetch(`/api/ping?ip=${encodeURIComponent(r.ip)}&count=1`);
+    if (res.ok) {
+      const data = await res.json();
+      if (realTelemetry[robotId] && realTelemetry[robotId].wifi) {
+        const w = realTelemetry[robotId].wifi;
+        const ok = Boolean(data.ok && data.rtt_ms !== null && !isNaN(data.rtt_ms));
+        const ms = ok ? Number(data.rtt_ms) : null;
+        w.ping_ms = ms;
+        if (!Array.isArray(w.ping_samples)) w.ping_samples = [];
+        w.ping_samples.push({ ok, ms, ts: Date.now() });
+        if (w.ping_samples.length > 30) w.ping_samples.shift();
+        recomputeWifiPingMetrics(w);
+      }
+    }
+  } catch (e) {
+    // Ignore transient dashboard server errors
+  } finally {
+    wifiPingInFlight = false;
+  }
+}
+
+function startWifiPingLoop() {
+  stopWifiPingLoop();
+  if (!selectedRobotId) return;
+  pollSingleWifiPing(selectedRobotId);
+  wifiPingTimer = setInterval(() => {
+    if (selectedRobotId && wifiPanelOpen) {
+      pollSingleWifiPing(selectedRobotId);
+    }
+  }, 2000);
+}
+
+function stopWifiPingLoop() {
+  if (wifiPingTimer) {
+    clearInterval(wifiPingTimer);
+    wifiPingTimer = null;
+  }
+}
+
+async function runWifiBurstTest() {
+  if (!selectedRobotId || !realTelemetry[selectedRobotId]) return;
+  const r = realTelemetry[selectedRobotId];
+  if (!r.online || !r.ip) return;
+
+  const btn = document.getElementById('btn-wifi-burst');
+  const statusEl = document.getElementById('modal-wifi-burst-status');
+  if (btn) {
+    btn.disabled = true;
+    btn.innerText = '⚡ Pinging (10x)...';
+  }
+  if (statusEl) {
+    statusEl.innerText = 'Running 10-packet laptop → Pi ICMP burst...';
+    statusEl.style.color = '#38bdf8';
+  }
+
+  try {
+    const res = await fetch(`/api/ping?ip=${encodeURIComponent(r.ip)}&count=10`);
+    if (res.ok) {
+      const data = await res.json();
+      const w = r.wifi;
+      if (w) {
+        if (Array.isArray(data.samples)) {
+          if (!Array.isArray(w.ping_samples)) w.ping_samples = [];
+          data.samples.forEach(val => {
+            const ok = val !== null && !isNaN(val);
+            w.ping_samples.push({ ok, ms: ok ? Number(val) : null, ts: Date.now() });
+            if (w.ping_samples.length > 30) w.ping_samples.shift();
+          });
+          if (data.rtt_ms !== null && data.rtt_ms !== undefined) {
+            w.ping_ms = Number(data.rtt_ms);
+          }
+          recomputeWifiPingMetrics(w);
+        }
+        w.burst_result = data;
+      }
+      if (statusEl) {
+        if (data.ok) {
+          statusEl.innerText = `Burst (${data.received}/${data.sent}): min ${data.min_ms} / avg ${data.avg_ms} / max ${data.max_ms} ms • ±${data.jitter_ms} ms • ${data.loss_pct}% loss`;
+          statusEl.style.color = data.loss_pct > 0 ? '#fbbf24' : '#34d399';
+        } else {
+          statusEl.innerText = `Burst failed: 0/${data.sent || 10} replies (100% loss)`;
+          statusEl.style.color = '#f87171';
+        }
+      }
+      if (selectedRobotId === r.id) {
+        updateModalContent(r);
+      }
+    }
+  } catch (e) {
+    if (statusEl) {
+      statusEl.innerText = 'Burst error — check dashboard server';
+      statusEl.style.color = '#f87171';
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerText = '⚡ 10-Ping Burst';
+    }
+  }
+}
+
+function pinWifiBaseline() {
+  if (!selectedRobotId || !realTelemetry[selectedRobotId]) return;
+  const r = realTelemetry[selectedRobotId];
+  const w = r.wifi;
+  if (!w) return;
+
+  const recentRssi = (w.rssi_history || []).slice(-10).map(s => s.rssi);
+  const avgRssi = recentRssi.length > 0
+    ? Number((recentRssi.reduce((a, b) => a + b, 0) / recentRssi.length).toFixed(1))
+    : w.rssi_dbm;
+
+  wifiAbBaselines[selectedRobotId] = {
+    iface: w.iface || 'unknown',
+    is_usb: w.is_usb,
+    avg_rssi: avgRssi,
+    avg_ping: w.ping_avg_ms !== null ? w.ping_avg_ms : w.ping_ms,
+    loss_pct: w.ping_loss_pct !== null ? w.ping_loss_pct : 0.0,
+    ts: Date.now()
+  };
+
+  updateModalContent(r);
+}
+
+function resetWifiHistory() {
+  if (!selectedRobotId || !realTelemetry[selectedRobotId]) return;
+  const r = realTelemetry[selectedRobotId];
+  if (r.wifi) {
+    r.wifi.rssi_history = [];
+    r.wifi.ping_samples = [];
+    r.wifi.ping_avg_ms = null;
+    r.wifi.ping_jitter_ms = null;
+    r.wifi.ping_loss_pct = null;
+    r.wifi.burst_result = null;
+  }
+  delete wifiAbBaselines[selectedRobotId];
+  lastWifiBarsRenderKey = '';
+
+  const statusEl = document.getElementById('modal-wifi-burst-status');
+  if (statusEl) {
+    statusEl.innerText = 'Source: /robot/system_info (0.5 Hz)';
+    statusEl.style.color = '#94a3b8';
+  }
+  updateModalContent(r);
+}
+
 function openRobotDetailModal(robotId) {
   selectedRobotId = robotId;
+  lastWifiBarsRenderKey = '';
   const modal = document.getElementById('robot-detail-modal');
   modal.classList.remove('hidden');
+  syncModalFlapVisibility();
+
+  const statusEl = document.getElementById('modal-wifi-burst-status');
   const r = realTelemetry[robotId];
-  if (r) updateModalContent(r);
+  if (statusEl) {
+    const br = r && r.wifi ? r.wifi.burst_result : null;
+    if (br && br.ok) {
+      statusEl.innerText = `Burst (${br.received}/${br.sent}): min ${br.min_ms} / avg ${br.avg_ms} / max ${br.max_ms} ms • ±${br.jitter_ms} ms • ${br.loss_pct}% loss`;
+      statusEl.style.color = br.loss_pct > 0 ? '#fbbf24' : '#34d399';
+    } else {
+      statusEl.innerText = 'Source: /robot/system_info (0.5 Hz)';
+      statusEl.style.color = '#94a3b8';
+    }
+  }
+
+  if (r) {
+    updateModalContent(r);
+    if (wifiPanelOpen) {
+      startWifiPingLoop();
+    } else if (r.online && r.ip) {
+      // Single lightweight ping on modal open so collapsed flap header shows live RTT
+      pollSingleWifiPing(robotId);
+    }
+  }
 }
 
 function updateModalContent(r) {
@@ -275,7 +553,10 @@ function updateModalContent(r) {
     document.getElementById('modal-gps-mode').innerText = 'No GPS Module';
   }
 
-  document.getElementById('modal-ping').innerText = r.online ? 'Connected' : 'Offline';
+  const topPingMs = (r.wifi && r.wifi.ping_ms !== null && !isNaN(r.wifi.ping_ms))
+    ? ` (${r.wifi.ping_ms} ms)`
+    : '';
+  document.getElementById('modal-ping').innerText = r.online ? `Connected${topPingMs}` : 'Offline';
 
   // LiDAR & Odometry Widget in Modal
   const odomPosEl = document.getElementById('modal-odom-pos');
@@ -474,7 +755,7 @@ function updateModalContent(r) {
       if (constsEl) {
         constsEl.innerText = Object.keys(constCounts).map(k => `${k}:${constCounts[k]}`).join(' ');
       }
-      if (barsEl) {
+      if (barsEl && snrPanelOpen) {
         const constColors = {
           GPS: '#38bdf8',
           Galileo: '#34d399',
@@ -511,11 +792,14 @@ function updateModalContent(r) {
     } else {
       if (topEl) topEl.innerText = '--';
       if (constsEl) constsEl.innerText = 'GPS/GAL/BDS/GLO';
-      if (barsEl) {
+      if (barsEl && snrPanelOpen) {
         barsEl.innerHTML = `<div style="width: 100%; text-align: center; padding: 18px; color: #94a3b8; font-size: 0.78rem;">Waiting for per-satellite GSV C/N0 stream from Rover...</div>`;
       }
     }
   }
+
+  // Render Wi-Fi Signal Strength & Network Link Flap (always visible under GNSS SNR)
+  updateWifiModalSection(r);
 
   document.getElementById('modal-motion-state').innerText = r.motion.state;
   document.getElementById('modal-speed').innerText = (r.lidar.odom_vx !== null && !isNaN(r.lidar.odom_vx)) ? `${r.lidar.odom_vx.toFixed(2)} m/s` : '--';
@@ -523,11 +807,283 @@ function updateModalContent(r) {
   document.getElementById('modal-turn-progress').innerText = '--';
 }
 
+function updateWifiModalSection(r) {
+  const w = r.wifi || {};
+  const badgeEl = document.getElementById('modal-wifi-badge');
+  const sumEl = document.getElementById('modal-wifi-summary');
+
+  const hasRssi = (w.rssi_dbm !== null && w.rssi_dbm !== undefined && !isNaN(w.rssi_dbm));
+  const rssi = hasRssi ? Number(w.rssi_dbm) : null;
+  const iface = w.iface || null;
+  const qual = (w.quality_pct !== null && w.quality_pct !== undefined && !isNaN(w.quality_pct)) ? Number(w.quality_pct) : null;
+  const pingMs = (w.ping_ms !== null && w.ping_ms !== undefined && !isNaN(w.ping_ms)) ? Number(w.ping_ms) : null;
+
+  // Compact Flap Header (always updated so signal is readable even when collapsed)
+  if (badgeEl) {
+    if (!r.online) {
+      badgeEl.innerText = 'OFFLINE';
+      badgeEl.style.background = 'rgba(239, 68, 68, 0.15)';
+      badgeEl.style.color = '#f87171';
+      badgeEl.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+    } else if (hasRssi) {
+      const adapterTag = iface ? `${iface}` : 'Wi-Fi';
+      if (rssi >= -65) {
+        badgeEl.innerText = `🟢 STRONG (${adapterTag})`;
+        badgeEl.style.background = 'rgba(16, 185, 129, 0.15)';
+        badgeEl.style.color = '#34d399';
+        badgeEl.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+      } else if (rssi >= -75) {
+        badgeEl.innerText = `🟡 FAIR (${adapterTag})`;
+        badgeEl.style.background = 'rgba(245, 158, 11, 0.15)';
+        badgeEl.style.color = '#fbbf24';
+        badgeEl.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+      } else {
+        badgeEl.innerText = `🔴 WEAK (${adapterTag})`;
+        badgeEl.style.background = 'rgba(239, 68, 68, 0.15)';
+        badgeEl.style.color = '#f87171';
+        badgeEl.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+      }
+    } else if (iface) {
+      badgeEl.innerText = `🌐 ${iface}`;
+      badgeEl.style.background = 'rgba(56, 189, 248, 0.15)';
+      badgeEl.style.color = '#38bdf8';
+      badgeEl.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+    } else {
+      badgeEl.innerText = 'WAITING...';
+      badgeEl.style.background = 'rgba(148, 163, 184, 0.15)';
+      badgeEl.style.color = '#94a3b8';
+      badgeEl.style.borderColor = 'rgba(148, 163, 184, 0.3)';
+    }
+  }
+
+  if (sumEl) {
+    const rssiPart = hasRssi ? `${Math.round(rssi)} dBm` : (iface ? iface : '-- dBm');
+    const qualPart = qual !== null ? ` (${qual}%)` : '';
+    const pingPart = pingMs !== null ? ` • ${pingMs} ms` : '';
+    sumEl.innerText = `${rssiPart}${qualPart}${pingPart}`;
+    sumEl.style.color = !hasRssi ? '#94a3b8' : (rssi >= -65 ? '#34d399' : (rssi >= -75 ? '#fbbf24' : '#f87171'));
+  }
+
+  // Skip detailed DOM updates when flap is collapsed
+  if (!wifiPanelOpen) return;
+
+  const ifaceEl = document.getElementById('modal-wifi-iface');
+  const adapterTypeEl = document.getElementById('modal-wifi-adapter-type');
+  const rssiEl = document.getElementById('modal-wifi-rssi');
+  const rssiAvgEl = document.getElementById('modal-wifi-rssi-avg');
+  const qualEl = document.getElementById('modal-wifi-quality');
+  const qualBarEl = document.getElementById('modal-wifi-qual-bar');
+  const rttEl = document.getElementById('modal-wifi-rtt');
+  const rttAvgEl = document.getElementById('modal-wifi-rtt-avg');
+  const jitterEl = document.getElementById('modal-wifi-jitter');
+  const lossEl = document.getElementById('modal-wifi-loss');
+  const retriesEl = document.getElementById('modal-wifi-retries');
+  const dropsEl = document.getElementById('modal-wifi-drops');
+  const barsEl = document.getElementById('modal-wifi-bars');
+  const pinBtn = document.getElementById('btn-wifi-pin-a');
+  const abBanner = document.getElementById('modal-wifi-ab-compare');
+
+  if (ifaceEl) {
+    ifaceEl.innerText = iface || '--';
+    ifaceEl.style.color = w.is_usb ? '#38bdf8' : (iface ? '#c084fc' : '#94a3b8');
+  }
+  if (adapterTypeEl) {
+    if (iface) {
+      const busLabel = w.is_usb === true ? 'USB Adapter' : (w.is_usb === false ? 'Onboard Pi 5' : 'Network');
+      const drvLabel = w.driver ? ` (${w.driver})` : '';
+      adapterTypeEl.innerText = `${busLabel}${drvLabel}`;
+    } else {
+      adapterTypeEl.innerText = 'Waiting /robot/system_info...';
+    }
+  }
+
+  // Rolling recent RSSI avg (for current interface)
+  const hist = Array.isArray(w.rssi_history) ? w.rssi_history : [];
+  const sameIfaceHist = iface ? hist.filter(h => h.iface === iface) : hist;
+  const recentSlice = sameIfaceHist.slice(-10);
+  const avgRssi = recentSlice.length > 0
+    ? Number((recentSlice.reduce((acc, s) => acc + s.rssi, 0) / recentSlice.length).toFixed(1))
+    : null;
+
+  if (rssiEl) {
+    rssiEl.innerText = hasRssi ? rssi.toFixed(0) : '--';
+    if (rssiEl.parentElement) {
+      rssiEl.parentElement.style.color = !hasRssi ? '#fff' : (rssi >= -65 ? '#34d399' : (rssi >= -75 ? '#fbbf24' : '#f87171'));
+    }
+  }
+  if (rssiAvgEl) {
+    rssiAvgEl.innerText = avgRssi !== null ? `Avg (${recentSlice.length}): ${avgRssi} dBm` : 'Avg: -- dBm';
+  }
+
+  if (qualEl) {
+    qualEl.innerText = qual !== null ? String(qual) : '--';
+    if (qualEl.parentElement) {
+      qualEl.parentElement.style.color = qual === null ? '#94a3b8' : (qual >= 65 ? '#34d399' : (qual >= 40 ? '#fbbf24' : '#f87171'));
+    }
+  }
+  if (qualBarEl) {
+    const pct = qual !== null ? Math.max(0, Math.min(100, qual)) : 0;
+    qualBarEl.style.width = `${pct}%`;
+    qualBarEl.style.background = pct >= 65 ? '#10b981' : (pct >= 40 ? '#f59e0b' : '#ef4444');
+  }
+
+  if (rttEl) {
+    rttEl.innerText = pingMs !== null ? pingMs.toFixed(1) : '--';
+    if (rttEl.parentElement) {
+      rttEl.parentElement.style.color = pingMs === null ? '#fff' : (pingMs <= 20 ? '#34d399' : (pingMs <= 50 ? '#fbbf24' : '#f87171'));
+    }
+  }
+  if (rttAvgEl) {
+    rttAvgEl.innerText = (w.ping_avg_ms !== null && w.ping_avg_ms !== undefined)
+      ? `Avg: ${w.ping_avg_ms.toFixed(1)} ms (${(w.ping_samples || []).length}x)`
+      : 'Avg: -- ms';
+  }
+
+  if (jitterEl) {
+    const jit = w.ping_jitter_ms;
+    jitterEl.innerText = (jit !== null && jit !== undefined) ? `±${jit.toFixed(1)} ms` : '-- ms';
+    jitterEl.style.color = (jit === null || jit === undefined) ? '#94a3b8' : (jit <= 5 ? '#34d399' : (jit <= 15 ? '#fbbf24' : '#f87171'));
+  }
+  if (lossEl) {
+    const loss = w.ping_loss_pct;
+    lossEl.innerText = (loss !== null && loss !== undefined) ? `Packet loss: ${loss.toFixed(1)}%` : 'Packet loss: --%';
+    lossEl.style.color = (loss !== null && loss > 0) ? '#f87171' : '#94a3b8';
+  }
+
+  if (retriesEl) {
+    retriesEl.innerText = (w.retries !== null && w.retries !== undefined) ? `${w.retries} ret` : '--';
+  }
+  if (dropsEl) {
+    const rxD = (w.rx_drop !== null && w.rx_drop !== undefined) ? w.rx_drop : '--';
+    const txD = (w.tx_drop !== null && w.tx_drop !== undefined) ? w.tx_drop : '--';
+    dropsEl.innerText = `RX/TX drop: ${rxD} / ${txD}`;
+  }
+
+  // Render Rolling RSSI History Bar Chart (only when data actually changes)
+  if (barsEl) {
+    const renderKey = `${r.id}:${hist.length}:${hist.length > 0 ? hist[hist.length - 1].ts : 0}`;
+    if (renderKey !== lastWifiBarsRenderKey) {
+      lastWifiBarsRenderKey = renderKey;
+      if (hist.length > 0) {
+        barsEl.innerHTML = hist.map(sample => {
+          const val = sample.rssi;
+          const heightPct = Math.min(100, Math.max(8, ((val + 95.0) / 60.0) * 100.0));
+          let barGrad = 'linear-gradient(to top, #059669, #10b981)';
+          let valColor = '#34d399';
+          if (val < -75) {
+            barGrad = 'linear-gradient(to top, #dc2626, #ef4444)';
+            valColor = '#f87171';
+          } else if (val < -65) {
+            barGrad = 'linear-gradient(to top, #d97706, #f59e0b)';
+            valColor = '#fbbf24';
+          }
+          const tag = sample.is_usb ? 'U' : 'O';
+          const tagColor = sample.is_usb ? '#38bdf8' : '#c084fc';
+          const tStr = new Date(sample.ts).toLocaleTimeString();
+          const title = `${sample.iface} (${sample.is_usb ? 'USB' : 'Onboard'}) | ${val} dBm | ${tStr}`;
+          return `
+            <div class="fleet-snr-col" style="min-width: 22px;" title="${title}">
+              <div class="fleet-snr-val" style="color: ${valColor}; font-size: 9px;">${Math.round(val)}</div>
+              <div class="fleet-snr-track" style="height: 76px; width: 13px;">
+                <div class="fleet-snr-fill" style="height: ${heightPct.toFixed(0)}%; background: ${barGrad};"></div>
+              </div>
+              <div class="fleet-snr-tag" style="color: ${tagColor}; border-color: ${tagColor}40;">${tag}</div>
+            </div>
+          `;
+        }).join('');
+        barsEl.scrollLeft = barsEl.scrollWidth;
+      } else {
+        barsEl.innerHTML = `<div style="width: 100%; text-align: center; padding: 18px; color: #94a3b8; font-size: 0.78rem;">Waiting for Wi-Fi RSSI samples from /robot/system_info (2s interval)...</div>`;
+      }
+    }
+  }
+
+  // A/B Extender Comparison Banner
+  const baseA = wifiAbBaselines[r.id];
+  if (pinBtn) {
+    if (baseA) {
+      pinBtn.className = 'wifi-action-btn pinned';
+      pinBtn.innerText = `📌 Baseline A: ${baseA.iface}`;
+    } else {
+      pinBtn.className = 'wifi-action-btn';
+      pinBtn.innerText = '📌 Pin Baseline (A)';
+    }
+  }
+  if (abBanner) {
+    if (baseA) {
+      abBanner.style.display = 'block';
+      const curRssi = avgRssi !== null ? avgRssi : rssi;
+      const curPing = w.ping_avg_ms !== null ? w.ping_avg_ms : pingMs;
+      const curIface = iface || 'current';
+
+      let rssiDeltaHtml = 'RSSI: --';
+      if (baseA.avg_rssi !== null && curRssi !== null) {
+        const dDb = Number((curRssi - baseA.avg_rssi).toFixed(1));
+        const sign = dDb > 0 ? '+' : '';
+        const col = dDb >= 2 ? '#34d399' : (dDb <= -2 ? '#f87171' : '#fbbf24');
+        const verdict = dDb >= 2 ? 'stronger' : (dDb <= -2 ? 'weaker' : 'similar');
+        rssiDeltaHtml = `RSSI: <strong style="color:${col};">${sign}${dDb} dB</strong> (${verdict})`;
+      }
+
+      let pingDeltaHtml = 'Ping: --';
+      if (baseA.avg_ping !== null && curPing !== null) {
+        const dMs = Number((curPing - baseA.avg_ping).toFixed(1));
+        const sign = dMs > 0 ? '+' : '';
+        const col = dMs <= -1 ? '#34d399' : (dMs >= 3 ? '#f87171' : '#fbbf24');
+        pingDeltaHtml = `Ping: <strong style="color:${col};">${sign}${dMs} ms</strong>`;
+      }
+
+      const baseRssiStr = baseA.avg_rssi !== null ? `${baseA.avg_rssi} dBm` : '-- dBm';
+      const basePingStr = baseA.avg_ping !== null ? `${baseA.avg_ping} ms` : '-- ms';
+      abBanner.innerHTML =
+        `<div><strong>A (${baseA.iface}):</strong> ${baseRssiStr} • ${basePingStr} (${baseA.loss_pct}% loss)</div>` +
+        `<div><strong>Now (${curIface}) vs A:</strong> ${rssiDeltaHtml} &nbsp;|&nbsp; ${pingDeltaHtml}</div>`;
+    } else {
+      abBanner.style.display = 'none';
+    }
+  }
+}
+
 function initEventListeners() {
   document.getElementById('btn-close-modal').onclick = () => {
     document.getElementById('robot-detail-modal').classList.add('hidden');
+    stopWifiPingLoop();
     selectedRobotId = null;
   };
+
+  const snrHeader = document.getElementById('modal-snr-header');
+  if (snrHeader) {
+    snrHeader.onclick = () => toggleSnrPanel();
+  }
+
+  const wifiHeader = document.getElementById('modal-wifi-header');
+  if (wifiHeader) {
+    wifiHeader.onclick = () => toggleWifiPanel();
+  }
+
+  const btnWifiBurst = document.getElementById('btn-wifi-burst');
+  if (btnWifiBurst) {
+    btnWifiBurst.onclick = (e) => {
+      e.stopPropagation();
+      runWifiBurstTest();
+    };
+  }
+
+  const btnWifiPinA = document.getElementById('btn-wifi-pin-a');
+  if (btnWifiPinA) {
+    btnWifiPinA.onclick = (e) => {
+      e.stopPropagation();
+      pinWifiBaseline();
+    };
+  }
+
+  const btnWifiReset = document.getElementById('btn-wifi-reset');
+  if (btnWifiReset) {
+    btnWifiReset.onclick = (e) => {
+      e.stopPropagation();
+      resetWifiHistory();
+    };
+  }
 
   const btnToggleRadar = document.getElementById('btn-toggle-lidar-radar');
   if (btnToggleRadar) {

@@ -148,6 +148,111 @@ function handleSysInfoData(r, sys) {
   }
 }
 
+function applyRobotSystemInfo(r, info) {
+  if (!r || !info || typeof info !== 'object') return;
+
+  // CPU Load (%)
+  if (info.cpu_percent !== null && info.cpu_percent !== undefined && !isNaN(Number(info.cpu_percent))) {
+    r.health.cpu_percent = `${Number(info.cpu_percent).toFixed(1)}%`;
+  }
+
+  // RAM & Swap Usage
+  if (info.ram_used_mb !== null && info.ram_used_mb !== undefined && !isNaN(Number(info.ram_used_mb))) {
+    const used = Math.round(Number(info.ram_used_mb));
+    const total = (info.ram_total_mb !== null && info.ram_total_mb !== undefined && !isNaN(Number(info.ram_total_mb)))
+      ? Math.round(Number(info.ram_total_mb))
+      : null;
+    const pct = (info.ram_percent !== null && info.ram_percent !== undefined && !isNaN(Number(info.ram_percent)))
+      ? Math.round(Number(info.ram_percent))
+      : (total ? Math.round((used / total) * 100) : null);
+    const swapUsed = (info.swap_used_mb !== null && info.swap_used_mb !== undefined && !isNaN(Number(info.swap_used_mb)))
+      ? Math.round(Number(info.swap_used_mb))
+      : 0;
+    const baseRam = total ? `${used} / ${total} MB${pct !== null ? ` (${pct}%)` : ''}` : `${used} MB`;
+    r.health.ram_mb = swapUsed >= 50 ? `${baseRam} • Swp ${swapUsed}M` : baseRam;
+  }
+
+  // Combined compact summary for robot card fallback
+  if ((r.health.cpu_percent && r.health.cpu_percent !== '--') || (r.health.ram_mb && r.health.ram_mb !== '--')) {
+    const cpuPart = (r.health.cpu_percent && r.health.cpu_percent !== '--') ? `${r.health.cpu_percent} CPU` : null;
+    const ramPart = (info.ram_used_mb !== null && info.ram_used_mb !== undefined && info.ram_total_mb)
+      ? `${Math.round(Number(info.ram_used_mb))}/${Math.round(Number(info.ram_total_mb))}MB`
+      : null;
+    r.health.cpu_load = [cpuPart, ramPart].filter(Boolean).join(' | ');
+  }
+
+  // SoC Temperature
+  if (info.cpu_temp && info.cpu_temp !== 'N/A') {
+    r.health.cpu_temp = info.cpu_temp;
+  } else if (info.cpu_temp_c !== null && info.cpu_temp_c !== undefined && !isNaN(Number(info.cpu_temp_c))) {
+    r.health.cpu_temp = `${Number(info.cpu_temp_c).toFixed(1)} °C`;
+  }
+
+  // Wi-Fi Signal Strength & Network Link Stats
+  const hasWifiPayload =
+    info.wifi_iface !== undefined ||
+    info.wifi_rssi_dbm !== undefined ||
+    info.wifi_quality_pct !== undefined;
+
+  if (hasWifiPayload && r.wifi) {
+    const rssiVal = (info.wifi_rssi_dbm !== null && info.wifi_rssi_dbm !== undefined && !isNaN(Number(info.wifi_rssi_dbm)))
+      ? Number(info.wifi_rssi_dbm)
+      : null;
+    r.wifi.present = Boolean(info.wifi_iface || rssiVal !== null);
+    if (info.wifi_iface !== undefined) r.wifi.iface = info.wifi_iface;
+    if (info.wifi_driver !== undefined) r.wifi.driver = info.wifi_driver;
+    if (info.wifi_is_usb !== undefined) r.wifi.is_usb = info.wifi_is_usb;
+    r.wifi.rssi_dbm = rssiVal;
+
+    r.wifi.quality_pct = (info.wifi_quality_pct !== null && info.wifi_quality_pct !== undefined && !isNaN(Number(info.wifi_quality_pct)))
+      ? Math.max(0, Math.min(100, Math.round(Number(info.wifi_quality_pct))))
+      : null;
+
+    r.wifi.retries = (info.wifi_retries !== null && info.wifi_retries !== undefined && !isNaN(Number(info.wifi_retries)))
+      ? Number(info.wifi_retries)
+      : null;
+    r.wifi.rx_drop = (info.wifi_rx_drop !== null && info.wifi_rx_drop !== undefined && !isNaN(Number(info.wifi_rx_drop)))
+      ? Number(info.wifi_rx_drop)
+      : null;
+    r.wifi.tx_drop = (info.wifi_tx_drop !== null && info.wifi_tx_drop !== undefined && !isNaN(Number(info.wifi_tx_drop)))
+      ? Number(info.wifi_tx_drop)
+      : null;
+    r.wifi.last_update = Date.now();
+
+    if (rssiVal !== null) {
+      if (!Array.isArray(r.wifi.rssi_history)) r.wifi.rssi_history = [];
+      r.wifi.rssi_history.push({
+        rssi: rssiVal,
+        iface: r.wifi.iface || 'wifi',
+        is_usb: Boolean(r.wifi.is_usb),
+        ts: r.wifi.last_update
+      });
+      if (r.wifi.rssi_history.length > 30) {
+        r.wifi.rssi_history.shift();
+      }
+    }
+  }
+}
+
+function applyRobotDiagnostics(r, diag) {
+  if (!r || !diag || typeof diag !== 'object') return;
+
+  if (diag.enu_yaw_offset_deg !== undefined && !isNaN(Number(diag.enu_yaw_offset_deg))) {
+    // Always mirror the rover controller's live ENU offset so map heading and navigation match 1:1
+    r.imu.enu_offset_deg = Number(diag.enu_yaw_offset_deg);
+    r.imu.calibrated = Boolean(diag.compass_initialized || diag.enu_yaw_locked_by_rtk);
+    r.imu.cog_locked = Boolean(diag.enu_yaw_locked_by_rtk);
+    if (r.imu.raw_heading !== null) {
+      r.imu.heading = Number(((((r.imu.raw_heading + r.imu.enu_offset_deg) % 360) + 360) % 360).toFixed(1));
+    }
+  }
+
+  // Backward compatibility if an older rover node publishes cpu_temp or wifi_* on /robot/diagnostics
+  if (diag.cpu_temp !== undefined || diag.wifi_iface !== undefined || diag.wifi_rssi_dbm !== undefined) {
+    applyRobotSystemInfo(r, diag);
+  }
+}
+
 function parseSnrAndCorrFromStatus(r, str) {
   if (!r || !str) return;
   const ageMatch = str.match(/Corr\.\s*age:\s*([\d.]+s|-)/i);
@@ -600,26 +705,30 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
       }
 
       // 6. std_msgs/msg/String (/robot/diagnostics)
-      else if (topic === '/robot/diagnostics' || topic === 'robot/diagnostics') {
+      else if (normTopic === '/robot/diagnostics' || normTopic.endsWith('/robot/diagnostics')) {
         const strLen = view.getUint32(ptr, true); ptr += 4;
         if (strLen > 0 && ptr + strLen <= buffer.byteLength) {
           const strBytes = new Uint8Array(buffer, ptr, strLen);
           const str = new TextDecoder('utf-8').decode(strBytes).replace(/\0/g, '').trim();
           try {
             const diag = JSON.parse(str);
-            if (diag.cpu_temp) r.health.cpu_temp = diag.cpu_temp;
-            if (diag.enu_yaw_offset_deg !== undefined && !isNaN(Number(diag.enu_yaw_offset_deg))) {
-              // Always mirror the rover controller's live ENU offset so map heading and navigation match 1:1
-              r.imu.enu_offset_deg = Number(diag.enu_yaw_offset_deg);
-              r.imu.calibrated = Boolean(diag.compass_initialized || diag.enu_yaw_locked_by_rtk);
-              r.imu.cog_locked = Boolean(diag.enu_yaw_locked_by_rtk);
-              if (r.imu.raw_heading !== null) {
-                r.imu.heading = Number(((((r.imu.raw_heading + r.imu.enu_offset_deg) % 360) + 360) % 360).toFixed(1));
-              }
-            }
+            applyRobotDiagnostics(r, diag);
           } catch (e) {
             if (str.includes('°C') || str.includes('C')) r.health.cpu_temp = str;
           }
+        }
+      }
+
+      // 6b. std_msgs/msg/String (/robot/system_info - dedicated SystemInfoNode: CPU, RAM, Temp, Wi-Fi)
+      else if (normTopic === '/robot/system_info' || normTopic.endsWith('/robot/system_info')) {
+        const strLen = view.getUint32(ptr, true); ptr += 4;
+        if (strLen > 0 && ptr + strLen <= buffer.byteLength) {
+          const strBytes = new Uint8Array(buffer, ptr, strLen);
+          const str = new TextDecoder('utf-8').decode(strBytes).replace(/\0/g, '').trim();
+          try {
+            const info = JSON.parse(str);
+            applyRobotSystemInfo(r, info);
+          } catch (e) {}
         }
       }
 
@@ -955,16 +1064,36 @@ function handleParsedRobotMessage(robotId, topic, data) {
   }
 
   // 9. Robot Diagnostics (/robot/diagnostics)
-  if (topic === '/robot/diagnostics' || topic === 'robot/diagnostics') {
-    if (typeof data === 'object' && data.cpu_temp) {
-      r.health.cpu_temp = data.cpu_temp;
+  if (normTopic === '/robot/diagnostics' || normTopic.endsWith('/robot/diagnostics')) {
+    if (typeof data === 'object' && data !== null) {
+      if (typeof data.data === 'string') {
+        try {
+          applyRobotDiagnostics(r, JSON.parse(data.data));
+        } catch (e) {
+          if (data.data.includes('°C') || data.data.includes('C')) r.health.cpu_temp = data.data;
+        }
+      } else {
+        applyRobotDiagnostics(r, data);
+      }
     } else if (typeof data === 'string') {
       try {
-        const parsed = JSON.parse(data);
-        if (parsed.cpu_temp) r.health.cpu_temp = parsed.cpu_temp;
+        applyRobotDiagnostics(r, JSON.parse(data));
       } catch (e) {
         if (data.includes('°C') || data.includes('C')) r.health.cpu_temp = data;
       }
+    }
+  }
+
+  // 10. Robot System Info (/robot/system_info)
+  if (normTopic === '/robot/system_info' || normTopic.endsWith('/robot/system_info')) {
+    if (typeof data === 'object' && data !== null) {
+      if (typeof data.data === 'string') {
+        try { applyRobotSystemInfo(r, JSON.parse(data.data)); } catch (e) {}
+      } else {
+        applyRobotSystemInfo(r, data);
+      }
+    } else if (typeof data === 'string') {
+      try { applyRobotSystemInfo(r, JSON.parse(data)); } catch (e) {}
     }
   }
 }

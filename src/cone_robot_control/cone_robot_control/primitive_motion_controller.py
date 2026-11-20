@@ -21,7 +21,7 @@ Publishes:
     - `/cmd_vel` (geometry_msgs/msg/Twist): Velocity commands to mdd10_motor_controller.
     - `/motion_status` (std_msgs/msg/String): State machine status (IDLE, EXECUTING, etc.).
     - `/step_status` (std_msgs/msg/String): Detailed progress for Fleet Dashboard.
-    - `/robot/diagnostics` (std_msgs/msg/String): SoC temperature & battery voltage.
+    - `/robot/diagnostics` (std_msgs/msg/String): Motion state, sensor mode, battery & ENU heading offset.
 ==============================================================================
 """
 
@@ -1456,15 +1456,8 @@ class PrimitiveMotionController(Node):
         self.cmd_vel_pub.publish(twist)
 
     def _publish_diagnostics(self) -> None:
-        """Publishes lightweight Pi 5 SoC diagnostics and calibrated ENU gyro offset."""
+        """Publishes lightweight motion controller diagnostics and calibrated ENU gyro offset."""
         try:
-            temp_c = None
-            if os.path.exists('/sys/class/thermal/thermal_zone0/temp'):
-                with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
-                    val = f.read().strip()
-                    if val:
-                        temp_c = round(float(val) / 1000.0, 1)
-
             now = time.time()
             if self.state != ControllerState.EXECUTING:
                 odom_ok = (self.current_odom_pos is not None) and (now - self.last_odom_time < 1.5)
@@ -1487,7 +1480,6 @@ class PrimitiveMotionController(Node):
                 sensor_label = self.active_sensor_mode
 
             diag = {
-                "cpu_temp": f"{temp_c:.1f} °C" if temp_c else "N/A",
                 "battery_v": f"{self.battery_voltage:.2f} V",
                 "state": self.state,
                 "motion_type": self.active_motion_type,
