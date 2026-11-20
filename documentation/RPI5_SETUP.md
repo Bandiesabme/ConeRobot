@@ -282,39 +282,55 @@ Battery Positive (+) ─────────────────► VIN+
 
 ---
 
-## 5. Wi-Fi Auto-Connect & Long-Range Antenna Setup
+## 5. Wi-Fi Auto-Connect & Long-Range USB Antenna Setup (TP-Link TL-WN722N v2)
 
-### Option A: One-Command Automated Setup (Recommended)
+### Option A: One-Command Automated Setup (Recommended, Multi-Run Safe)
 
-Run this on your Raspberry Pi 5 to automatically configure Netplan, enable dual-antenna failover, and disable power save:
+Run this on your Raspberry Pi 5 to configure Netplan (`systemd-networkd`), pin any USB Wi-Fi dongle (e.g. **TP-Link TL-WN722N v2**) to `wlusb0`, install the continuous failover watchdog (`wifi-failover.service`), disable Wi-Fi power save & USB autosuspend, and prevent ARP flux:
 
 ```bash
-sudo bash documentation/scripts/setup_wifi.sh
+# Preserves all existing saved SSIDs (or uses default Bandi if none exist):
+sudo bash scripts/setup_wifi.sh
+
+# Add or update a Wi-Fi network (keeps previously saved networks too):
+sudo bash scripts/setup_wifi.sh "YOUR_SSID" "YOUR_PASSWORD"
+
+# Replace all saved networks with a single SSID:
+sudo bash scripts/setup_wifi.sh --replace "YOUR_SSID" "YOUR_PASSWORD"
 ```
-*(Pre-configured with SSID `Bandi` and password `1234445678`)*
+
+> [!TIP]
+> **TP-Link TL-WN722N v2 Hardware Notes:**
+> - Plug the adapter into a **black USB 2.0 port** (not a blue USB 3.0 port) to avoid 2.4 GHz / L1 RFI degrading your LC29H GNSS signal.
+> - The TL-WN722N v2 uses the **RTL8188EU** chipset (`rtl8xxxu`, supported out of the box in Ubuntu 24.04 with `linux-firmware`) and is **2.4 GHz only**. If your hotspot is 5 GHz only or the dongle loses link for >18 s, `wifi-failover.service` automatically fails back to onboard `wlan0`.
+> - Monitor live failover events anytime with: `journalctl -u wifi-failover.service -f`
 
 ---
 
-### Option B: Manual Configuration
+### Option B: Manual Netplan Configuration
 
-If configuring manually, update `/etc/netplan/50-cloud-init.yaml`:
+If configuring manually (after installing `/etc/udev/rules.d/70-wifi-usb-dongle.rules` so the USB dongle is named `wlusb0`), update `/etc/netplan/50-cloud-init.yaml`:
 
 ```bash
 sudo tee /etc/netplan/50-cloud-init.yaml << 'EOF'
 network:
   version: 2
+  renderer: networkd
   ethernets:
     eth0:
       optional: true
       dhcp4: true
-      dhcp6: true
+      dhcp4-overrides:
+        route-metric: 100
+        use-hostname: false
   wifis:
-    # 1. High-Gain External Antenna (TP-Link TL-WN722N - Priority 1)
-    wlan1:
+    # 1. High-Gain External USB Antenna (TP-Link TL-WN722N v2 - Priority 1)
+    wlusb0:
       optional: true
       dhcp4: true
       dhcp4-overrides:
-        route-metric: 100
+        route-metric: 200
+        use-hostname: false
       access-points:
         "Bandi":
           password: "1234445678"
@@ -324,13 +340,14 @@ network:
       dhcp4: true
       dhcp4-overrides:
         route-metric: 600
+        use-hostname: false
       access-points:
         "Bandi":
           password: "1234445678"
 EOF
 
 sudo chmod 600 /etc/netplan/50-cloud-init.yaml
-sudo netplan apply
+sudo netplan generate && sudo netplan apply
 ```
 
 ---
