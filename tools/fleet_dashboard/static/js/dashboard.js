@@ -378,6 +378,12 @@ async function pollSingleWifiPing(robotId) {
         if (w.ping_samples.length > 30) w.ping_samples.shift();
         recomputeWifiPingMetrics(w);
       }
+    } else if (res.status === 404) {
+      const statusEl = document.getElementById('modal-wifi-burst-status');
+      if (statusEl && selectedRobotId === robotId) {
+        statusEl.innerText = 'Restart app.py on laptop to enable Ping RTT';
+        statusEl.style.color = '#fbbf24';
+      }
     }
   } catch (e) {
     // Ignore transient dashboard server errors
@@ -452,6 +458,11 @@ async function runWifiBurstTest() {
       if (selectedRobotId === r.id) {
         updateModalContent(r);
       }
+    } else if (statusEl) {
+      statusEl.innerText = res.status === 404
+        ? 'Restart app.py on laptop to enable Ping RTT'
+        : `Ping API error (HTTP ${res.status})`;
+      statusEl.style.color = '#fbbf24';
     }
   } catch (e) {
     if (statusEl) {

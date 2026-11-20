@@ -23,6 +23,7 @@ Publishes:
 
 import json
 import os
+import time
 from typing import Optional, Tuple
 
 import rclpy
@@ -49,6 +50,8 @@ class SystemInfoNode(Node):
 
         # Cached per-interface metadata: { iface: (driver, is_usb) }
         self._iface_meta_cache: dict = {}
+        # Last valid RSSI per interface to smooth transient rtl8xxxu 0 / -256 ticks
+        self._last_valid_rssi: dict = {}
 
         self.timer = self.create_timer(1.0 / rate_hz, self._publish_system_info)
         self.get_logger().info(
@@ -223,10 +226,26 @@ class SystemInfoNode(Node):
                     retries = int(float(fields[7].rstrip('.'))) if len(fields) >= 8 else None
 
                     rssi_dbm = None
+                    now_ts = time.monotonic()
                     if -130.0 < level_raw < 0.0:
                         rssi_dbm = round(level_raw, 1)
+                        self._last_valid_rssi[ifname] = (rssi_dbm, now_ts)
                     elif 128.0 < level_raw <= 255.0:
                         rssi_dbm = round(level_raw - 256.0, 1)
+                        self._last_valid_rssi[ifname] = (rssi_dbm, now_ts)
+                    elif qual_raw > 0.0:
+                        # Realtek rtl8xxxu occasionally outputs 0 or -256 at very close range
+                        # (100% quality) or between RX beacons. Hold recent RSSI or invert
+                        # Linux cfg80211's qual = clamp(signal, -110, -40) + 110 formula.
+                        cached_rssi = self._last_valid_rssi.get(ifname)
+                        if qual_raw >= 70.0:
+                            rssi_dbm = -40.0
+                        elif cached_rssi is not None and (now_ts - cached_rssi[1]) <= 6.0:
+                            rssi_dbm = cached_rssi[0]
+                        elif qual_raw <= 70.0:
+                            rssi_dbm = round(qual_raw - 110.0, 1)
+                        else:
+                            rssi_dbm = round(-100.0 + (min(100.0, qual_raw) * 0.6), 1)
 
                     quality_pct = None
                     if qual_raw > 0.0:

@@ -195,18 +195,37 @@ function applyRobotSystemInfo(r, info) {
     info.wifi_quality_pct !== undefined;
 
   if (hasWifiPayload && r.wifi) {
-    const rssiVal = (info.wifi_rssi_dbm !== null && info.wifi_rssi_dbm !== undefined && !isNaN(Number(info.wifi_rssi_dbm)))
-      ? Number(info.wifi_rssi_dbm)
-      : null;
-    r.wifi.present = Boolean(info.wifi_iface || rssiVal !== null);
+    const prevIface = r.wifi.iface;
+    const prevRssi = r.wifi.rssi_dbm;
+    const prevUpdate = r.wifi.last_update || 0;
+    const nowTs = Date.now();
+
     if (info.wifi_iface !== undefined) r.wifi.iface = info.wifi_iface;
     if (info.wifi_driver !== undefined) r.wifi.driver = info.wifi_driver;
     if (info.wifi_is_usb !== undefined) r.wifi.is_usb = info.wifi_is_usb;
-    r.wifi.rssi_dbm = rssiVal;
 
-    r.wifi.quality_pct = (info.wifi_quality_pct !== null && info.wifi_quality_pct !== undefined && !isNaN(Number(info.wifi_quality_pct)))
+    const qualPct = (info.wifi_quality_pct !== null && info.wifi_quality_pct !== undefined && !isNaN(Number(info.wifi_quality_pct)))
       ? Math.max(0, Math.min(100, Math.round(Number(info.wifi_quality_pct))))
       : null;
+    r.wifi.quality_pct = qualPct;
+
+    let rssiVal = (info.wifi_rssi_dbm !== null && info.wifi_rssi_dbm !== undefined && !isNaN(Number(info.wifi_rssi_dbm)))
+      ? Number(info.wifi_rssi_dbm)
+      : null;
+
+    // Smooth transient null RSSI ticks from rtl8xxxu when link quality is still > 0%
+    if (rssiVal === null && qualPct !== null && qualPct > 0) {
+      if (qualPct >= 100) {
+        rssiVal = -40;
+      } else if (prevRssi !== null && prevIface === r.wifi.iface && (nowTs - prevUpdate) <= 8000) {
+        rssiVal = prevRssi;
+      } else {
+        rssiVal = Math.round(-110 + (qualPct / 100) * 70);
+      }
+    }
+
+    r.wifi.present = Boolean(r.wifi.iface || rssiVal !== null);
+    r.wifi.rssi_dbm = rssiVal;
 
     r.wifi.retries = (info.wifi_retries !== null && info.wifi_retries !== undefined && !isNaN(Number(info.wifi_retries)))
       ? Number(info.wifi_retries)

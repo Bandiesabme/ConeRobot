@@ -367,7 +367,6 @@ def ping_host_once(ip, timeout_ms=800):
 
     kwargs = {
         "capture_output": True,
-        "text": True,
         "timeout": max(1.5, timeout_ms / 1000.0 + 1.0),
     }
     if is_win and hasattr(subprocess, "CREATE_NO_WINDOW"):
@@ -380,7 +379,10 @@ def ping_host_once(ip, timeout_ms=800):
         return None
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-    output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    # Decode raw bytes with latin-1 so non-English Windows OEM codepages (e.g. CP852 Hungarian)
+    # can never raise UnicodeDecodeError; TTL= and =Xms / <1ms are always pure ASCII.
+    raw_bytes = (proc.stdout or b"") + b"\n" + (proc.stderr or b"")
+    output = raw_bytes.decode("latin-1", errors="replace")
     # Verify an actual echo reply containing TTL= (avoids Windows "Destination host unreachable" exit 0)
     for line in output.splitlines():
         if "ttl=" in line.lower():
