@@ -376,7 +376,19 @@ ros2 launch cone_robot_control robot.launch.py
 
 ## 7. Live Diagnostics & Verification
 
-### A. Monitor Sensors
+### A. Automated Full Setup Check (Read-Only)
+
+Run the health checker anytime after setup, reboot, or hardware changes to audit every boot parameter, permission, Wi-Fi failover rule, ROS 2 package, and sensor bus:
+
+```bash
+# Full check (with sudo so /etc/netplan/50-cloud-init.yaml is also inspected):
+sudo bash scripts/check_rpi5_setup.sh
+
+# Fast software-only check (skips live I2C/UART probes):
+bash scripts/check_rpi5_setup.sh --quick
+```
+
+### B. Monitor Sensors
 
 ```bash
 # View 3D Orientation & Gyro/Accel (50 Hz)
@@ -389,7 +401,7 @@ ros2 topic echo /imu/heading
 ros2 topic echo /scan
 ```
 
-### B. Keyboard Driving (Teleop)
+### C. Keyboard Driving (Teleop)
 
 In a separate terminal (or remotely over the network):
 

@@ -656,7 +656,8 @@ for net_path in /sys/class/net/*; do
     [ -d "$net_path/wireless" ] || continue
     iface=$(basename "$net_path")
     ip4=$(ip -4 -o addr show dev "$iface" scope global 2>/dev/null | awk '{print $4}' | head -n 1 || true)
-    ps=$(iw dev "$iface" get power_save 2>/dev/null | awk '{print $NF}' || echo "n/a")
+    ps=$(iw dev "$iface" get power_save 2>/dev/null | awk '{print $NF}' || true)
+    ps="${ps:-n/a}"
     echo "  - ${iface}: IP=${ip4:-none} | power_save=${ps}"
 done
 echo ""
