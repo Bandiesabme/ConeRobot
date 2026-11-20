@@ -6,10 +6,12 @@
 mdd10_motor_controller:
   ros__parameters:
     # --- GPIO Pin Mapping (Raspberry Pi 5 — Grouped on Pins 29-34) ---
-    pwm1_pin: 12               # Left Motor Speed PWM (GPIO 12 / Pin 32)
-    dir1_pin: 5                # Left Motor Direction (GPIO 5 / Pin 29)
-    pwm2_pin: 13               # Right Motor Speed PWM (GPIO 13 / Pin 33)
-    dir2_pin: 6                # Right Motor Direction (GPIO 6 / Pin 31)
+    # Channel 2 (GPIO 13/6) drives the physical Left track; Channel 1 (GPIO 12/5) drives the physical Right track
+    # so ROS REP-103 +angular.z turns physically LEFT (CCW).
+    pwm1_pin: 13               # Left Motor Speed PWM (GPIO 13 / Pin 33)
+    dir1_pin: 6                # Left Motor Direction (GPIO 6 / Pin 31)
+    pwm2_pin: 12               # Right Motor Speed PWM (GPIO 12 / Pin 32)
+    dir2_pin: 5                # Right Motor Direction (GPIO 5 / Pin 29)
 
     # --- Physical Dimensions, Deadband & Trim Calibration ---
     wheel_track: 0.380         # Effective track width L_eff for skid-steer slip (meters)

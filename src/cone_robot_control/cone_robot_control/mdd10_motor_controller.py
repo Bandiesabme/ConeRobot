@@ -38,10 +38,10 @@ class MDD10MotorController(Node):
         super().__init__('mdd10_motor_controller')
 
         # --- Parameters ---
-        self.declare_parameter('pwm1_pin', 12)             # Left Motor Speed PWM (GPIO 12 / Pin 32)
-        self.declare_parameter('dir1_pin', 5)              # Left Motor Direction (GPIO 5 / Pin 29)
-        self.declare_parameter('pwm2_pin', 13)             # Right Motor Speed PWM (GPIO 13 / Pin 33)
-        self.declare_parameter('dir2_pin', 6)              # Right Motor Direction (GPIO 6 / Pin 31)
+        self.declare_parameter('pwm1_pin', 13)             # Left Motor Speed PWM (GPIO 13 / Pin 33)
+        self.declare_parameter('dir1_pin', 6)              # Left Motor Direction (GPIO 6 / Pin 31)
+        self.declare_parameter('pwm2_pin', 12)             # Right Motor Speed PWM (GPIO 12 / Pin 32)
+        self.declare_parameter('dir2_pin', 5)              # Right Motor Direction (GPIO 5 / Pin 29)
 
         self.declare_parameter('wheel_track', 0.380)       # Effective track width L_eff (meters)
         self.declare_parameter('max_linear_speed', 1.00)   # Physical speed at 100% PWM (m/s)
