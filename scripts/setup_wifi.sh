@@ -72,12 +72,13 @@ echo "=================================================================="
 # Step 1/6: Verify prerequisites & TL-WN722N v2 firmware/driver
 # ------------------------------------------------------------------------------
 echo "⚙️ [1/6] Checking tools & USB Wi-Fi firmware..."
-if ! command -v iw >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq iw
-fi
-
-if ! python3 -c "import yaml" >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq python3-yaml
+MISSING_PKGS=()
+command -v iw >/dev/null 2>&1 || MISSING_PKGS+=(iw)
+command -v wpa_supplicant >/dev/null 2>&1 || MISSING_PKGS+=(wpasupplicant)
+python3 -c "import yaml" >/dev/null 2>&1 || MISSING_PKGS+=(python3-yaml)
+if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+    echo "   -> Installing missing packages: ${MISSING_PKGS[*]}..."
+    apt-get update -qq && apt-get install -y -qq "${MISSING_PKGS[@]}"
 fi
 
 # Check Realtek RTL8188EU firmware used by TP-Link TL-WN722N v2/v3 (rtl8xxxu)
@@ -108,6 +109,7 @@ rm -f /etc/systemd/system/wifi-dongle-switch@.service \
 # Step 3/6: Install universal udev naming, USB power & anti-ARP-flux rules
 # ------------------------------------------------------------------------------
 echo "⚙️ [3/6] Installing udev naming & USB power rules..."
+mkdir -p /usr/local/sbin /etc/udev/rules.d /etc/sysctl.d /etc/systemd/system
 SYSTEMCTL_BIN="$(command -v systemctl)"
 
 cat <<'EOF' > /etc/udev/rules.d/70-wifi-usb-dongle.rules
@@ -584,6 +586,11 @@ else
     if [ "$RENDERER" = "networkd" ] && command -v networkctl >/dev/null 2>&1; then
         networkctl reload >/dev/null 2>&1 || true
     fi
+fi
+
+# Prevent cloud-init from ever overwriting /etc/netplan/50-cloud-init.yaml on a fresh Pi
+if [ -d /etc/cloud/cloud.cfg.d ]; then
+    echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
 fi
 
 # ------------------------------------------------------------------------------
