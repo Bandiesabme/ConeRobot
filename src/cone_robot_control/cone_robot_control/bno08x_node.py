@@ -486,7 +486,9 @@ class BNO08xNode(Node):
 
             # Apply Flip Correction if mounted upside down
             if self.mount_flipped:
-                q_corrected = quaternion_multiply(self.q_flip, [qx, qy, qz, qw])
+                # Right-multiply by 180-deg X-roll (body-frame sensor-to-robot transform: q_w_r = q_w_s * q_s_r).
+                # Left-multiplying flips the world Z axis and inverts the yaw sign (+CCW becomes -CW).
+                q_corrected = quaternion_multiply([qx, qy, qz, qw], self.q_flip)
                 msg.orientation.x = float(q_corrected[0])
                 msg.orientation.y = float(q_corrected[1])
                 msg.orientation.z = float(q_corrected[2])

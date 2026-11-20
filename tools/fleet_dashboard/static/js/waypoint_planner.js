@@ -89,12 +89,13 @@ function calibrateRoverHeading(targetEnuDeg = 90.0) {
   if (sel.imu) {
     sel.imu.enu_offset_deg = ((target - rawGyro + 540.0) % 360.0) - 180.0;
     sel.imu.heading = Number(target.toFixed(1));
+    sel.imu.calibrated = true;
     sel.imu.cog_locked = false;
     sel.imu.cog_anchor_lat = null;
     sel.imu.cog_anchor_lon = null;
     sel.imu.cog_anchor_raw_hdg = null;
     try {
-      localStorage.setItem(`conerobot_gyro_enu_offset_${activeRobotId}`, String(sel.imu.enu_offset_deg));
+      localStorage.removeItem(`conerobot_gyro_enu_offset_${activeRobotId}`);
     } catch (e) {}
   }
 
@@ -873,7 +874,9 @@ function updateTelemetryUI() {
 
   setDomText('tel-diff-age', robotTelemetry.diffAge);
   const selImu = (activeRobotId && realTelemetry[activeRobotId]) ? realTelemetry[activeRobotId].imu : null;
-  const hdgTag = (selImu && selImu.cog_locked) ? 'ENU (GPS-Cal)' : 'ENU (Gyro)';
+  const hdgTag = (selImu && selImu.cog_locked)
+    ? 'ENU (RTK-Cal)'
+    : ((selImu && selImu.calibrated) ? 'ENU (Manual Cal)' : 'ENU (Uncalibrated!)');
   setDomText('tel-heading', `${robotTelemetry.headingDeg.toFixed(1)}° ${hdgTag}`);
   setDomText('tel-battery', robotTelemetry.battery ? `${robotTelemetry.battery} V` : '-- V');
 

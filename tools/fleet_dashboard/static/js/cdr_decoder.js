@@ -71,9 +71,12 @@ function updateGpsCogGyroCalibration(r, lat, lon) {
     return;
   }
 
-  // Require >= 0.25m straight travel in RTK FIX, or >= 0.60m in 3D FIX / FLOAT / DGPS
+  // Require >= 0.25m (or 0.35m for initial 360° auto-lock) in RTK FIX, or >= 0.60m (1.0m initial) in 3D/FLOAT
   const isRtkFix = (r.gps && r.gps.mode === 'RTK FIX');
-  const minStepM = isRtkFix ? 0.25 : 0.60;
+  const isUncalibrated = !r.imu.calibrated && !r.imu.cog_locked;
+  const minStepM = isUncalibrated
+    ? (isRtkFix ? 0.35 : 1.00)
+    : (isRtkFix ? 0.25 : 0.60);
 
   if (stepDistM >= minStepM) {
     let courseEnuDeg = (Math.atan2(stepNorthM, stepEastM) * 180.0) / Math.PI;
@@ -89,14 +92,21 @@ function updateGpsCogGyroCalibration(r, lat, lon) {
     const measOffsetDeg = ((courseEnuDeg - avgRawGyro + 540.0) % 360.0) - 180.0;
     const errDeg = ((measOffsetDeg - r.imu.enu_offset_deg + 540.0) % 360.0) - 180.0;
 
-    // Fine-calibrate only within ±40° of the manually calibrated North reference so GPS noise cannot flip it
-    if (Math.abs(errDeg) <= 40.0) {
+    if (isUncalibrated) {
+      r.imu.enu_offset_deg = measOffsetDeg;
+      r.imu.calibrated = true;
+      r.imu.cog_locked = true;
+      r.imu.cog_anchor_lat = lat;
+      r.imu.cog_anchor_lon = lon;
+      r.imu.cog_anchor_raw_hdg = r.imu.raw_heading;
+      const fused = (((r.imu.raw_heading + r.imu.enu_offset_deg) % 360.0) + 360.0) % 360.0;
+      r.imu.heading = Number(fused.toFixed(1));
+      logDebug(`🧭 [Robot ${r.id}] Driving GPS auto-lock over ${(stepDistM * 100).toFixed(0)}cm -> ${r.imu.heading.toFixed(1)}° ENU`, 'success');
+    } else if (Math.abs(errDeg) <= 40.0) {
       const alpha = (isRtkFix && !r.imu.cog_locked) ? 0.35 : 0.20;
       r.imu.enu_offset_deg = ((r.imu.enu_offset_deg + alpha * errDeg + 540.0) % 360.0) - 180.0;
+      r.imu.calibrated = true;
       r.imu.cog_locked = true;
-      try {
-        localStorage.setItem(`conerobot_gyro_enu_offset_${r.id}`, String(r.imu.enu_offset_deg));
-      } catch (e) {}
 
       const fused = (((r.imu.raw_heading + r.imu.enu_offset_deg) % 360.0) + 360.0) % 360.0;
       r.imu.heading = Number(fused.toFixed(1));
@@ -465,17 +475,10 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
           let val = view.getFloat32(ptr, true);
           if (!isNaN(val) && isFinite(val)) {
             val = ((val % 360) + 360) % 360;
-            if (r.imu.raw_heading === null) {
-              try {
-                const savedOff = localStorage.getItem(`conerobot_gyro_enu_offset_${robotId}`);
-                if (savedOff !== null && !isNaN(parseFloat(savedOff))) {
-                  r.imu.enu_offset_deg = parseFloat(savedOff);
-                } else {
-                  r.imu.enu_offset_deg = ((90.0 - val + 540.0) % 360.0) - 180.0;
-                }
-              } catch (e) {
-                r.imu.enu_offset_deg = ((90.0 - val + 540.0) % 360.0) - 180.0;
-              }
+            if (r.imu.raw_heading === null && !r.imu.calibrated && !r.imu.cog_locked) {
+              // Never load stale localStorage offset for a 6-DOF gyro (zero resets on every Pi reboot).
+              // Default to North (+90° ENU) matching the rover's boot default until /robot/diagnostics arrives.
+              r.imu.enu_offset_deg = ((90.0 - val + 540.0) % 360.0) - 180.0;
             }
             r.imu.raw_heading = Number(val.toFixed(1));
             const offset = r.imu.enu_offset_deg || 0.0;
@@ -605,9 +608,11 @@ function handleBinaryFoxgloveMessage(robotId, buffer, subIdToTopic, channelIdToT
           try {
             const diag = JSON.parse(str);
             if (diag.cpu_temp) r.health.cpu_temp = diag.cpu_temp;
-            if ((diag.compass_initialized || diag.enu_yaw_locked_by_rtk) && diag.enu_yaw_offset_deg !== undefined && !isNaN(Number(diag.enu_yaw_offset_deg))) {
+            if (diag.enu_yaw_offset_deg !== undefined && !isNaN(Number(diag.enu_yaw_offset_deg))) {
+              // Always mirror the rover controller's live ENU offset so map heading and navigation match 1:1
               r.imu.enu_offset_deg = Number(diag.enu_yaw_offset_deg);
-              if (diag.enu_yaw_locked_by_rtk) r.imu.cog_locked = true;
+              r.imu.calibrated = Boolean(diag.compass_initialized || diag.enu_yaw_locked_by_rtk);
+              r.imu.cog_locked = Boolean(diag.enu_yaw_locked_by_rtk);
               if (r.imu.raw_heading !== null) {
                 r.imu.heading = Number(((((r.imu.raw_heading + r.imu.enu_offset_deg) % 360) + 360) % 360).toFixed(1));
               }

@@ -510,8 +510,11 @@ class PrimitiveMotionController(Node):
                     self._odom_pos_at_last_rtk_fix = self.current_odom_pos
                     self._odom_accum_since_last_rtk_fix = 0.0
 
-                # Driving Fine-Calibration of 6-DOF Gyro via GPS Course-Over-Ground (COG)
-                # Runs ONLY while actively driving straight and within ±40° of the calibrated heading
+                # Driving Calibration of 6-DOF Gyro via GPS Course-Over-Ground (COG)
+                # - If heading is still uncalibrated at boot, snap across full 360° once the robot
+                #   drives straight >= 35cm in RTK FIX (or >= 1.0m in 3D/Float), then immediately
+                #   let [GOTO RE-ALIGN] pivot straight toward the waypoint.
+                # - Once calibrated (manually or by RTK), fine-tune gently within ±40°.
                 if (
                     self.active_motion_type in ["STRAIGHT", "GOTO"]
                     and self._goto_phase in ["NONE", "DRIVE"]
@@ -530,24 +533,43 @@ class PrimitiveMotionController(Node):
                         self._rtk_course_anchor_gps = (curr_lat, curr_lon)
                         self._rtk_course_anchor_yaw = self._get_measured_yaw_rad()
                     else:
-                        min_step_m = 0.25 if self.gps_is_rtk_fix else 0.60
+                        is_uncalibrated = (not self.compass_initialized) and (not self.enu_yaw_locked_by_rtk)
+                        if is_uncalibrated:
+                            min_step_m = 0.35 if self.gps_is_rtk_fix else 1.00
+                        else:
+                            min_step_m = 0.25 if self.gps_is_rtk_fix else 0.60
+
                         if step_dist >= min_step_m:
                             course_enu = math.atan2(step_n, step_e)
                             if self.last_cmd_v < 0.0:
                                 course_enu = normalize_angle_rad(course_enu + math.pi)
-                            meas_offset = shortest_angular_diff_rad(course_enu, self.current_heading_rad)
+                            mid_yaw_delta = 0.5 * (self._get_measured_yaw_rad() - self._rtk_course_anchor_yaw)
+                            avg_heading_rad = normalize_angle_rad(self.current_heading_rad - mid_yaw_delta)
+                            meas_offset = shortest_angular_diff_rad(course_enu, avg_heading_rad)
                             diff_off = shortest_angular_diff_rad(meas_offset, self.enu_yaw_offset_rad)
 
-                            # Only fine-tune within ±40° of current calibrated heading so GPS noise cannot flip it
-                            if abs(diff_off) <= math.radians(40.0):
+                            if is_uncalibrated:
+                                self.enu_yaw_offset_rad = meas_offset
+                                self.enu_yaw_locked_by_rtk = True
+                                self.compass_initialized = True
+                                self._rtk_course_anchor_gps = (curr_lat, curr_lon)
+                                self._rtk_course_anchor_yaw = self._get_measured_yaw_rad()
+                                self.get_logger().info(
+                                    f"[GPS AUTO-LOCK] Acquired true ENU heading over {step_dist*100:.0f}cm -> "
+                                    f"{math.degrees(self._get_global_enu_yaw_rad()) % 360.0:.1f}° ENU "
+                                    f"(correction: {math.degrees(diff_off):+.1f}°)"
+                                )
+                                self._publish_diagnostics()
+                            elif abs(diff_off) <= math.radians(40.0):
                                 alpha = 0.35 if (self.gps_is_rtk_fix and not self.enu_yaw_locked_by_rtk) else 0.20
                                 self.enu_yaw_offset_rad = normalize_angle_rad(self.enu_yaw_offset_rad + alpha * diff_off)
                                 self.enu_yaw_locked_by_rtk = True
                                 self.get_logger().info(
                                     f"[GPS FINE-CAL] Refined ENU heading over {step_dist*100:.0f}cm -> "
-                                    f"{math.degrees(self._get_global_enu_yaw_rad()):+.1f}° ENU "
+                                    f"{math.degrees(self._get_global_enu_yaw_rad()) % 360.0:.1f}° ENU "
                                     f"(adj: {math.degrees(alpha * diff_off):+.1f}°)"
                                 )
+                                self._publish_diagnostics()
                             if step_dist >= 1.0:
                                 self._rtk_course_anchor_gps = (curr_lat, curr_lon)
                                 self._rtk_course_anchor_yaw = self._get_measured_yaw_rad()
