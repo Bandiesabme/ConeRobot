@@ -454,8 +454,29 @@ async function fetchFleetList() {
         if (!firstOnlineId) firstOnlineId = id;
         html += `<option value="${id}">🤖 ${r.name || `ConeRobot ${id < 10 ? '0' + id : id}`} (${r.ip}) [ONLINE]</option>`;
 
-        // Connect WebSocket to each online robot in parallel
-        if (!activeWebSockets[id] && !reconnectTimers[id]) {
+        // Connect WebSocket to each online robot (or switch immediately on Wi-Fi failover IP change / stall)
+        const existingWs = activeWebSockets[id];
+        const wsIpChanged = Boolean(existingWs && existingWs._robotIp && existingWs._robotIp !== r.ip);
+        const wsStale = Boolean(
+          existingWs &&
+          existingWs.readyState === WebSocket.OPEN &&
+          existingWs._lastMsgTime &&
+          (Date.now() - existingWs._lastMsgTime > 12000)
+        );
+        if (wsIpChanged || wsStale) {
+          if (reconnectTimers[id]) {
+            clearTimeout(reconnectTimers[id]);
+            delete reconnectTimers[id];
+          }
+          try {
+            existingWs.onclose = null;
+            existingWs.onerror = null;
+            existingWs.onmessage = null;
+            existingWs.close();
+          } catch (e) {}
+          delete activeWebSockets[id];
+          connectRobotWebSocket(id, r.ip, r.port || 8765);
+        } else if (!existingWs && !reconnectTimers[id]) {
           connectRobotWebSocket(id, r.ip, r.port || 8765);
         }
       } else {
@@ -521,6 +542,8 @@ function connectRobotWebSocket(id, ip, port) {
   }
 
   ws.binaryType = "arraybuffer";
+  ws._robotIp = ip;
+  ws._lastMsgTime = Date.now();
   activeWebSockets[id] = ws;
 
   const subIdToTopic = {};
@@ -528,6 +551,7 @@ function connectRobotWebSocket(id, ip, port) {
   let subCounter = 1;
 
   ws.onopen = () => {
+    ws._lastMsgTime = Date.now();
     logMission(`🟢 Connected to Robot ${id < 10 ? '0' + id : id} (${ip}:${port})!`, 'success');
     if (activeRobotId === id) updateConnBadge(true, ip);
 
@@ -565,6 +589,7 @@ function connectRobotWebSocket(id, ip, port) {
   };
 
   ws.onmessage = (event) => {
+    ws._lastMsgTime = Date.now();
     if (typeof event.data === "string") {
       try {
         const msg = JSON.parse(event.data);

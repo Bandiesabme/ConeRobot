@@ -20,9 +20,39 @@ async function startDiscoveryLoop() {
         for (let i = 1; i <= 13; i++) {
           const rob = robots[i];
           if (rob && rob.online && rob.ip) {
+            const prevIp = realTelemetry[i].ip;
             realTelemetry[i].ip = rob.ip;
 
-            if (!activeWebSockets[i] && !reconnectTimers[i]) {
+            const existingWs = activeWebSockets[i];
+            const wsIpChanged = Boolean(existingWs && existingWs._robotIp && existingWs._robotIp !== rob.ip);
+            const wsStale = Boolean(
+              existingWs &&
+              existingWs.readyState === WebSocket.OPEN &&
+              existingWs._lastMsgTime &&
+              (Date.now() - existingWs._lastMsgTime > 12000)
+            );
+
+            // Immediately switch WebSocket if the Pi failed over to a new IP (e.g. wlusb0 -> wlan0)
+            // or if the previous TCP socket went silently half-open after a USB unplug
+            if (wsIpChanged || wsStale) {
+              logDebug(`🔄 [Robot ${i}] ${wsIpChanged ? `IP changed (${existingWs._robotIp} → ${rob.ip})` : 'Connection stalled'} — reconnecting immediately...`, 'warn');
+              if (reconnectTimers[i]) {
+                clearTimeout(reconnectTimers[i]);
+                delete reconnectTimers[i];
+              }
+              try {
+                existingWs.onclose = null;
+                existingWs.onerror = null;
+                existingWs.onmessage = null;
+                existingWs.close();
+              } catch (e) {}
+              delete activeWebSockets[i];
+              connectToRobotWebSocket(i, rob.ip, rob.port || 8765);
+            } else if (!existingWs && reconnectTimers[i] && prevIp && prevIp !== rob.ip) {
+              clearTimeout(reconnectTimers[i]);
+              delete reconnectTimers[i];
+              connectToRobotWebSocket(i, rob.ip, rob.port || 8765);
+            } else if (!existingWs && !reconnectTimers[i]) {
               connectToRobotWebSocket(i, rob.ip, rob.port || 8765);
             }
           } else {
@@ -70,6 +100,8 @@ function connectToRobotWebSocket(robotId, ip, port) {
   }
 
   activeWebSockets[robotId] = ws;
+  ws._robotIp = ip;
+  ws._lastMsgTime = Date.now();
   ws.binaryType = "arraybuffer";
 
   const subIdToTopic = {};
@@ -78,6 +110,7 @@ function connectToRobotWebSocket(robotId, ip, port) {
 
   ws.onopen = () => {
     logDebug(`🟢 [Robot ${robotId}] Connected to ${wsUrl}!`, 'success');
+    ws._lastMsgTime = Date.now();
     realTelemetry[robotId].online = true;
 
     // Reset sensor telemetry to clean state upon new connection
@@ -94,6 +127,7 @@ function connectToRobotWebSocket(robotId, ip, port) {
   };
 
   ws.onmessage = (event) => {
+    ws._lastMsgTime = Date.now();
     realTelemetry[robotId].online = true;
 
     if (typeof event.data === "string") {

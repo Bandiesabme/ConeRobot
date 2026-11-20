@@ -191,8 +191,8 @@ USB_IF="wlusb0"
 INT_IF="wlan0"
 POLL_SEC=3
 STABLE_HANDOVER_SEC=3
-FAILBACK_SEC=18
-RECONFIG_RETRY_SEC=30
+FAILBACK_SEC=15
+RECONFIG_RETRY_SEC=10
 
 SLEEP_PID=""
 
@@ -276,6 +276,10 @@ bring_up_iface() {
     local do_reconfig="${2:-false}"
     [ -d "/sys/class/net/$iface" ] || return 1
 
+    if command -v rfkill >/dev/null 2>&1; then
+        rfkill unblock wifi >/dev/null 2>&1 || true
+    fi
+
     if ! ip link show dev "$iface" 2>/dev/null | grep -q "[,<]UP[,>]"; then
         ip link set dev "$iface" up 2>/dev/null || true
     fi
@@ -290,11 +294,20 @@ bring_up_iface() {
         if systemctl cat "$wpa_unit" >/dev/null 2>&1; then
             if ! systemctl is-active --quiet "$wpa_unit" 2>/dev/null; then
                 systemctl reset-failed "$wpa_unit" >/dev/null 2>&1 || true
-                systemctl start "$wpa_unit" >/dev/null 2>&1 || true
+                systemctl start --no-block "$wpa_unit" >/dev/null 2>&1 || true
             fi
         fi
-        if [ "$do_reconfig" = true ] && command -v networkctl >/dev/null 2>&1; then
-            networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+        if command -v networkctl >/dev/null 2>&1; then
+            networkctl up "$iface" >/dev/null 2>&1 || true
+            if [ "$do_reconfig" = true ]; then
+                local carrier
+                carrier=$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || echo 0)
+                if [ "$carrier" = "1" ]; then
+                    networkctl renew "$iface" >/dev/null 2>&1 || networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+                else
+                    networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+                fi
+            fi
         fi
     fi
     disable_powersave "$iface"
@@ -310,7 +323,10 @@ bring_down_iface() {
     else
         local wpa_unit="netplan-wpa-${iface}.service"
         if systemctl is-active --quiet "$wpa_unit" 2>/dev/null; then
-            systemctl stop "$wpa_unit" >/dev/null 2>&1 || true
+            systemctl stop --no-block "$wpa_unit" >/dev/null 2>&1 || true
+        fi
+        if command -v networkctl >/dev/null 2>&1; then
+            networkctl down "$iface" >/dev/null 2>&1 || true
         fi
         ip link set dev "$iface" down 2>/dev/null || true
         ip addr flush dev "$iface" 2>/dev/null || true
@@ -405,8 +421,14 @@ while true; do
             USB_OFFLINE_SINCE=0
             LAST_USB_RECONFIG=0
             LAST_INT_RECONFIG=0
+            # Bring up onboard wlan0 FIRST, and stop the dead USB wpa unit non-blocking
+            # (blocking systemctl stop on a yanked rtl8xxxu dongle can hang for 90s!).
+            if iface_exists "$INT_IF"; then
+                bring_up_iface "$INT_IF" true
+                LAST_INT_RECONFIG=$NOW
+            fi
             if ! is_nm_active; then
-                systemctl stop "netplan-wpa-${USB_IF}.service" >/dev/null 2>&1 || true
+                systemctl stop --no-block "netplan-wpa-${USB_IF}.service" >/dev/null 2>&1 || true
             fi
         fi
 
@@ -415,9 +437,20 @@ while true; do
                 log "Restoring onboard Wi-Fi (${INT_IF})..."
                 bring_up_iface "$INT_IF" true
                 LAST_INT_RECONFIG=$NOW
-            elif ! iface_is_online "$INT_IF" && (( NOW - LAST_INT_RECONFIG >= RECONFIG_RETRY_SEC )); then
-                bring_up_iface "$INT_IF" true
-                LAST_INT_RECONFIG=$NOW
+            elif ! iface_is_online "$INT_IF"; then
+                # If WPA already associated (carrier=1) but no IPv4 yet, trigger DHCP immediately
+                INT_CARRIER=$(cat "/sys/class/net/${INT_IF}/carrier" 2>/dev/null || echo 0)
+                if [ "$INT_CARRIER" = "1" ] && (( NOW - LAST_INT_RECONFIG >= 3 )); then
+                    if ! is_nm_active && command -v networkctl >/dev/null 2>&1; then
+                        networkctl renew "$INT_IF" >/dev/null 2>&1 || networkctl reconfigure "$INT_IF" >/dev/null 2>&1 || true
+                    else
+                        bring_up_iface "$INT_IF" true
+                    fi
+                    LAST_INT_RECONFIG=$NOW
+                elif (( NOW - LAST_INT_RECONFIG >= RECONFIG_RETRY_SEC )); then
+                    bring_up_iface "$INT_IF" true
+                    LAST_INT_RECONFIG=$NOW
+                fi
             else
                 disable_powersave "$INT_IF"
             fi
