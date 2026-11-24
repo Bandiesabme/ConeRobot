@@ -1510,17 +1510,23 @@ class PrimitiveMotionController(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = PrimitiveMotionController()
-    from rclpy.executors import MultiThreadedExecutor
+    from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
     executor = MultiThreadedExecutor(num_threads=3)
     executor.add_node(node)
     try:
         executor.spin()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            executor.shutdown(timeout_sec=1.0)
+        except Exception:
+            pass
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

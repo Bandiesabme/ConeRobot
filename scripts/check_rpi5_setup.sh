@@ -219,14 +219,16 @@ if [ -r "$BOOT_CONFIG" ]; then
 
     if grep -qE '^\s*dtparam=i2c_arm=on' "$BOOT_CONFIG"; then
         if grep -qE '^\s*dtparam=i2c_arm=on.*i2c_arm_baudrate=400000' "$BOOT_CONFIG"; then
-            pass "400 kHz fast I2C configured (dtparam=i2c_arm=on,i2c_arm_baudrate=400000)"
+            warn "I2C is set to 400 kHz in ${BOOT_CONFIG} (can cause BNO08x SDA=0 lockups on jumper wires near motors)" \
+                 "Set dtparam=i2c_arm=on,i2c_arm_baudrate=100000 in ${BOOT_CONFIG} and reboot"
+        elif grep -qE '^\s*dtparam=i2c_arm=on.*i2c_arm_baudrate=100000' "$BOOT_CONFIG"; then
+            pass "100 kHz stable I2C configured (dtparam=i2c_arm=on,i2c_arm_baudrate=100000)"
         else
-            warn "I2C is enabled, but 400 kHz baudrate not explicitly set in ${BOOT_CONFIG}" \
-                 "Set dtparam=i2c_arm=on,i2c_arm_baudrate=400000 in ${BOOT_CONFIG}"
+            pass "I2C enabled at default 100 kHz in ${BOOT_CONFIG}"
         fi
     else
         fail "I2C bus not enabled (dtparam=i2c_arm=on missing in ${BOOT_CONFIG})" \
-             "echo 'dtparam=i2c_arm=on,i2c_arm_baudrate=400000' | sudo tee -a ${BOOT_CONFIG} && sudo reboot"
+             "echo 'dtparam=i2c_arm=on,i2c_arm_baudrate=100000' | sudo tee -a ${BOOT_CONFIG} && sudo reboot"
     fi
 
     if grep -qE '^\s*dtparam=uart0=on\b' "$BOOT_CONFIG" && grep -qE '^\s*enable_uart=1\b' "$BOOT_CONFIG"; then

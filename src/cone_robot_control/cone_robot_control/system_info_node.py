@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
 ==============================================================================
-ROS 2 Node: Raspberry Pi 5 System Info & Network Link Monitor
+ROS 2 Node: Raspberry Pi 5 System Info, Wi-Fi Link & INA219 Battery Monitor
 ==============================================================================
 Target Platform: Raspberry Pi 5 / Ubuntu 24.04 / ROS 2 Jazzy
 
 Description:
-    Dedicated host-health telemetry node that reads Linux kernel virtual files
-    (/proc/stat, /proc/meminfo, /sys/class/thermal, /proc/net/*) directly with
-    zero external dependencies (no psutil) and zero subprocesses.
+    Dedicated host-health & power telemetry node:
+      - Reads Linux kernel virtual files (/proc/stat, /proc/meminfo,
+        /sys/class/thermal, /proc/net/*) directly (no psutil, no subprocesses).
+      - Reads INA219 Bus Voltage (Reg 0x02, voltage-only) over Linux kernel
+        I2C (smbus) with EMA load-sag smoothing and a realistic 21-point LiPo
+        per-cell discharge lookup curve (piecewise-linear interpolation).
 
 Publishes:
-    - `/robot/system_info` (std_msgs/msg/String): JSON payload at 0.5 Hz containing:
-        * CPU load (%)
-        * RAM & Swap usage (MB, %)
-        * SoC temperature (°C)
-        * Active network interface (wlusb0 vs wlan0 vs eth0), driver & USB flag
-        * Wi-Fi RSSI (dBm), link quality (%), wireless TX retries, RX/TX drops
-        * Host uptime (s)
+    - `/robot/system_info` (std_msgs/msg/String): JSON payload at 0.5 Hz:
+        * CPU load (%), RAM & Swap usage (MB, %), SoC temperature (°C), uptime
+        * Active network interface (wlusb0 vs wlan0 vs eth0), driver, USB flag,
+          Wi-Fi RSSI (dBm), link quality (%), wireless TX retries, RX/TX drops
+        * Battery voltage (V) & LiPo State-of-Charge (%) when INA219 present
+    - `/battery_state` (sensor_msgs/msg/BatteryState): 1 Hz LiPo status for
+        MDD10 voltage compensation, motion controller, and Fleet Dashboard.
 ==============================================================================
 """
 
@@ -27,37 +30,244 @@ import time
 from typing import Optional, Tuple
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String
+
+try:
+    from .i2c_bus_guard import i2c_bus_lock
+except (ImportError, ValueError):
+    try:
+        from cone_robot_control.i2c_bus_guard import i2c_bus_lock
+    except ImportError:
+        import i2c_bus_guard
+        i2c_bus_lock = i2c_bus_guard.i2c_bus_lock
+
+SMBUS_AVAILABLE = False
+try:
+    import smbus2 as smbus
+    SMBUS_AVAILABLE = True
+except ImportError:
+    try:
+        import smbus
+        SMBUS_AVAILABLE = True
+    except ImportError:
+        SMBUS_AVAILABLE = False
+
+
+# Realistic LiPo resting open-circuit discharge curve: (cell_voltage_v, soc_percent)
+# Piecewise-linear interpolation cuts % error from ~20-30% (linear) down to ~5% at rest.
+LIPO_CELL_SOC_LUT = (
+    (3.50, 0.0),
+    (3.61, 5.0),
+    (3.69, 10.0),
+    (3.71, 15.0),
+    (3.73, 20.0),
+    (3.75, 25.0),
+    (3.77, 30.0),
+    (3.79, 35.0),
+    (3.80, 40.0),
+    (3.82, 45.0),
+    (3.84, 50.0),
+    (3.85, 55.0),
+    (3.87, 60.0),
+    (3.91, 65.0),
+    (3.95, 70.0),
+    (3.98, 75.0),
+    (4.02, 80.0),
+    (4.08, 85.0),
+    (4.11, 90.0),
+    (4.15, 95.0),
+    (4.20, 100.0),
+)
+
+
+def lipo_voltage_to_soc_pct(pack_voltage_v: float, cell_count: int = 3) -> float:
+    """Converts LiPo pack voltage to State-of-Charge [0.0, 100.0] via 21-point LiPo curve."""
+    cells = max(1, int(cell_count))
+    v_cell = float(pack_voltage_v) / cells
+
+    if v_cell <= LIPO_CELL_SOC_LUT[0][0]:
+        return 0.0
+    if v_cell >= LIPO_CELL_SOC_LUT[-1][0]:
+        return 100.0
+
+    for i in range(len(LIPO_CELL_SOC_LUT) - 1):
+        v0, p0 = LIPO_CELL_SOC_LUT[i]
+        v1, p1 = LIPO_CELL_SOC_LUT[i + 1]
+        if v0 <= v_cell <= v1:
+            t = (v_cell - v0) / max(1e-6, (v1 - v0))
+            return p0 + t * (p1 - p0)
+    return 0.0
 
 
 class SystemInfoNode(Node):
-    """Lightweight ROS 2 node publishing Pi 5 CPU, RAM, Temp, and Wi-Fi link stats."""
+    """Dedicated ROS 2 node publishing Pi 5 CPU, RAM, Temp, Wi-Fi, and INA219 LiPo battery stats."""
 
     def __init__(self) -> None:
         super().__init__('system_info_node')
 
+        # --- System Info Parameters ---
         self.declare_parameter('publish_rate_hz', 0.5)
-        rate_hz = float(self.get_parameter('publish_rate_hz').value)
-        rate_hz = max(0.1, min(2.0, rate_hz))
+        rate_hz = max(0.1, min(2.0, float(self.get_parameter('publish_rate_hz').value)))
 
+        # --- INA219 Voltage-Only LiPo Battery Monitor Parameters ---
+        self.declare_parameter('enable_battery_monitor', True)
+        self.declare_parameter('battery_i2c_bus', 1)
+        self.declare_parameter('battery_i2c_address', 64)       # 0x40 default (CJMCU-219 / INA219)
+        self.declare_parameter('battery_publish_rate_hz', 1.0)
+        self.declare_parameter('battery_cell_count', 3)         # 3S LiPo
+        self.declare_parameter('battery_ema_alpha', 0.15)       # ~10-12s EMA smoothing at 1 Hz
+        self.declare_parameter('battery_min_v', 10.5)           # 3.50V/cell cutoff (0%)
+        self.declare_parameter('battery_max_v', 12.6)           # 4.20V/cell full (100%)
+        self.declare_parameter('battery_low_warn_v', 11.2)      # ~20% resting 3S LiPo warning
+        self.declare_parameter('battery_frame_id', 'base_link')
+
+        self.enable_battery_monitor = bool(self.get_parameter('enable_battery_monitor').value)
+        self.battery_i2c_bus = int(self.get_parameter('battery_i2c_bus').value)
+        self.battery_i2c_address = int(self.get_parameter('battery_i2c_address').value)
+        self.battery_publish_rate_hz = max(0.1, float(self.get_parameter('battery_publish_rate_hz').value))
+        self.battery_cell_count = max(1, int(self.get_parameter('battery_cell_count').value))
+        self.battery_ema_alpha = max(0.02, min(1.0, float(self.get_parameter('battery_ema_alpha').value)))
+        self.battery_min_v = float(self.get_parameter('battery_min_v').value)
+        self.battery_max_v = float(self.get_parameter('battery_max_v').value)
+        self.battery_low_warn_v = float(self.get_parameter('battery_low_warn_v').value)
+        self.battery_frame_id = str(self.get_parameter('battery_frame_id').value)
+
+        # --- Publishers ---
         self.pub = self.create_publisher(String, '/robot/system_info', 10)
+        self.battery_pub = (
+            self.create_publisher(BatteryState, '/battery_state', 10)
+            if self.enable_battery_monitor
+            else None
+        )
 
         # Previous /proc/stat CPU counters for accurate interval utilization
         self._prev_cpu_total: Optional[int] = None
         self._prev_cpu_idle: Optional[int] = None
         self._read_cpu_percent()  # Seed baseline so first published tick is valid
 
-        # Cached per-interface metadata: { iface: (driver, is_usb) }
+        # Cached per-interface metadata & last valid RSSI (smooths rtl8xxxu 0/-256 ticks)
         self._iface_meta_cache: dict = {}
-        # Last valid RSSI per interface to smooth transient rtl8xxxu 0 / -256 ticks
         self._last_valid_rssi: dict = {}
+
+        # INA219 SMBus handle & smoothed LiPo voltage state
+        self.smbus_bus = None
+        self._battery_smoothed_v: Optional[float] = None
+        self._battery_last_pct: Optional[float] = None
+        self._last_battery_warn_time: float = 0.0
+        self._battery_err_logged: bool = False
+
+        if self.enable_battery_monitor:
+            self._init_battery_monitor()
+            self.battery_timer = self.create_timer(
+                1.0 / self.battery_publish_rate_hz,
+                self._publish_battery_data,
+            )
 
         self.timer = self.create_timer(1.0 / rate_hz, self._publish_system_info)
         self.get_logger().info(
-            f"System Info Node started (publishing /robot/system_info at {rate_hz:.2f} Hz)"
+            f"System Info Node started (/robot/system_info @ {rate_hz:.2f} Hz, "
+            f"INA219 battery={'ON' if self.enable_battery_monitor else 'OFF'})"
         )
 
+    # --------------------------------------------------------------------------
+    # INA219 Voltage-Only LiPo Battery Monitor (Shared Linux Kernel I2C)
+    # --------------------------------------------------------------------------
+    def _init_battery_monitor(self) -> None:
+        """Opens native Linux kernel SMBus (thread/process-safe I2C bus locking)."""
+        if not SMBUS_AVAILABLE:
+            self.get_logger().warn(
+                'smbus/smbus2 not installed — INA219 battery monitoring disabled.'
+            )
+            return
+        try:
+            self.smbus_bus = smbus.SMBus(self.battery_i2c_bus)
+            self.get_logger().info(
+                f"INA219 Battery Monitor ready on /dev/i2c-{self.battery_i2c_bus} "
+                f"(0x{self.battery_i2c_address:02X}, {self.battery_cell_count}S LiPo LUT, "
+                f"EMA alpha={self.battery_ema_alpha:.2f}, warn<={self.battery_low_warn_v:.1f}V)"
+            )
+        except Exception as e:
+            self.smbus_bus = None
+            self.get_logger().warn(f"Could not open /dev/i2c-{self.battery_i2c_bus} for INA219: {e}")
+
+    def _read_ina219_bus_voltage(self) -> Optional[float]:
+        """Reads INA219 Reg 0x02 (Bus Voltage, 4 mV LSB, voltage-only) under shared I2C flock."""
+        if self.smbus_bus is None:
+            return None
+        try:
+            with i2c_bus_lock(self.battery_i2c_bus):
+                raw = self.smbus_bus.read_word_data(self.battery_i2c_address, 0x02)
+            # INA219 sends big-endian; SMBus read_word_data returns little-endian
+            raw_swapped = ((raw & 0xFF) << 8) | (raw >> 8)
+            raw_bits = (raw_swapped >> 3) & 0x1FFF
+            voltage_v = raw_bits * 0.004
+            self._battery_err_logged = False
+            # Reject clearly disconnected / bogus readings (< 1.0 V or > 26.0 V)
+            if voltage_v < 1.0 or voltage_v > 26.0:
+                return None
+            return voltage_v
+        except Exception as e:
+            if not self._battery_err_logged:
+                self._battery_err_logged = True
+                self.get_logger().warn(
+                    f"INA219 I2C read error at 0x{self.battery_i2c_address:02X}: {e} "
+                    "(further errors throttled)"
+                )
+            return None
+
+    def _publish_battery_data(self) -> None:
+        """1 Hz timer reading INA219 voltage, applying EMA smoothing + LiPo LUT, publishing /battery_state."""
+        if not self.enable_battery_monitor or self.battery_pub is None or self.smbus_bus is None:
+            return
+
+        raw_v = self._read_ina219_bus_voltage()
+        if raw_v is None:
+            return
+
+        # Exponential Moving Average smooths brief motor load voltage sag without lag on steady drain
+        if self._battery_smoothed_v is None:
+            self._battery_smoothed_v = raw_v
+        else:
+            a = self.battery_ema_alpha
+            self._battery_smoothed_v = a * raw_v + (1.0 - a) * self._battery_smoothed_v
+
+        v_filt = self._battery_smoothed_v
+        soc_pct = lipo_voltage_to_soc_pct(v_filt, self.battery_cell_count)
+        self._battery_last_pct = soc_pct
+
+        msg = BatteryState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.battery_frame_id
+        msg.present = True
+        msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LIPO
+        msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
+        msg.voltage = float(round(v_filt, 2))
+        msg.current = float('nan')  # Voltage-only wiring (current not measured)
+        msg.percentage = float(round(soc_pct / 100.0, 3))
+
+        if v_filt <= self.battery_min_v:
+            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_DEAD
+        elif v_filt <= self.battery_low_warn_v:
+            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_UNKNOWN
+        else:
+            msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
+
+        self.battery_pub.publish(msg)
+
+        now = time.monotonic()
+        if v_filt <= self.battery_low_warn_v and (now - self._last_battery_warn_time > 15.0):
+            self._last_battery_warn_time = now
+            self.get_logger().warn(
+                f"⚠️ LOW BATTERY ({self.battery_cell_count}S LiPo): "
+                f"{v_filt:.2f}V (~{round(soc_pct)}%). Recharge recommended!"
+            )
+
+    # --------------------------------------------------------------------------
+    # Pi 5 Host Health & Wi-Fi Link Stats (/proc & /sys, zero subprocesses)
+    # --------------------------------------------------------------------------
     def _read_cpu_percent(self) -> Optional[float]:
         """Computes aggregate CPU utilization (%) from /proc/stat counter deltas."""
         try:
@@ -310,6 +520,8 @@ class SystemInfoNode(Node):
                 "cpu_temp_c": temp_c,
                 "cpu_temp": f"{temp_c:.1f} °C" if temp_c is not None else "N/A",
                 "uptime_s": uptime_s,
+                "battery_v": round(self._battery_smoothed_v, 2) if self._battery_smoothed_v is not None else None,
+                "battery_pct": round(self._battery_last_pct, 1) if self._battery_last_pct is not None else None,
                 "wifi_iface": wifi["iface"],
                 "wifi_driver": wifi["driver"],
                 "wifi_is_usb": wifi["is_usb"],
@@ -326,18 +538,29 @@ class SystemInfoNode(Node):
         except Exception:
             pass
 
+    def destroy_node(self) -> None:
+        if self.smbus_bus is not None:
+            try:
+                self.smbus_bus.close()
+            except Exception:
+                pass
+            self.smbus_bus = None
+        super().destroy_node()
+
 
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = SystemInfoNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

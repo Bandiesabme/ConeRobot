@@ -967,16 +967,19 @@ class LC29HGPSNode(Node):
 
 
 def main(args=None) -> None:
+    from rclpy.executors import ExternalShutdownException
     rclpy.init(args=args)
     node = LC29HGPSNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

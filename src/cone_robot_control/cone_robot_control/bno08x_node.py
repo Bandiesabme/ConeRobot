@@ -9,21 +9,21 @@ and fault-tolerant reading.
 import math
 import time
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import Imu, BatteryState
+from sensor_msgs.msg import Imu
 from std_msgs.msg import Float32
 
-# Try importing SMBus for ultra-fast direct I2C register reads without heavy wrappers
-SMBUS_AVAILABLE = False
 try:
-    import smbus2 as smbus
-    SMBUS_AVAILABLE = True
-except ImportError:
+    from .i2c_bus_guard import i2c_bus_lock, read_i2c1_sda_level, recover_i2c1_bus
+except (ImportError, ValueError):
     try:
-        import smbus
-        SMBUS_AVAILABLE = True
+        from cone_robot_control.i2c_bus_guard import i2c_bus_lock, read_i2c1_sda_level, recover_i2c1_bus
     except ImportError:
-        SMBUS_AVAILABLE = False
+        import i2c_bus_guard
+        i2c_bus_lock = i2c_bus_guard.i2c_bus_lock
+        read_i2c1_sda_level = i2c_bus_guard.read_i2c1_sda_level
+        recover_i2c1_bus = i2c_bus_guard.recover_i2c1_bus
 
 # Try importing TF2 Broadcaster
 try:
@@ -149,6 +149,7 @@ class BNO08xNode(Node):
 
         # --- Declare ROS 2 Parameters ---
         self.declare_parameter('i2c_address', 74)
+        self.declare_parameter('reset_pin', -1)
         self.declare_parameter('frame_id', 'imu_link')
         self.declare_parameter('publish_rate_hz', 50.0)
         self.declare_parameter('mount_flipped', True)
@@ -159,6 +160,7 @@ class BNO08xNode(Node):
 
         # --- Read Parameters ---
         self.i2c_address = self.get_parameter('i2c_address').value
+        self.reset_pin = int(self.get_parameter('reset_pin').value)
         self.frame_id = self.get_parameter('frame_id').value
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
         self.mount_flipped = self.get_parameter('mount_flipped').value
@@ -167,30 +169,10 @@ class BNO08xNode(Node):
         self.parent_frame_id = self.get_parameter('parent_frame_id').value
         self.child_frame_id = self.get_parameter('child_frame_id').value
 
-        # --- INA219 Battery Monitor Parameters (Shares I2C Bus, 0 MB Extra RAM) ---
-        self.declare_parameter('enable_battery_monitor', True)
-        self.declare_parameter('battery_i2c_address', 64)  # 0x40 default
-        self.declare_parameter('battery_publish_rate_hz', 1.0)
-        self.declare_parameter('battery_min_v', 10.5)  # 3S cutoff (3.5V/cell)
-        self.declare_parameter('battery_max_v', 12.6)  # 3S full (4.2V/cell)
-        self.declare_parameter('battery_low_warn_v', 11.1) # 3S warning (3.7V/cell)
-
-        self.enable_battery_monitor = bool(self.get_parameter('enable_battery_monitor').value)
-        self.battery_i2c_address = int(self.get_parameter('battery_i2c_address').value)
-        self.battery_publish_rate_hz = float(self.get_parameter('battery_publish_rate_hz').value)
-        self.battery_min_v = float(self.get_parameter('battery_min_v').value)
-        self.battery_max_v = float(self.get_parameter('battery_max_v').value)
-        self.battery_low_warn_v = float(self.get_parameter('battery_low_warn_v').value)
-
         # --- Publishers & Broadcasters ---
         self.imu_pub = self.create_publisher(Imu, '/imu/data', 10)
         self.heading_pub = self.create_publisher(Float32, '/imu/heading', 10)
         self.compass_pub = self.create_publisher(Float32, '/imu/compass_heading', 10)
-
-        if self.enable_battery_monitor:
-            self.battery_pub = self.create_publisher(BatteryState, '/battery_state', 10)
-        else:
-            self.battery_pub = None
 
         if self.publish_tf and TF2_AVAILABLE:
             self.tf_broadcaster = TransformBroadcaster(self)
@@ -219,12 +201,13 @@ class BNO08xNode(Node):
             0.0, 0.0, 1e-2
         ]
 
-        # Sensor instances
+        # Sensor instances & I2C lockup auto-recovery state
         self.sensor = None
         self.i2c_bus = None
-        self.smbus_bus = None
         self.consecutive_errors = 0
-        self._last_battery_warn_time = 0.0
+        self.consecutive_i2c_errors = 0
+        self._last_bus_recovery_time = 0.0
+        self._last_reinit_attempt_time = 0.0
 
         # Defer hardware initialization by 0.1s so ROS 2 node spins immediately
         self._init_timer = self.create_timer(0.1, self._init_hardware_callback)
@@ -233,14 +216,6 @@ class BNO08xNode(Node):
         timer_period = 1.0 / self.publish_rate_hz
         self.timer = self.create_timer(timer_period, self._publish_imu_data)
 
-        # Start Battery publishing timer (Low frequency, e.g. 1 Hz)
-        if self.enable_battery_monitor:
-            batt_period = 1.0 / max(0.1, self.battery_publish_rate_hz)
-            self.battery_timer = self.create_timer(batt_period, self._publish_battery_data)
-            self.get_logger().info(
-                f'INA219 Battery Monitor scheduled (Rate: {self.battery_publish_rate_hz} Hz, '
-                f'I2C: 0x{self.battery_i2c_address:02X}, Range: {self.battery_min_v}V - {self.battery_max_v}V)'
-            )
         self.get_logger().info(
             f'BNO08x IMU Node initialized (Rate: {self.publish_rate_hz} Hz, '
             f'Flipped: {self.mount_flipped}, Game Rotation: {self.use_game_rotation}, '
@@ -251,8 +226,6 @@ class BNO08xNode(Node):
         """Asynchronously initialize hardware once ROS 2 executor is running."""
         self._init_timer.cancel()
         self._init_sensor()
-        if self.enable_battery_monitor:
-            self._init_battery_monitor()
 
     def _drain_packets(self, max_packets=10, delay_s=0.01):
         """Drain queued SHTP packets from the BNO08x buffer."""
@@ -307,153 +280,76 @@ class BNO08xNode(Node):
                     f'(attempt {init_attempt}/{max_init_attempts})...'
                 )
 
-                if self.i2c_bus is None:
-                    self.i2c_bus = busio.I2C(board.SCL, board.SDA, frequency=100000)
+                with i2c_bus_lock(1):
+                    # If SDA is stuck LOW (GPIO2=0), attempt non-reboot bus recovery before probing
+                    if read_i2c1_sda_level() == 0:
+                        self.get_logger().warn('I2C1 SDA is stuck LOW (GPIO2=0) — running automatic bus recovery...')
+                        ok_rec, rec_detail = recover_i2c1_bus(reset_pin=self.reset_pin)
+                        self.get_logger().warn(f'I2C1 recovery result: {rec_detail} (ok={ok_rec})')
 
-                self.sensor = ReliableBNO08X_I2C(self.i2c_bus, address=self.i2c_address)
-                # Allow BNO08x SH-2 internal processor to settle after soft-reset and drain boot packets
-                time.sleep(0.45)
-                self._drain_packets(max_packets=15, delay_s=0.01)
+                    if self.i2c_bus is None:
+                        self.i2c_bus = busio.I2C(board.SCL, board.SDA, frequency=100000)
 
-                # Determine primary and fallback rotation features
-                if self.use_game_rotation:
-                    primary_feat = BNO_REPORT_GAME_ROTATION_VECTOR
-                    primary_name = "Game Rotation Vector (6-DOF)"
-                    fallback_feat = BNO_REPORT_ROTATION_VECTOR
-                    fallback_name = "Absolute Rotation Vector (9-DOF / Compass)"
-                else:
-                    primary_feat = BNO_REPORT_ROTATION_VECTOR
-                    primary_name = "Absolute Rotation Vector (9-DOF / Compass)"
-                    fallback_feat = BNO_REPORT_GAME_ROTATION_VECTOR
-                    fallback_name = "Game Rotation Vector (6-DOF)"
+                    self.sensor = ReliableBNO08X_I2C(self.i2c_bus, address=self.i2c_address)
+                    # Allow BNO08x SH-2 internal processor to settle after soft-reset and drain boot packets
+                    time.sleep(0.45)
+                    self._drain_packets(max_packets=15, delay_s=0.01)
 
-                rot_ok = self._enable_feature_safe(primary_feat, primary_name)
-                if not rot_ok:
-                    self.get_logger().warn(
-                        f'{primary_name} failed. Attempting fallback to {fallback_name}...'
-                    )
-                    rot_ok = self._enable_feature_safe(fallback_feat, fallback_name)
-                    if rot_ok:
-                        self.use_game_rotation = not self.use_game_rotation
-                        self.get_logger().info(
-                            f'Successfully activated fallback {fallback_name} (use_game_rotation={self.use_game_rotation}).'
-                        )
+                    # Determine primary and fallback rotation features
+                    if self.use_game_rotation:
+                        primary_feat = BNO_REPORT_GAME_ROTATION_VECTOR
+                        primary_name = "Game Rotation Vector (6-DOF)"
+                        fallback_feat = BNO_REPORT_ROTATION_VECTOR
+                        fallback_name = "Absolute Rotation Vector (9-DOF / Compass)"
                     else:
-                        raise RuntimeError(f'Could not enable {primary_name} or {fallback_name}.')
+                        primary_feat = BNO_REPORT_ROTATION_VECTOR
+                        primary_name = "Absolute Rotation Vector (9-DOF / Compass)"
+                        fallback_feat = BNO_REPORT_GAME_ROTATION_VECTOR
+                        fallback_name = "Game Rotation Vector (6-DOF)"
 
-                time.sleep(0.05)
-                self._enable_feature_safe(BNO_REPORT_GYROSCOPE, "Gyroscope", max_attempts=3)
-                time.sleep(0.05)
-                self._enable_feature_safe(BNO_REPORT_ACCELEROMETER, "Accelerometer", max_attempts=3)
+                    rot_ok = self._enable_feature_safe(primary_feat, primary_name)
+                    if not rot_ok:
+                        self.get_logger().warn(
+                            f'{primary_name} failed. Attempting fallback to {fallback_name}...'
+                        )
+                        rot_ok = self._enable_feature_safe(fallback_feat, fallback_name)
+                        if rot_ok:
+                            self.use_game_rotation = not self.use_game_rotation
+                            self.get_logger().info(
+                                f'Successfully activated fallback {fallback_name} (use_game_rotation={self.use_game_rotation}).'
+                            )
+                        else:
+                            raise RuntimeError(f'Could not enable {primary_name} or {fallback_name}.')
 
+                    time.sleep(0.05)
+                    self._enable_feature_safe(BNO_REPORT_GYROSCOPE, "Gyroscope", max_attempts=3)
+                    time.sleep(0.05)
+                    self._enable_feature_safe(BNO_REPORT_ACCELEROMETER, "Accelerometer", max_attempts=3)
+
+                self.consecutive_errors = 0
+                self.consecutive_i2c_errors = 0
                 self.get_logger().info('✅ BNO08x hardware initialized successfully.')
                 return
 
             except Exception as e:
                 self.get_logger().error(f'BNO08x init attempt {init_attempt}/{max_init_attempts} failed: {e}')
                 if init_attempt < max_init_attempts:
+                    with i2c_bus_lock(1):
+                        if read_i2c1_sda_level() == 0 or self.reset_pin >= 0:
+                            recover_i2c1_bus(reset_pin=self.reset_pin)
                     time.sleep(1.0)
 
-        self.get_logger().error('❌ BNO08x hardware failed to initialize. Sensor will remain offline.')
+        self.get_logger().error('❌ BNO08x hardware failed to initialize. Will retry automatically every 5s.')
         self.sensor = None
-
-    def _init_battery_monitor(self):
-        """Initialize INA219 battery monitor interface on the shared I2C bus."""
-        # Method 1: SMBus (native Linux kernel I2C locking - fastest & most reliable)
-        if SMBUS_AVAILABLE:
-            try:
-                self.smbus_bus = smbus.SMBus(1)
-                self.get_logger().info(
-                    f'INA219 Battery Monitor initialized via smbus on bus 1 (address: 0x{self.battery_i2c_address:02X})'
-                )
-                return
-            except Exception as e:
-                self.get_logger().warn(f'Could not open smbus(1): {e}. Will attempt busio fallback.')
-
-        # Method 2: busio.I2C fallback (shared with BNO08x)
-        if self.i2c_bus is not None:
-            self.get_logger().info(
-                f'INA219 Battery Monitor ready via CircuitPython busio.I2C fallback (address: 0x{self.battery_i2c_address:02X})'
-            )
-        else:
-            self.get_logger().warn('No I2C interface available for INA219 battery monitor.')
-
-    def _publish_battery_data(self):
-        """Low-frequency (1 Hz) timer reading INA219 bus voltage and publishing BatteryState."""
-        if not self.enable_battery_monitor or self.battery_pub is None:
-            return
-        if self.smbus_bus is None and self.i2c_bus is None:
-            return
-
-        voltage_v = None
-
-        # 1. Read via SMBus if available
-        if self.smbus_bus is not None:
-            try:
-                # Register 0x02 is Bus Voltage
-                raw = self.smbus_bus.read_word_data(self.battery_i2c_address, 0x02)
-                # INA219 transmits big-endian; smbus read_word_data assumes little-endian
-                raw_swapped = ((raw & 0xFF) << 8) | (raw >> 8)
-                raw_bits = (raw_swapped >> 3) & 0x1FFF
-                voltage_v = raw_bits * 0.004  # LSB = 4 mV
-            except Exception as e:
-                self.get_logger().warn(
-                    f'INA219 I2C read error (smbus): {e}',
-                    throttle_duration_sec=10.0
-                )
-
-        # 2. Fallback to busio.I2C
-        if voltage_v is None and self.i2c_bus is not None:
-            try:
-                if self.i2c_bus.try_lock():
-                    try:
-                        buf = bytearray(2)
-                        self.i2c_bus.writeto_then_readfrom(self.battery_i2c_address, bytes([0x02]), buf)
-                        raw = (buf[0] << 8) | buf[1]
-                        raw_bits = (raw >> 3) & 0x1FFF
-                        voltage_v = raw_bits * 0.004
-                    finally:
-                        self.i2c_bus.unlock()
-            except Exception as e:
-                self.get_logger().warn(
-                    f'INA219 I2C read error (busio): {e}',
-                    throttle_duration_sec=10.0
-                )
-
-        if voltage_v is not None:
-            # Calculate charge percentage (0.0 - 1.0)
-            span = max(self.battery_max_v - self.battery_min_v, 0.1)
-            pct = max(0.0, min(1.0, (voltage_v - self.battery_min_v) / span))
-
-            msg = BatteryState()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = self.frame_id
-            msg.present = True
-            msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LIPO
-            msg.power_supply_status = BatteryState.POWER_SUPPLY_STATUS_DISCHARGING
-            msg.voltage = float(round(voltage_v, 2))
-            msg.percentage = float(round(pct, 2))
-
-            if voltage_v <= self.battery_min_v:
-                msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_DEAD
-            elif voltage_v <= self.battery_low_warn_v:
-                msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_UNKNOWN
-            else:
-                msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
-
-            self.battery_pub.publish(msg)
-
-            # Warning log on low battery (throttled every 15s)
-            curr_time = time.time()
-            if voltage_v <= self.battery_low_warn_v and (curr_time - self._last_battery_warn_time > 15.0):
-                self.get_logger().warn(
-                    f'⚠️ LOW BATTERY WARNING: {voltage_v:.2f}V ({int(pct*100)}%). Recharge recommended!'
-                )
-                self._last_battery_warn_time = curr_time
+        self._last_reinit_attempt_time = time.monotonic()
 
     def _publish_imu_data(self):
         """Timer callback reading sensor, publishing ROS 2 IMU messages and TF."""
         if self.sensor is None:
+            now_m = time.monotonic()
+            if (now_m - self._last_reinit_attempt_time) >= 5.0:
+                self._last_reinit_attempt_time = now_m
+                self._init_sensor()
             return
 
         now = self.get_clock().now()
@@ -467,13 +363,15 @@ class BNO08xNode(Node):
         msg.linear_acceleration_covariance = self.linear_acceleration_covariance
 
         try:
-            if self.use_game_rotation:
-                quat_raw = self.sensor.game_quaternion
-            else:
-                quat_raw = self.sensor.quaternion
+            # Atomic cross-process lock keeps INA219 (system_info_node) from interleaving SHTP packets
+            with i2c_bus_lock(1):
+                if self.use_game_rotation:
+                    quat_raw = self.sensor.game_quaternion
+                else:
+                    quat_raw = self.sensor.quaternion
 
-            gyro_raw = self.sensor.gyro
-            accel_raw = self.sensor.acceleration
+                gyro_raw = self.sensor.gyro
+                accel_raw = self.sensor.acceleration
 
             if quat_raw is None:
                 return
@@ -545,20 +443,38 @@ class BNO08xNode(Node):
                 self.tf_broadcaster.sendTransform(t)
 
             self.consecutive_errors = 0
+            self.consecutive_i2c_errors = 0
 
         except (RuntimeError, OSError, ValueError, KeyError) as e:
             self.consecutive_errors += 1
             err_str = str(e)
+            if isinstance(e, OSError):
+                self.consecutive_i2c_errors += 1
+                now_m = time.monotonic()
+                if self.consecutive_i2c_errors >= 5 and (now_m - self._last_bus_recovery_time) >= 8.0:
+                    self._last_bus_recovery_time = now_m
+                    self.consecutive_i2c_errors = 0
+                    self.get_logger().warn(
+                        f'Repeated BNO08x I2C OSError ({e}) — attempting automatic I2C1 bus recovery & re-init...'
+                    )
+                    with i2c_bus_lock(1):
+                        ok_rec, rec_detail = recover_i2c1_bus(reset_pin=self.reset_pin)
+                    self.get_logger().warn(f'I2C1 auto-recovery: {rec_detail} (ok={ok_rec})')
+                    self.sensor = None
+                    self._init_sensor()
+                    return
+
             # Self-healing: if the BNO08x finished soft-reset after the initial enable_feature
             # packet or reset mid-run, automatically re-send SET_FEATURE_COMMAND (0xFD)
             if "report found, is it enabled" in err_str and self.sensor is not None:
                 if self.consecutive_errors in (5, 25, 50) or (self.consecutive_errors % 50 == 25):
                     try:
-                        self._drain_packets(max_packets=8, delay_s=0.005)
-                        feat = BNO_REPORT_GAME_ROTATION_VECTOR if self.use_game_rotation else BNO_REPORT_ROTATION_VECTOR
-                        self.sensor.enable_feature(feat)
-                        self.sensor.enable_feature(BNO_REPORT_GYROSCOPE)
-                        self.sensor.enable_feature(BNO_REPORT_ACCELEROMETER)
+                        with i2c_bus_lock(1):
+                            self._drain_packets(max_packets=8, delay_s=0.005)
+                            feat = BNO_REPORT_GAME_ROTATION_VECTOR if self.use_game_rotation else BNO_REPORT_ROTATION_VECTOR
+                            self.sensor.enable_feature(feat)
+                            self.sensor.enable_feature(BNO_REPORT_GYROSCOPE)
+                            self.sensor.enable_feature(BNO_REPORT_ACCELEROMETER)
                     except Exception:
                         pass
             if self.consecutive_errors % 50 == 1 and self.consecutive_errors > 1:
@@ -572,12 +488,14 @@ def main(args=None):
     node = BNO08xNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

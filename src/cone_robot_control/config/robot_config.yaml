@@ -27,18 +27,11 @@ mdd10_motor_controller:
 bno08x_node:
   ros__parameters:
     i2c_address: 74            # 0x4A in decimal
+    reset_pin: -1              # Optional: connect BNO08x RST to GPIO 17 (Pin 11) and set 17 for instant auto-recovery
     frame_id: "imu_link"       # IMU TF frame
     publish_rate_hz: 50.0      # Output publication frequency (Hz)
     mount_flipped: true        # Sensor mounted upside down (right-multiplies 180-deg roll)
     use_game_rotation: true    # 6-DOF fused orientation (immune to motor magnetic noise)
-
-    # --- INA219 Battery Monitor Settings (Shares I2C Bus, 0 MB Extra RAM) ---
-    enable_battery_monitor: true   # Enable 0-RAM battery monitor on shared I2C bus
-    battery_i2c_address: 64        # 0x40 in decimal (default CJMCU-219 / INA219 address)
-    battery_publish_rate_hz: 1.0   # 1 Hz battery update (ultra-low bus load)
-    battery_min_v: 10.5            # 3S LiPo cutoff voltage (3.5V / cell)
-    battery_max_v: 12.6            # 3S LiPo 100% full voltage (4.2V / cell)
-    battery_low_warn_v: 11.1       # 3S LiPo warning threshold (3.7V / cell)
 
 # 3. Waveshare LC29H(DA) GPS/RTK & NTRIP Rover Settings
 lc29h_gps_node:
@@ -89,3 +82,18 @@ primitive_motion_controller:
     turn_settle_time_s: 0.15          # Standstill verification duration at target (seconds)
     distance_tolerance_m: 0.03        # Precision distance completion tolerance (3 cm)
     stuck_detect_time_s: 2.5          # Stall watchdog abort timeout (seconds)
+
+# 5. Pi 5 System Info, Wi-Fi Link & INA219 Voltage-Only LiPo Battery Monitor
+system_info_node:
+  ros__parameters:
+    publish_rate_hz: 0.5              # Host CPU/RAM/Temp/Wi-Fi update rate (Hz)
+    enable_battery_monitor: true      # INA219 Bus Voltage monitor on /dev/i2c-1
+    battery_i2c_bus: 1                # Pi 5 I2C bus 1 (kernel-locked alongside IMU)
+    battery_i2c_address: 64           # 0x40 in decimal (default CJMCU-219 / INA219)
+    battery_publish_rate_hz: 1.0      # 1 Hz /battery_state publication
+    battery_cell_count: 3             # 3S LiPo (uses 21-point real LiPo SoC curve)
+    battery_ema_alpha: 0.15           # ~10-12s EMA smoothing to filter motor load sag
+    battery_min_v: 10.5               # 3S LiPo cutoff voltage (3.50V / cell -> 0%)
+    battery_max_v: 12.6               # 3S LiPo full voltage (4.20V / cell -> 100%)
+    battery_low_warn_v: 11.2          # ~20% resting 3S LiPo warning threshold
+    battery_frame_id: "base_link"

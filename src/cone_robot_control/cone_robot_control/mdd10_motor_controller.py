@@ -16,6 +16,7 @@ Hardware Configuration (Cytron MDD10 Rev 2.0 in PWM + DIR mode — Grouped on Pi
 import math
 import os
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import BatteryState
@@ -228,12 +229,15 @@ def main(args=None):
     node = MDD10MotorController()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        node.get_logger().info("Shutting down motor controller node.")
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        node.stop_motors()
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

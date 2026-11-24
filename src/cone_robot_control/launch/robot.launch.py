@@ -156,7 +156,7 @@ def launch_setup(context, *args, **kwargs):
             print("  Or from source: git clone https://github.com/MAPIRlab/rf2o_laser_odometry.git src/rf2o_laser_odometry")
             print("=" * 75 + "\n")
 
-    # 6. Pi 5 System Info & Wi-Fi Link Monitor Node (/robot/system_info)
+    # 6. Pi 5 System Info, Wi-Fi Link & INA219 Battery Monitor Node
     if launch_sysinfo_val:
         nodes_to_launch.append(
             Node(
@@ -164,7 +164,7 @@ def launch_setup(context, *args, **kwargs):
                 executable='system_info_node',
                 name='system_info_node',
                 output='screen',
-                parameters=[{'publish_rate_hz': 0.5}]
+                parameters=[config_file]
             )
         )
 
