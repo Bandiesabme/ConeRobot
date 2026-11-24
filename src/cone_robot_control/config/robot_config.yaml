@@ -21,7 +21,7 @@ mdd10_motor_controller:
     left_motor_trim: 1.00      # Left track speed multiplier (adjust e.g. 0.98 or 1.02 if needed)
     right_motor_trim: 1.00     # Right track speed multiplier
     nominal_battery_v: 12.0    # Reference 3S LiPo voltage for automatic PWM compensation
-    cmd_timeout: 0.5           # Safety watchdog timeout (seconds)
+    cmd_timeout: 0.75          # Safety watchdog timeout (seconds; avoids false stops on brief Wi-Fi jitter)
 
 # 2. BNO08x IMU Sensor Settings (MikroE Click / I2C)
 bno08x_node:

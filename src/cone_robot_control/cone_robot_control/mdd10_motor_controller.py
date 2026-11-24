@@ -50,7 +50,7 @@ class MDD10MotorController(Node):
         self.declare_parameter('left_motor_trim', 1.00)    # Left channel calibration multiplier
         self.declare_parameter('right_motor_trim', 1.00)   # Right channel calibration multiplier
         self.declare_parameter('nominal_battery_v', 12.0)  # Reference voltage for battery compensation
-        self.declare_parameter('cmd_timeout', 0.5)         # Fail-safe timeout in seconds
+        self.declare_parameter('cmd_timeout', 0.75)        # Fail-safe timeout in seconds (tolerates brief Wi-Fi jitter)
 
         # Read parameters
         self.pwm1_pin = int(self.get_parameter('pwm1_pin').value)
@@ -69,6 +69,8 @@ class MDD10MotorController(Node):
 
         self.measured_battery_v = self.nominal_battery_v
         self.last_cmd_time = self.get_clock().now()
+        self._last_left_duty = None
+        self._last_right_duty = None
 
         # --- Hardware Initialization ---
         self.pwm_left = None
@@ -158,28 +160,51 @@ class MDD10MotorController(Node):
     def set_motor_speeds(self, left_duty: float, right_duty: float):
         """
         Sets speed and direction for left and right channels of Cytron MDD10.
+        Skips redundant lgpio.tx_pwm() writes when duty is unchanged to prevent
+        software-PWM phase glitches/stutters at low speeds during continuous teleop.
         :param left_duty:  float between -1.0 (full reverse) and 1.0 (full forward)
         :param right_duty: float between -1.0 (full reverse) and 1.0 (full forward)
         """
-        dir_left_val = left_duty >= 0
-        speed_left_val = abs(left_duty)
-
-        dir_right_val = right_duty >= 0
-        speed_right_val = abs(right_duty)
-
         if self.dir_left is None or self.pwm_left is None or self.dir_right is None or self.pwm_right is None:
             return
 
-        self.dir_left.value = dir_left_val
-        self.dir_right.value = dir_right_val
+        left_changed = (
+            self._last_left_duty is None
+            or (left_duty == 0.0 and self._last_left_duty != 0.0)
+            or (left_duty != 0.0 and self._last_left_duty == 0.0)
+            or (left_duty * self._last_left_duty < 0.0)
+            or abs(left_duty - self._last_left_duty) >= 0.002
+        )
+        right_changed = (
+            self._last_right_duty is None
+            or (right_duty == 0.0 and self._last_right_duty != 0.0)
+            or (right_duty != 0.0 and self._last_right_duty == 0.0)
+            or (right_duty * self._last_right_duty < 0.0)
+            or abs(right_duty - self._last_right_duty) >= 0.002
+        )
 
-        self.pwm_left.value = speed_left_val
-        self.pwm_right.value = speed_right_val
+        if left_changed:
+            self.dir_left.value = (left_duty >= 0.0)
+            self.pwm_left.value = abs(left_duty)
+            self._last_left_duty = left_duty
+
+        if right_changed:
+            self.dir_right.value = (right_duty >= 0.0)
+            self.pwm_right.value = abs(right_duty)
+            self._last_right_duty = right_duty
 
     def watchdog_callback(self):
         """Emergency fail-safe: stops motors if no velocity command received recently."""
         elapsed = (self.get_clock().now() - self.last_cmd_time).nanoseconds / 1e9
         if elapsed > self.cmd_timeout:
+            was_running = bool(
+                (self._last_left_duty and abs(self._last_left_duty) > 0.0)
+                or (self._last_right_duty and abs(self._last_right_duty) > 0.0)
+            )
+            if was_running:
+                self.get_logger().warn(
+                    f"Motor watchdog stop: no /cmd_vel for {elapsed:.2f}s (timeout={self.cmd_timeout:.2f}s)"
+                )
             self.set_motor_speeds(0.0, 0.0)
 
     def stop_motors(self):

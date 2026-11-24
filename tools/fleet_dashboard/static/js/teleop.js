@@ -80,8 +80,8 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchFleetAndSync();
   setInterval(fetchFleetAndSync, 4000);
 
-  // 15 Hz command publish loop (well inside MDD10's 500 ms safety watchdog)
-  setInterval(teleopControlTick, 66);
+  // 20 Hz command publish loop (50 ms interval — smooth margin inside MDD10 watchdog)
+  setInterval(teleopControlTick, 50);
 
   // 10 Hz telemetry & radar UI refresh
   setInterval(renderTeleopUI, 100);
@@ -351,9 +351,11 @@ function computeTargetTwist() {
   };
 }
 
-function sendTwist(robotId, linearX, angularZ) {
+function sendTwist(robotId, linearX, angularZ, force = false) {
   const ws = activeWebSockets[robotId];
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  // Avoid piling up stale Twist frames in the TCP send buffer during a brief Wi-Fi hiccup
+  if (!force && ws.bufferedAmount > 256) return false;
   try {
     ws.send(encodeTwistCDR(TELEOP_CHANNELS.CMD_VEL, linearX, angularZ));
     return true;
@@ -364,8 +366,8 @@ function sendTwist(robotId, linearX, angularZ) {
 
 function sendZeroTwist(robotId) {
   if (!robotId) return;
-  sendTwist(robotId, 0.0, 0.0);
-  setTimeout(() => sendTwist(robotId, 0.0, 0.0), 40);
+  sendTwist(robotId, 0.0, 0.0, true);
+  setTimeout(() => sendTwist(robotId, 0.0, 0.0, true), 40);
 }
 
 function triggerManualEstop(logMsg = true) {
@@ -412,8 +414,10 @@ function teleopControlTick() {
   }
 
   if (isDriving) {
-    // First manual input after connecting/switching cancels any autonomous waypoint
-    if (!cancelledMissionOnTakeover) {
+    // Only cancel /cmd_primitive if an autonomous waypoint is actually running
+    // (sending /cmd_primitive 0 when already IDLE makes the motion controller echo a 0 /cmd_vel stutter)
+    const sel = realTelemetry[activeRobotId];
+    if (!cancelledMissionOnTakeover && sel && sel.motion && sel.motion.state === 'Moving') {
       cancelledMissionOnTakeover = true;
       try {
         activeWebSockets[activeRobotId].send(encodeVector3CDR(TELEOP_CHANNELS.CMD_PRIMITIVE, 0.0, 0.0, 0.0));
@@ -421,7 +425,7 @@ function teleopControlTick() {
     }
     sendTwist(activeRobotId, linear, angular);
     wasMoving = true;
-    if (txEl) txEl.textContent = '15 Hz TX';
+    if (txEl) txEl.textContent = '20 Hz TX';
   } else {
     if (wasMoving) {
       sendZeroTwist(activeRobotId);
@@ -521,11 +525,12 @@ function bindKeyboardAndPointerControls() {
   });
   window.addEventListener('beforeunload', releaseAllSafe);
 
-  // On-screen WASD hold buttons (Mouse & Touch)
+  // On-screen WASD hold buttons (Mouse & Touch with pointer capture to prevent slip-stops)
   document.querySelectorAll('.drive-key[data-dir]').forEach(btn => {
     const dir = btn.getAttribute('data-dir');
     const onPress = (e) => {
       e.preventDefault();
+      try { btn.setPointerCapture(e.pointerId); } catch (err) {}
       pressedDirs.add(dir);
       updateKeyHighlights();
     };
@@ -536,8 +541,8 @@ function bindKeyboardAndPointerControls() {
     };
     btn.addEventListener('pointerdown', onPress);
     btn.addEventListener('pointerup', onRelease);
-    btn.addEventListener('pointerleave', onRelease);
     btn.addEventListener('pointercancel', onRelease);
+    btn.addEventListener('lostpointercapture', onRelease);
   });
 }
 
