@@ -229,7 +229,6 @@ def scan_network_job():
                             continue  # Prevent duplicate cards
 
                         # Extract numeric robot ID from hostname if present
-                        import re
                         match = re.search(r'(\d+)', h)
                         if match and 1 <= int(match.group(1)) <= 13:
                             slot_id = int(match.group(1))
@@ -592,7 +591,6 @@ class FleetDashboardHandler(SimpleHTTPRequestHandler):
         # API: Query Base Station Caster (port 8080)
         if parsed.path == "/api/base_status":
             import urllib.request
-            from urllib.parse import parse_qs
             query = parse_qs(parsed.query)
             target_host = query.get("host", [None])[0]
             port = query.get("port", ["8080"])[0]
