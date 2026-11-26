@@ -68,12 +68,12 @@ def _open_rp1_gpiochip():
     return lgpio, lgpio.gpiochip_open(0)
 
 
-def read_i2c1_sda_level() -> Optional[int]:
-    """Returns current logic level (0 or 1) of Pi 5 GPIO 2 (SDA1), or None if unavailable."""
+def read_i2c1_sda_level(sda_pin: int = 23) -> Optional[int]:
+    """Returns current logic level (0 or 1) of Pi 5 SDA line (default GPIO 23, fallback GPIO 2), or None."""
     try:
         lgpio, h = _open_rp1_gpiochip()
         try:
-            return int(lgpio.gpio_read(h, 2))
+            return int(lgpio.gpio_read(h, int(sda_pin)))
         finally:
             lgpio.gpiochip_close(h)
     except Exception:
@@ -104,16 +104,19 @@ def pulse_reset_pin(reset_pin: int, low_ms: int = 25, settle_ms: int = 150) -> b
         return False
 
 
-def clear_i2c1_bus_pinctrl(max_clocks: int = 16) -> Tuple[bool, str]:
+def clear_i2c1_bus_pinctrl(sda_pin: int = 23, scl_pin: int = 24, max_clocks: int = 16) -> Tuple[bool, str]:
     """
-    Open-drain safe I2C1 bus clear (UM10204 §3.1.16) using Raspberry Pi's `pinctrl`:
-      - Toggles GPIO 3 (SCL1) between drive-LOW (`op dl`) and pull-up release (`ip pu`)
-        up to `max_clocks` times until GPIO 2 (SDA1) releases to HIGH.
-      - Generates a STOP condition, then ALWAYS restores GPIO 2 & 3 to `a3 pu` (I2C1).
+    Open-drain safe I2C bus clear (UM10204 §3.1.16) using Raspberry Pi's `pinctrl`:
+      - Toggles SCL between drive-LOW (`op dl`) and pull-up release (`ip pu`)
+        up to `max_clocks` times until SDA releases to HIGH.
+      - Generates a STOP condition, then releases lines back to input with pull-up.
     """
     pinctrl_bin = shutil.which("pinctrl")
     if not pinctrl_bin:
         return False, "pinctrl not installed (install with: sudo apt install -y raspi-utils)"
+
+    sda_str = str(sda_pin)
+    scl_str = str(scl_pin)
 
     def _run(*args):
         return subprocess.run(
@@ -124,30 +127,30 @@ def clear_i2c1_bus_pinctrl(max_clocks: int = 16) -> Tuple[bool, str]:
         )
 
     def _sda_is_high() -> bool:
-        res = _run("get", "2")
+        res = _run("get", sda_str)
         return "| hi" in (res.stdout or "")
 
     try:
         # Release SDA as input with pull-up and clock SCL open-drain until SDA returns HIGH
-        _run("set", "2", "ip", "pu")
+        _run("set", sda_str, "ip", "pu")
         clocks_sent = 0
         for _ in range(max_clocks):
             if _sda_is_high():
                 break
-            _run("set", "3", "op", "dl")
+            _run("set", scl_str, "op", "dl")
             time.sleep(0.0005)
-            _run("set", "3", "ip", "pu")
+            _run("set", scl_str, "ip", "pu")
             time.sleep(0.0005)
             clocks_sent += 1
 
         # Send I2C STOP condition: SCL low -> SDA low -> SCL high -> SDA high
-        _run("set", "3", "op", "dl")
+        _run("set", scl_str, "op", "dl")
         time.sleep(0.0005)
-        _run("set", "2", "op", "dl")
+        _run("set", sda_str, "op", "dl")
         time.sleep(0.0005)
-        _run("set", "3", "ip", "pu")
+        _run("set", scl_str, "ip", "pu")
         time.sleep(0.0005)
-        _run("set", "2", "ip", "pu")
+        _run("set", sda_str, "ip", "pu")
         time.sleep(0.001)
 
         sda_ok = _sda_is_high()
@@ -155,17 +158,16 @@ def clear_i2c1_bus_pinctrl(max_clocks: int = 16) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"pinctrl recovery error: {e}"
     finally:
-        # ALWAYS restore Pi 5 RP1 GPIO 2 & 3 back to hardware I2C1 alt function (a3 pu)
         try:
-            _run("set", "2", "a3", "pu")
-            _run("set", "3", "a3", "pu")
+            _run("set", sda_str, "ip", "pu")
+            _run("set", scl_str, "ip", "pu")
         except Exception:
             pass
 
 
-def recover_i2c1_bus(reset_pin: int = -1) -> Tuple[bool, str]:
+def recover_i2c1_bus(reset_pin: int = -1, sda_pin: int = 23, scl_pin: int = 24) -> Tuple[bool, str]:
     """
-    Attempts automatic non-reboot recovery of a stuck I2C1 bus (SDA=0):
+    Attempts automatic non-reboot recovery of a stuck I2C bus (SDA=0):
       1. Pulses hardware RST GPIO if configured (`reset_pin >= 0`).
       2. Runs open-drain `pinctrl` SCL clock-clear if SDA is still LOW.
     """
@@ -173,21 +175,21 @@ def recover_i2c1_bus(reset_pin: int = -1) -> Tuple[bool, str]:
 
     if reset_pin is not None and int(reset_pin) >= 0:
         if pulse_reset_pin(int(reset_pin)):
-            sda = read_i2c1_sda_level()
+            sda = read_i2c1_sda_level(sda_pin=sda_pin)
             notes.append(f"RST GPIO{int(reset_pin)} pulsed (SDA={sda})")
             if sda == 1:
                 return True, "; ".join(notes)
         else:
             notes.append(f"RST GPIO{int(reset_pin)} pulse failed")
 
-    sda_before = read_i2c1_sda_level()
+    sda_before = read_i2c1_sda_level(sda_pin=sda_pin)
     if sda_before == 1:
         return True, "; ".join(notes) if notes else "SDA already HIGH"
 
-    ok, detail = clear_i2c1_bus_pinctrl()
+    ok, detail = clear_i2c1_bus_pinctrl(sda_pin=sda_pin, scl_pin=scl_pin)
     notes.append(detail)
     if ok:
         return True, "; ".join(notes)
 
-    sda_after = read_i2c1_sda_level()
+    sda_after = read_i2c1_sda_level(sda_pin=sda_pin)
     return (sda_after == 1), "; ".join(notes)
